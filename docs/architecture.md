@@ -44,6 +44,8 @@ src/library/            sync and full scan, songs kept ready, the daily message,
   categories.ts         holiday and other category lists (learning the site's category ids)
   category-list.ts      which categories, and the words that ask for them
   follows.ts            following artists, and following them for you after three of their songs
+  naming.ts             each song's name and place: Artist/Album/01 Title.mp3, and "Artist - Title.mp3" when sent
+  id3.ts                the tags inside an MP3 (ID3v2.3): written to match, the audio untouched, no dependencies
   seasons.ts            Chanukah, Purim, Sefirah and the Three Weeks, from the Jewish calendar
 src/matrix/             Matrix client, and joining a pasted multi-line command for the console
 src/beeper/             Beeper Desktop API client

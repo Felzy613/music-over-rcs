@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { artistKey, splitArtists } from './artists.ts';
 import { parseQuery } from './query.ts';
 import { allowedEdits, correctableEdits, editDistance } from './sources/relevance.ts';
+import type { SongFacts } from './library/naming.ts';
 import type { ChoiceStore, MessageLinks, PendingChoices } from './runner.ts';
 import type { Track } from './types.ts';
 
@@ -61,13 +62,17 @@ export interface SitePost {
 /** A song file kept on disk so it can be sent without downloading it first. */
 export interface CachedAudio {
   url: string;
-  /** The file's name inside the cache folder. */
+  /** Where the file is: a path inside the folder on this Mac ("Artist/Album/01 Title.mp3"), or a full path on the drive. */
   file: string;
   fileName: string;
   mimeType: string;
   bytes: number;
   fetchedAt: string;
   usedAt: string;
+  /** Where on the drive an earlier copy of this song is (one downloaded again while the drive was away). */
+  replaces?: string | undefined;
+  /** The tags written into the file, as written (so they're written again only when they change). */
+  tags?: string | undefined;
 }
 
 const SCHEMA = `
@@ -180,6 +185,8 @@ const toCachedAudio = (row: Record<string, unknown>): CachedAudio => ({
   bytes: Number(row.bytes) || 0,
   fetchedAt: String(row.fetched_at),
   usedAt: String(row.used_at),
+  ...(typeof row.replaces === 'string' && row.replaces ? { replaces: row.replaces } : {}),
+  ...(typeof row.tags === 'string' && row.tags ? { tags: row.tags } : {}),
 });
 
 /** The song database: one row per audio URL, searchable by title and artist. */
@@ -203,6 +210,9 @@ export class Catalog {
     const postColumns = this.#db.prepare('PRAGMA table_info(site_posts)').all().map((column) => String(column.name));
     if (!postColumns.includes('category_ids')) this.#db.exec('ALTER TABLE site_posts ADD COLUMN category_ids TEXT');
     if (!postColumns.includes('alerted_at')) this.#db.exec('ALTER TABLE site_posts ADD COLUMN alerted_at TEXT');
+    const cacheColumns = this.#db.prepare('PRAGMA table_info(audio_cache)').all().map((column) => String(column.name));
+    if (!cacheColumns.includes('replaces')) this.#db.exec('ALTER TABLE audio_cache ADD COLUMN replaces TEXT');
+    if (!cacheColumns.includes('tags')) this.#db.exec('ALTER TABLE audio_cache ADD COLUMN tags TEXT');
     // Songs that came before artists were kept get theirs now.
     const linked = Number(this.#db.prepare('SELECT count(*) AS n FROM artist_tracks').get()?.n);
     if (linked === 0) {
@@ -460,6 +470,30 @@ export class Catalog {
     );
   }
 
+  /** What names a song's file: its credit and title, and the post (an album, when it has several songs) it's from. */
+  songFacts(url: string): SongFacts | undefined {
+    const row = this.#db
+      .prepare(
+        `SELECT t.title, t.artist, t.url, t.post, t.cover, t.released_at, p.title AS post_title, p.category, p.cover AS post_cover, p.published_at,
+           max(coalesce(p.audio_files, 0), (SELECT count(*) FROM tracks other WHERE other.post = t.post)) AS songs
+         FROM tracks t LEFT JOIN site_posts p ON p.slug = t.post WHERE t.url = ?`,
+      )
+      .get(url);
+    if (!row) return undefined;
+    const slug = typeof row.post === 'string' && row.post ? row.post : undefined;
+    const text = (...values: unknown[]) => values.find((value): value is string => typeof value === 'string' && value !== '');
+    const releasedAt = text(row.released_at, row.published_at);
+    const cover = text(row.cover, row.post_cover);
+    return {
+      title: String(row.title),
+      artist: String(row.artist),
+      url: String(row.url),
+      ...(releasedAt ? { releasedAt } : {}),
+      ...(cover ? { cover } : {}),
+      ...(slug ? { post: { slug, title: String(row.post_title ?? ''), songs: Number(row.songs) || 1, category: String(row.category ?? '') } } : {}),
+    };
+  }
+
   /** The songs of one post, in the post's order. */
   postTracks(slug: string): Track[] {
     return this.#db
@@ -643,11 +677,12 @@ export class Catalog {
   saveCachedAudio(entry: CachedAudio): void {
     this.#db
       .prepare(
-        `INSERT INTO audio_cache (url, file, file_name, mime_type, bytes, fetched_at, used_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO audio_cache (url, file, file_name, mime_type, bytes, fetched_at, used_at, replaces, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (url) DO UPDATE SET file = excluded.file, file_name = excluded.file_name, mime_type = excluded.mime_type,
-           bytes = excluded.bytes, fetched_at = excluded.fetched_at, used_at = excluded.used_at`,
+           bytes = excluded.bytes, fetched_at = excluded.fetched_at, used_at = excluded.used_at, replaces = excluded.replaces,
+           tags = excluded.tags`,
       )
-      .run(entry.url, entry.file, entry.fileName, entry.mimeType, entry.bytes, entry.fetchedAt, entry.usedAt);
+      .run(entry.url, entry.file, entry.fileName, entry.mimeType, entry.bytes, entry.fetchedAt, entry.usedAt, entry.replaces ?? null, entry.tags ?? null);
   }
 
   touchCachedAudio(url: string, at: Date = new Date()): void {

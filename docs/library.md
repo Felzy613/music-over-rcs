@@ -35,13 +35,34 @@ Page links (a video site's watch page, say) are refused on purpose. `check` test
 
 ## Songs kept ready
 
-Songs are kept on disk, in an `audio-cache` folder beside the catalog, so they're sent without downloading:
+Songs are kept on disk, in an `audio-cache` folder beside the catalog (sorted as below), so they're sent without downloading:
 
 - **your most played songs** (from the plays above),
 - **the five newest releases**, and
 - **the month's most viewed songs** on the site, to fill the rest (25 songs at most).
 
 They're downloaded after each sync, and once when the bot starts, one at a time with a pause between them. Every song you get is kept too, and a kept song is sent without asking the site anything.
+
+### Named and sorted
+
+Every song is kept the way you'd file it yourself, by artist, then album:
+
+```
+Ishay Ribo/Singles/Derech (feat. Zusha).mp3
+Yumi Gelb/Elul Collection (Live)/01 Elul Live Kumzitz (feat. Meilech Braunstein).mp3
+Weddings & Events/May 31 '26/04 Chuppa 1.mp3
+```
+
+- **The artist's folder is the main artist**; guests ("ft. …") go in the song's name instead, so a guest appearance doesn't make a folder of its own. A duet ("A & B", "A x B") is the artist.
+- **A post with several songs is an album**, named after the post (without "(Full Album)"); its songs are numbered by the number in their name, or else by their place on the post. A song on its own goes in the artist's `Singles` folder.
+- **No artist:** a wedding's recording (a post named by its date) goes under `Weddings & Events`, a compilation under `Various Artists`, anything else under `Unknown Artist`.
+- **Tidy names:** underscores become spaces, "(Official Music Video)" and the like are dropped, and characters a disk won't take (`/ : ? * " < > |`) are replaced, so the folders work on a Mac and on a drive formatted for Windows. `(2)` is added when two songs would share a name.
+- **The file that's sent is named the same way**, with the artist in front: `Ishay Ribo - Derech (feat. Zusha).mp3`, `Yumi Gelb - 01 Elul Live Kumzitz (….mp3`.
+- **Songs kept before this**, or whose name changes later (a corrected title on the site, say), are moved into place within a minute, on the Mac and on the drive. Folders left empty by a move are removed.
+
+**The tags inside each MP3 match**, so a music app (Apple Music, Finder, Windows) shows the same artist, album, number and title: the main artist as artist and album artist, the album with the song's number on it (`3/8`), a single as its own album (`Derech (feat. Zusha) - Single`), and the year it came out. What the upload had (a video's title, its channel, "People & Blogs") is replaced; its picture is kept, and a song with none gets the site's cover. The audio itself is never changed. Songs are tagged as they're kept, so the file sent to your phone has them too; songs kept before are tagged within a minute. Tags you edit yourself are left alone, unless the song's name changes on the site.
+
+The names and tags come from the catalog (the post's title and its songs), not from the tags the files came with, which on this site are often a video's title.
 
 **Nothing is ever removed: there's no size limit.** At the site's pace (about 50 new releases a month, 20 MB a song on average) the songs grow by roughly 1 to 1.5 GB a month, plus the songs you ask for. `npm run library -- status` shows how many and where. If you'd rather cap the folder on the Mac, set `PREFETCH_MB` to a number of MB: then, when it's full, the songs used least recently go first, never the ones above. `PREFETCH_MB=0` keeps none.
 
@@ -54,10 +75,10 @@ SONGS_ARCHIVE_DIR="/Volumes/Music Drive/Music/Music over RCS"
 ```
 
 - **Songs always download to the Mac first**, so a request never waits on the drive and never fails because of it.
-- **Every minute, when the drive is connected, the songs on the Mac move to it**, named the way you'd name them yourself: `Yoely Weiss — Shabbos.mp3` (`(2)` when two songs share a name). Each is copied, checked, and recorded at its new place before it's removed from the Mac. From then on it's sent from the drive. (A spinning drive that has gone to sleep adds a couple of seconds.)
+- **Every minute, when the drive is connected, the songs on the Mac move to it**, into the same artist and album folders. Each is copied, checked, and recorded at its new place before it's removed from the Mac. From then on it's sent from the drive. (A spinning drive that has gone to sleep adds a couple of seconds.)
 - **While the drive is unplugged** the bot works as before: a song that's on the drive is downloaded again when you ask for it, and new songs wait on the Mac until the drive is back. A song downloaded again replaces its old copy on the drive rather than making a second one.
 - **Only the last folder is made** (`Music over RCS` above), and only when the folder it goes in is there, so nothing is ever created where an unplugged drive would be.
-- **Nothing on the drive is ever deleted**, and a song changed there (its tags edited in a music app, say) is sent as it is now.
+- **Nothing on the drive is ever deleted or written over**, except a song's own earlier copy: a file the bot didn't put there (one of yours, if the folder is in your music library) is left alone, and the song gets `(2)`. A song changed there (its tags edited in a music app, say) is sent as it is now.
 - If the drive has been away for a day with songs waiting, or macOS won't let the bot use the folder, you get a Mac notification. When this Mac's disk gets down to 5 GB free, new songs are still sent but not kept.
 
 ## The daily new-music message

@@ -7,6 +7,7 @@ import { loadMatrixConfig, parseArchiveDir, parsePrefetchMb } from '../src/confi
 import { createPictures } from '../src/library/images.ts';
 import { AudioCache } from '../src/library/audio-cache.ts';
 import { LibraryJobs, localDay, parseDailyTime, STATE } from '../src/library/jobs.ts';
+import { catalogNaming } from '../src/library/naming.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
 import { createRunner, markBotText } from '../src/runner.ts';
 import { musicTableFromEnv, resolvingAudio } from '../src/sources/music-table.ts';
@@ -63,6 +64,8 @@ const cache =
         dir: join(dirname(resolve(dbPath)), 'audio-cache'),
         archiveDir,
         index: catalog,
+        placeOf: catalogNaming(catalog).placeOf,
+        tagsOf: catalogNaming(catalog).tagsOf,
         maxBytes: limited ? prefetchMb * 1024 * 1024 : undefined,
         minFreeBytes: 5 * 1024 ** 3,
       })

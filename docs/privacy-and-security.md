@@ -9,7 +9,7 @@ Everything runs locally and listens on `127.0.0.1` only: the homeserver, the bri
 | `~/Library/Application Support/music-over-rcs/gmessages/` | The bridge's config, its database and your **Google Messages session**, and every bridged conversation's metadata | **High**: the session is as good as a login |
 | `.../synapse/` | The homeserver's database: **copies of the messages in every bridged chat**, your account, signing key | **High** |
 | `.../catalog.db` | Songs, artists, site posts, your plays, the artists you follow, the bot's state | Low (your listening history) |
-| `.../audio-cache/` | Downloaded songs (until they move to `SONGS_ARCHIVE_DIR`, if set) | Low |
+| `.../audio-cache/` | Downloaded songs, in artist and album folders (until they move to `SONGS_ARCHIVE_DIR`, if set) | Low |
 | `.../logs/` | Service logs | Medium (room ids, and the text of your requests) |
 | `.env` (project folder) | Your Matrix access token, room id, settings | **High**; readable only by you |
 

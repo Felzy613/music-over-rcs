@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
@@ -622,14 +622,14 @@ describe('library: songs kept ready', () => {
     await kept.put('https://x.test/1', { ...song(1), fileName: 'Band — One.mp3' });
     await kept.put('https://x.test/2', { ...song(2), fileName: 'Band — One.mp3' }); // another song by that name
     await kept.put('https://x.test/3', { ...song(3), fileName: 'Band — Three.mp3' });
-    assert.deepEqual(await kept.archive(), { state: 'ok', moved: 3, failed: 0 });
+    assert.deepEqual(await kept.organize(), { state: 'ok', moved: 3, sorted: 0, tagged: 0, failed: 0 });
     assert.deepEqual((await readdir(archiveDir)).sort(), ['Band — One (2).mp3', 'Band — One.mp3', 'Band — Three.mp3']);
     assert.deepEqual(await readdir(join(dir, 'here')), [], 'nothing left on this Mac');
     const back = await kept.get('https://x.test/3');
     assert.deepEqual(Buffer.from(await back!.data.arrayBuffer()), Buffer.alloc(1000, 3));
     assert.equal(back!.fileName, 'Band — Three.mp3');
     assert.deepEqual(kept.where(), { here: { files: 0, bytes: 0 }, archived: { files: 3, bytes: 3000 } });
-    assert.deepEqual(await kept.archive(), { state: 'ok', moved: 0, failed: 0 }, 'nothing more to move');
+    assert.deepEqual(await kept.organize(), { state: 'ok', moved: 0, sorted: 0, tagged: 0, failed: 0 }, 'nothing more to move');
   });
 
   test("while the drive is away songs stay on this Mac, the ones on it are downloaded again, and nothing is made where it'd be", async () => {
@@ -637,12 +637,12 @@ describe('library: songs kept ready', () => {
     const archiveDir = join(drive, 'Music over RCS');
     const kept = new AudioCache({ dir: join(dir, 'here'), archiveDir, index: catalog, now: () => clock });
     await kept.put('https://x.test/1', song(1));
-    assert.deepEqual(await kept.archive(), { state: 'offline', moved: 0, failed: 0 });
+    assert.deepEqual(await kept.organize(), { state: 'offline', moved: 0, sorted: 0, tagged: 0, failed: 0 });
     assert.equal(existsSync(drive), false, 'nothing made where the drive would be');
     assert.ok(await kept.get('https://x.test/1'), 'sent from this Mac meanwhile');
 
     await mkdir(drive);
-    assert.equal((await kept.archive()).moved, 1);
+    assert.equal((await kept.organize()).moved, 1);
     await rename(drive, join(dir, 'unplugged'));
     assert.equal(await kept.get('https://x.test/1'), undefined, 'on the drive that is away: downloaded instead');
     assert.equal(kept.has('https://x.test/1'), true, 'and not forgotten');
@@ -650,7 +650,7 @@ describe('library: songs kept ready', () => {
     // Asked for again while it's away: the fresh copy is kept here, then replaces the one on the drive.
     await kept.put('https://x.test/1', song(1));
     await rename(join(dir, 'unplugged'), drive);
-    assert.equal((await kept.archive()).moved, 1);
+    assert.equal((await kept.organize()).moved, 1);
     assert.deepEqual(await readdir(archiveDir), ['Song 1.mp3'], 'the same file, not a second copy');
     assert.ok(await kept.get('https://x.test/1'));
   });
@@ -660,7 +660,7 @@ describe('library: songs kept ready', () => {
     await mkdir(drive);
     const kept = new AudioCache({ dir: join(dir, 'here'), archiveDir: join(drive, 'songs'), index: catalog, maxFiles: 1, now: () => clock });
     await kept.put('https://x.test/1', song(1));
-    await kept.archive();
+    await kept.organize();
     await kept.put('https://x.test/2', song(2));
     assert.deepEqual(kept.where(), { here: { files: 1, bytes: 1000 }, archived: { files: 1, bytes: 1000 } });
   });
@@ -679,17 +679,95 @@ describe('library: songs kept ready', () => {
       now: () => clock,
       onArchive: (problem) => void told.push(problem),
     });
-    await jobs.archive();
+    await jobs.organize();
     clock = new Date(clock.getTime() + 23 * 60 * 60_000);
-    await jobs.archive();
+    await jobs.organize();
     assert.deepEqual(told, [], 'away for less than a day is normal');
     clock = new Date(clock.getTime() + 2 * 60 * 60_000);
-    await jobs.archive();
+    await jobs.organize();
     assert.match(told.at(-1)!, /has been away for a day; 1 song \(3 MB\) wait on this Mac\. Connect it and they'll move\.$/);
     await mkdir(drive);
-    await jobs.archive();
+    await jobs.organize();
     assert.equal(told.at(-1), undefined, 'back, and moved');
     assert.equal(kept.where().archived.files, 1);
+  });
+
+  describe('sorted by artist and album', () => {
+    const places: Record<string, string> = {
+      'https://x.test/1': 'Band/Singles/One.mp3',
+      'https://x.test/2': 'Band/Album/01 Two.mp3',
+      'https://x.test/3': 'Band/Album/01 Two.mp3', // another song that would have the same name
+    };
+    const placeOf = (url: string) => places[url]!;
+    const sorted = (archiveDir: string) => new AudioCache({ dir: join(dir, 'here'), archiveDir, index: catalog, placeOf, now: () => clock });
+    const flat = (archiveDir: string) => new AudioCache({ dir: join(dir, 'here'), archiveDir, index: catalog, now: () => clock });
+    const named = (n: number, fileName: string) => ({ ...song(n), fileName });
+
+    test('songs are kept in artist and album folders, on this Mac and then on the drive', async () => {
+      const drive = join(dir, 'drive'); // away at first
+      const archiveDir = join(drive, 'Music over RCS');
+      const kept = sorted(archiveDir);
+      for (const n of [1, 2, 3]) await kept.put(`https://x.test/${n}`, song(n));
+      assert.equal(existsSync(join(dir, 'here', 'Band', 'Singles', 'One.mp3')), true);
+      assert.deepEqual((await readdir(join(dir, 'here', 'Band', 'Album'))).sort(), ['01 Two (2).mp3', '01 Two.mp3']);
+
+      await mkdir(drive);
+      assert.deepEqual(await kept.organize(), { state: 'ok', moved: 3, sorted: 0, tagged: 0, failed: 0 });
+      assert.deepEqual((await readdir(join(archiveDir, 'Band'))).sort(), ['Album', 'Singles']);
+      assert.deepEqual((await readdir(join(archiveDir, 'Band', 'Album'))).sort(), ['01 Two (2).mp3', '01 Two.mp3']);
+      assert.deepEqual(await readdir(join(dir, 'here')), [], 'its folders on this Mac are gone too');
+      assert.deepEqual(Buffer.from(await (await kept.get('https://x.test/3'))!.data.arrayBuffer()), Buffer.alloc(1000, 3));
+      assert.deepEqual(await kept.organize(), { state: 'ok', moved: 0, sorted: 0, tagged: 0, failed: 0 }, 'all in place');
+    });
+
+    test('songs kept before they were sorted move into their places, on this Mac and on the drive', async () => {
+      const drive = join(dir, 'drive');
+      const archiveDir = join(drive, 'Music over RCS');
+      await mkdir(drive);
+      const before = flat(archiveDir);
+      await before.put('https://x.test/1', named(1, 'Band — One.mp3'));
+      await before.organize(); // on the drive, in no folder
+      await rename(drive, join(dir, 'unplugged'));
+      await before.put('https://x.test/2', named(2, 'Band — Two.mp3')); // on this Mac, in no folder
+
+      const kept = sorted(archiveDir);
+      assert.deepEqual(await kept.organize(), { state: 'offline', moved: 0, sorted: 1, tagged: 0, failed: 0 }, 'the one on this Mac, while the drive is away');
+      assert.deepEqual(await readdir(join(dir, 'here')), ['Band']);
+      await rename(join(dir, 'unplugged'), drive);
+      assert.deepEqual(await kept.organize(), { state: 'ok', moved: 1, sorted: 1, tagged: 0, failed: 0 });
+      assert.deepEqual(await readdir(archiveDir), ['Band'], 'nothing left in no folder');
+      assert.deepEqual((await readdir(join(archiveDir, 'Band'))).sort(), ['Album', 'Singles']);
+      assert.deepEqual(Buffer.from(await (await kept.get('https://x.test/1'))!.data.arrayBuffer()), Buffer.alloc(1000, 1));
+    });
+
+    test('a file on the drive that the bot did not put there is never written over', async () => {
+      const archiveDir = join(dir, 'drive', 'Music over RCS');
+      await mkdir(join(archiveDir, 'Band', 'Singles'), { recursive: true });
+      await writeFile(join(archiveDir, 'Band', 'Singles', 'One.mp3'), 'yours');
+      const kept = sorted(archiveDir);
+      await kept.put('https://x.test/1', song(1));
+      assert.equal((await kept.organize()).moved, 1);
+      assert.deepEqual((await readdir(join(archiveDir, 'Band', 'Singles'))).sort(), ['One (2).mp3', 'One.mp3']);
+      assert.equal(await readFile(join(archiveDir, 'Band', 'Singles', 'One.mp3'), 'utf8'), 'yours');
+    });
+
+    test('a song downloaded again while the drive was away replaces its copy there, even one under an older name', async () => {
+      const drive = join(dir, 'drive');
+      const archiveDir = join(drive, 'Music over RCS');
+      await mkdir(drive);
+      const before = flat(archiveDir);
+      await before.put('https://x.test/1', named(1, 'Band — One.mp3'));
+      await before.organize();
+      await rename(drive, join(dir, 'unplugged'));
+
+      const kept = sorted(archiveDir);
+      assert.equal(await kept.get('https://x.test/1'), undefined, 'on the drive that is away');
+      await kept.put('https://x.test/1', song(1));
+      await rename(join(dir, 'unplugged'), drive);
+      assert.deepEqual(await kept.organize(), { state: 'ok', moved: 1, sorted: 0, tagged: 0, failed: 0 });
+      assert.deepEqual(await readdir(archiveDir), ['Band'], 'the copy under the old name is gone: one copy of a song');
+      assert.deepEqual(await readdir(join(archiveDir, 'Band', 'Singles')), ['One.mp3']);
+    });
   });
 
   test('the downloader looks on disk first: a song is downloaded once, then sent from disk', async () => {

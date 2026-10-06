@@ -128,7 +128,7 @@ export class LibraryJobs {
 
   async #round(): Promise<void> {
     try {
-      await this.archive();
+      await this.organize();
       if (this.#syncDue()) await this.refresh();
       else if (!this.#keptReady && this.#o.cache) await this.keepReady();
       else await this.#watch();
@@ -141,15 +141,20 @@ export class LibraryJobs {
   }
 
   /**
-   * Moves the songs downloaded on this Mac into the archive folder, when there is one and it's there. A drive that's
-   * away is normal (they wait here, and the bot works as before); one away for a day with songs waiting is said.
+   * Puts the kept songs in their places, sorted by artist and album and tagged to match: the ones downloaded on this Mac move to the
+   * archive folder, when there is one and it's there. A drive that's away is normal (they wait here, and the bot works
+   * as before); one away for a day with songs waiting is said.
    */
-  async archive(): Promise<void> {
+  async organize(): Promise<void> {
     const cache = this.#o.cache;
-    if (!cache?.archiveDir) return;
-    const result = await cache.archive();
-    if (result.moved > 0) this.#log(`moved ${result.moved} song${result.moved === 1 ? '' : 's'} to ${cache.archiveDir}`);
-    if (result.failed > 0) this.#log(`could not move ${result.failed} song${result.failed === 1 ? '' : 's'} to ${cache.archiveDir}: ${result.error ?? 'unknown error'}`);
+    if (!cache) return;
+    const result = await cache.organize();
+    const songs = (n: number) => `${n} song${n === 1 ? '' : 's'}`;
+    if (result.moved > 0) this.#log(`moved ${songs(result.moved)} to ${cache.archiveDir}`);
+    if (result.sorted > 0) this.#log(`sorted ${songs(result.sorted)} into artist and album folders`);
+    if (result.tagged > 0) this.#log(`wrote the artist, album and title into ${songs(result.tagged)}`);
+    if (result.failed > 0) this.#log(`could not move or tag ${songs(result.failed)}: ${result.error ?? 'unknown error'}`);
+    if (!cache.archiveDir) return;
     const now = this.#now().getTime();
     if (result.state === 'ok') {
       this.#archiveAwaySince = undefined;
@@ -161,7 +166,7 @@ export class LibraryJobs {
       const waiting = cache.where().here;
       if (now - this.#archiveAwaySince >= 24 * HOUR_MS && waiting.files > 0) {
         const mb = Math.round(waiting.bytes / 1_048_576);
-        this.#o.onArchive?.(`The drive for ${cache.archiveDir} has been away for a day; ${waiting.files} song${waiting.files === 1 ? '' : 's'} (${mb} MB) wait on this Mac. Connect it and they'll move.`);
+        this.#o.onArchive?.(`The drive for ${cache.archiveDir} has been away for a day; ${songs(waiting.files)} (${mb} MB) wait on this Mac. Connect it and they'll move.`);
       }
     }
   }

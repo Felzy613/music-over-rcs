@@ -8,8 +8,11 @@ import { AudioCache, cachedCheck, cachedFetch } from './audio-cache.ts';
 import { catalogBrowse, type Browse } from './browse.ts';
 import { Categories } from './categories.ts';
 import { catalogFollows, type Follows } from './follows.ts';
+import { createImageFetcher } from '../image-fetch.ts';
+import type { CoverPicture } from './id3.ts';
 import { createPictures, type Picture, type PreparedPicture } from './images.ts';
 import { LibraryJobs, type DailyTime } from './jobs.ts';
+import { catalogNaming, namedFetch } from './naming.ts';
 
 /** Songs aren't kept on this Mac when that would leave its disk with less free than this (they're still sent). */
 const MIN_FREE_BYTES = 5 * 1024 ** 3;
@@ -62,12 +65,16 @@ export function setUpLibrary(options: LibraryOptions): Library {
   const { catalog, musicTable, audio, log } = options;
   const categories = musicTable ? new Categories({ musicTable, catalog }) : undefined;
   const limited = Number.isFinite(options.prefetchMb);
+  const naming = catalogNaming(catalog);
   const cache =
     options.prefetchMb > 0
       ? new AudioCache({
           dir: join(dirname(resolve(options.dbPath)), 'audio-cache'),
           archiveDir: options.archiveDir,
           index: catalog,
+          placeOf: naming.placeOf,
+          tagsOf: naming.tagsOf,
+          fetchCover: coverFetcher(),
           maxBytes: limited ? options.prefetchMb * 1024 * 1024 : undefined,
           minFreeBytes: MIN_FREE_BYTES,
         })
@@ -77,12 +84,12 @@ export function setUpLibrary(options: LibraryOptions): Library {
   const parts = [
     musicTable ? (at ? `daily new-music message at ${String(at.hour).padStart(2, '0')}:${String(at.minute).padStart(2, '0')}` : 'daily message off') : '',
     cache ? (limited ? `up to ${options.prefetchMb} MB of songs kept ready` : 'songs kept ready, no size limit') : 'no songs kept ready',
-    cache?.archiveDir ? `moved to ${cache.archiveDir} whenever it's there` : '',
+    cache ? `sorted by artist and album${cache.archiveDir ? ` in ${cache.archiveDir} whenever it's there` : ''}` : '',
   ].filter(Boolean);
 
   return {
     checkAudio: cache ? cachedCheck(cache, audio.checkAudio) : audio.checkAudio,
-    fetchAudio: cache ? cachedFetch(cache, audio.fetchAudio, log) : audio.fetchAudio,
+    fetchAudio: namedFetch(cache ? cachedFetch(cache, audio.fetchAudio, log) : audio.fetchAudio, naming.fileNameOf),
     prepareImage: createPictures({ log }),
     onPlay: (track) => catalog.recordPlay(track.id),
     browse: catalogBrowse(catalog, undefined, categories),
@@ -111,5 +118,14 @@ export function setUpLibrary(options: LibraryOptions): Library {
       return jobs;
     },
     summary: parts.join(', '),
+  };
+}
+
+/** Gets a song's cover to put in its file. */
+function coverFetcher(): (url: string) => Promise<CoverPicture | undefined> {
+  const fetchImage = createImageFetcher({ remember: 8 });
+  return async (url) => {
+    const image = await fetchImage(url);
+    return { data: new Uint8Array(await image.data.arrayBuffer()), mimeType: image.mimeType };
   };
 }

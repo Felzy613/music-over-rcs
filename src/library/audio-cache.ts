@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
-import { dirname, extname, isAbsolute, join } from 'node:path';
+import { copyFile, mkdir, readFile, rename, rm, rmdir, stat, statfs, writeFile } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, join, relative } from 'node:path';
 import type { AudioCheck } from '../audio-check.ts';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { CachedAudio, Catalog, SitePost } from '../catalog.ts';
 import type { Track } from '../types.ts';
+import { hasCover, writeTags, type CoverPicture, type SongTags } from './id3.ts';
+import { cleanName, extensionOf } from './naming.ts';
 
 type CacheIndex = Pick<Catalog, 'cachedAudio' | 'saveCachedAudio' | 'touchCachedAudio' | 'listCachedAudio' | 'forgetCachedAudio'>;
 
@@ -13,12 +15,21 @@ export interface AudioCacheOptions {
   /** The folder on this Mac that songs are downloaded into. */
   dir: string;
   /**
-   * A folder (on an external drive, say) that the songs are moved into whenever it's there (`archive`), so they
+   * A folder (on an external drive, say) that the songs are moved into whenever it's there (`organize`), so they
    * don't fill this Mac. The folder it goes in must exist; it is made inside it.
    */
   archiveDir?: string | undefined;
   /** Where the list of kept files lives (the catalog database). */
   index: CacheIndex;
+  /**
+   * Where a song goes inside either folder, sorted and named like a music library: "Artist/Album/01 Title.mp3". When
+   * left out, a song goes in no folder, under the name it was downloaded with.
+   */
+  placeOf?: ((url: string, audio: { fileName: string; mimeType: string }) => string) | undefined;
+  /** The tags written into each MP3 kept (artist, album, number, title), so music apps show it right. None when left out. */
+  tagsOf?: ((url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined) | undefined;
+  /** Gets a cover, for an MP3 that has none. */
+  fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
   /** The most the songs on this Mac may take, in bytes. No limit when left out. */
   maxBytes?: number | undefined;
   /** The most songs on this Mac. No limit when left out. */
@@ -31,20 +42,41 @@ export interface AudioCacheOptions {
 /** Whether the archive folder can be used: there, its drive not connected, or macOS not letting the bot in. */
 export type ArchiveState = 'ok' | 'offline' | 'denied';
 
-const EXTENSION: Record<string, string> = { 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/aac': 'aac', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/flac': 'flac' };
+/** What a round of `organize` did. */
+export interface Organized {
+  state: ArchiveState | undefined;
+  /** Songs moved from this Mac to the drive. */
+  moved: number;
+  /** Songs moved into their place within the folder they were in (kept before songs were sorted, or renamed since). */
+  sorted: number;
+  /** Songs whose tags were written (kept before songs were tagged, or their names changed since). */
+  tagged: number;
+  failed: number;
+  error?: string;
+}
+
+/** Song types that have ID3 tags. */
+const MP3 = /mpeg|mp3|mpg/i;
 
 const errorCode = (err: unknown): string | undefined => (err as NodeJS.ErrnoException | null)?.code;
 /** How a path is compared with another: Mac disks ignore case. */
 const pathKey = (path: string): string => path.normalize('NFC').toLowerCase();
+/** Whether a path is inside a folder (not the folder itself). */
+const isInside = (root: string, path: string): boolean => {
+  const rel = relative(root, path);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+};
 
 /**
  * Song files kept on disk, so a song that's asked for often (or is likely to be) is sent without downloading it
- * first. Songs are downloaded into a folder on this Mac; with an archive folder set, they move there whenever it's
- * there, under their own names ("Artist — Title.mp3"), and are read from there. While its drive isn't connected,
- * the songs on it are downloaded again when asked for, and kept on this Mac until it's back.
+ * first. They're sorted like a music library ("Artist/Album/01 Title.mp3", see `placeOf`). Songs are downloaded into
+ * a folder on this Mac; with an archive folder set, they move there whenever it's there, into the same places, and
+ * are read from there. While its drive isn't connected, the songs on it are downloaded again when asked for, and kept
+ * on this Mac until it's back.
  *
  * Every song stays, unless limits are set (`maxBytes`, `maxFiles`, for the songs on this Mac); then, when full, the
- * files used least recently go first. Nothing in the archive is ever deleted.
+ * files used least recently go first. Nothing in the archive is ever deleted or written over, except a song's own
+ * earlier copy.
  */
 export class AudioCache {
   readonly dir: string;
@@ -54,6 +86,11 @@ export class AudioCache {
   #index: CacheIndex;
   #now: () => Date;
   #minFreeBytes: number;
+  #placeOf: AudioCacheOptions['placeOf'];
+  #tagsOf: AudioCacheOptions['tagsOf'];
+  #fetchCover: AudioCacheOptions['fetchCover'];
+  /** Songs being moved right now, so a read that misses the file waits for the move instead of giving up. */
+  #moving = new Map<string, Promise<void>>();
 
   constructor(options: AudioCacheOptions) {
     this.dir = options.dir;
@@ -62,6 +99,9 @@ export class AudioCache {
     this.maxFiles = options.maxFiles ?? Number.POSITIVE_INFINITY;
     this.#minFreeBytes = options.minFreeBytes ?? 0;
     this.#index = options.index;
+    this.#placeOf = options.placeOf;
+    this.#tagsOf = options.tagsOf;
+    this.#fetchCover = options.fetchCover;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -74,14 +114,14 @@ export class AudioCache {
     return this.#index.cachedAudio(url);
   }
 
-  /** Where a kept song's file is: a name in the folder on this Mac, or a full path once it's in the archive. */
+  /** Where a kept song's file is: a path in the folder on this Mac, or a full path once it's in the archive. */
   pathOf(entry: CachedAudio): string {
     return isAbsolute(entry.file) ? entry.file : join(this.dir, entry.file);
   }
 
   /** The song from disk, or nothing when it isn't kept, its file went missing, or its drive isn't connected. */
   async get(url: string): Promise<DownloadedAudio | undefined> {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       const entry = this.#index.cachedAudio(url);
       if (!entry) return undefined;
       const path = this.pathOf(entry);
@@ -89,10 +129,12 @@ export class AudioCache {
       try {
         data = await readFile(path);
       } catch {
-        // Moved to the archive just now: read it from there.
-        if (this.#index.cachedAudio(url)?.file !== entry.file) continue;
+        // Being moved, or moved just now: read it from its new place.
+        const moving = this.#moving.get(url);
+        if (moving) await moving;
+        if (moving || this.#index.cachedAudio(url)?.file !== entry.file) continue;
         // On a drive that isn't connected: it's kept for when it is, and downloaded meanwhile.
-        if (!existsSync(dirname(path))) return undefined;
+        if (!existsSync(this.#rootOf(path))) return undefined;
         this.#index.forgetCachedAudio(url);
         return undefined;
       }
@@ -110,21 +152,54 @@ export class AudioCache {
   }
 
   /**
-   * Keeps a downloaded song in the folder on this Mac (from where `archive` moves it), then trims that folder to its
-   * limits, if any. Songs in `keep` are never the ones removed. When this Mac's disk is nearly full, it isn't kept.
+   * Keeps a downloaded song in the folder on this Mac, in its place and with its tags written (from where `organize`
+   * moves it to the drive), then trims that folder to its limits, if any. Songs in `keep` are never the ones removed.
+   * When this Mac's disk is nearly full, it isn't kept. Gives back the song as kept, tags and all, to be sent.
    */
-  async put(url: string, audio: DownloadedAudio, keep: ReadonlySet<string> = new Set()): Promise<void> {
-    if (audio.bytes > this.maxBytes) return;
+  async put(url: string, downloaded: DownloadedAudio, keep: ReadonlySet<string> = new Set()): Promise<DownloadedAudio> {
+    const { audio, tags } = await this.#tagged(url, downloaded);
+    if (audio.bytes > this.maxBytes) return audio;
     await mkdir(this.dir, { recursive: true });
-    if (this.#minFreeBytes > 0 && (await freeBytes(this.dir)) - audio.bytes < this.#minFreeBytes) return;
-    const file = `${createHash('sha256').update(url).digest('hex').slice(0, 24)}.${EXTENSION[audio.mimeType] ?? 'audio'}`;
-    const path = join(this.dir, file);
+    if (this.#minFreeBytes > 0 && (await freeBytes(this.dir)) - audio.bytes < this.#minFreeBytes) return audio;
+    const entries = this.#index.listCachedAudio();
+    const before = entries.find((entry) => entry.url === url);
+    const path = this.#freePath(this.dir, this.#place(url, audio), url, usedPaths(this, entries), []);
+    await mkdir(dirname(path), { recursive: true });
     // Written beside its final name, then renamed, so a crash never leaves a half file under the real name.
     await writeFile(`${path}.part`, new Uint8Array(await audio.data.arrayBuffer()));
     await rename(`${path}.part`, path);
     const at = this.#now().toISOString();
-    this.#index.saveCachedAudio({ url, file, fileName: audio.fileName, mimeType: audio.mimeType, bytes: audio.bytes, fetchedAt: at, usedAt: at });
+    // A copy kept before on the drive (away just now) is replaced when this one moves there.
+    const replaces = before ? (isAbsolute(before.file) ? before.file : before.replaces) : undefined;
+    this.#index.saveCachedAudio({
+      url,
+      file: relative(this.dir, path),
+      fileName: audio.fileName,
+      mimeType: audio.mimeType,
+      bytes: audio.bytes,
+      fetchedAt: at,
+      usedAt: at,
+      ...(replaces ? { replaces } : {}),
+      ...(tags ? { tags } : {}),
+    });
+    if (before && !isAbsolute(before.file) && pathKey(this.pathOf(before)) !== pathKey(path)) await removeFile(this.pathOf(before), this.dir);
     await this.trim(new Set([...keep, url]));
+    return audio;
+  }
+
+  /**
+   * The song with its tags written, and the record of them. The record is left out when a cover is still to be added
+   * (that needs a download, so `organize` does it, not the request waiting for the song).
+   */
+  async #tagged(url: string, audio: DownloadedAudio): Promise<{ audio: DownloadedAudio; tags?: string }> {
+    const tags = MP3.test(audio.mimeType) ? this.#tagsOf?.(url, audio) : undefined;
+    if (!tags) return { audio };
+    const written = writeTags(new Uint8Array(await audio.data.arrayBuffer()), tags);
+    if (!written) return { audio, tags: JSON.stringify(tags) }; // not an MP3 after all: nothing to write, now or later
+    return {
+      audio: { ...audio, data: new Blob([written], { type: audio.mimeType }), bytes: written.byteLength },
+      ...(tags.cover && !hasCover(written) ? {} : { tags: JSON.stringify(tags) }),
+    };
   }
 
   /**
@@ -140,7 +215,7 @@ export class AudioCache {
       if (bytes <= this.maxBytes && files <= this.maxFiles) break;
       if (keep.has(entry.url)) continue;
       this.#index.forgetCachedAudio(entry.url);
-      await rm(join(this.dir, entry.file), { force: true });
+      await removeFile(this.pathOf(entry), this.dir);
       bytes -= entry.bytes;
       files -= 1;
       removed.push(entry);
@@ -170,47 +245,112 @@ export class AudioCache {
   }
 
   /**
-   * Moves the songs on this Mac into the archive, when it's there. Each is copied under its own name ("Artist —
-   * Title.mp3"; "(2)" when another kept song has that name), checked, recorded at its new place, and only then
-   * removed here. A song that can't be moved stays here and is tried again next time.
+   * Writes the tags into a kept song's file when they aren't the ones it should have: it was kept before songs were
+   * tagged, its cover was still to be added, or its name changed since. Tags you edit yourself are left alone until
+   * then. Gives whether the file was written.
    */
-  async archive(): Promise<{ state: ArchiveState | undefined; moved: number; failed: number; error?: string }> {
+  async #retag(entry: CachedAudio, path: string, tags: SongTags, record: string): Promise<boolean> {
+    const data = new Uint8Array(await readFile(path));
+    let cover: CoverPicture | undefined;
+    if (tags.cover && this.#fetchCover && !hasCover(data)) cover = await this.#fetchCover(tags.cover).catch(() => undefined);
+    const written = writeTags(data, tags, cover);
+    const now = this.#index.cachedAudio(entry.url);
+    if (!now || now.file !== entry.file) return false; // moved or forgotten meanwhile: next time
+    if (!written) {
+      this.#index.saveCachedAudio({ ...now, tags: record });
+      return false;
+    }
+    // Written beside it, then renamed over it: a reader sees the old file or the new one, never half of one.
+    await writeFile(`${path}.part`, written);
+    await rename(`${path}.part`, path);
+    this.#index.saveCachedAudio({ ...now, bytes: written.byteLength, tags: record });
+    return true;
+  }
+
+  /**
+   * Puts every kept song in its place, with its tags. The songs on this Mac move into the archive, when it's there: each is copied,
+   * checked, recorded at its new place, and only then removed here. A song that isn't in its place yet (kept before
+   * songs were sorted, or its name changed since) moves there within the folder it's in. "(2)" is added when another
+   * song has the name. A song that can't be moved stays where it is and is tried again next time.
+   */
+  async organize(): Promise<Organized> {
     const state = await this.archiveState();
-    if (state !== 'ok') return { state, moved: 0, failed: 0 };
-    const archiveDir = this.archiveDir!;
-    const entries = this.#index.listCachedAudio();
-    const taken = new Set(entries.filter((entry) => isAbsolute(entry.file)).map((entry) => pathKey(entry.file)));
-    let moved = 0;
-    let failed = 0;
-    let error: string | undefined;
-    for (const entry of entries) {
-      if (isAbsolute(entry.file)) continue;
-      const from = join(this.dir, entry.file);
-      const to = archiveName(archiveDir, entry.fileName, taken);
+    const archiveDir = state === 'ok' ? this.archiveDir : undefined;
+    const result: Organized = { state, moved: 0, sorted: 0, tagged: 0, failed: 0 };
+    const failed = async (err: unknown, onDrive: boolean): Promise<boolean> => {
+      result.failed += 1;
+      result.error = err instanceof Error ? err.message : String(err);
+      // The drive went away mid-way: the rest wait for next time.
+      return onDrive && (await this.archiveState()) !== 'ok';
+    };
+
+    for (const entry of this.#tagsOf ? this.#index.listCachedAudio() : []) {
+      const tags = MP3.test(entry.mimeType) ? this.#tagsOf!(entry.url, entry) : undefined;
+      const record = tags && JSON.stringify(tags);
+      const path = this.pathOf(entry);
+      const onDrive = isAbsolute(entry.file);
+      if (!tags || !record || entry.tags === record || (onDrive && !(archiveDir && isInside(archiveDir, path)))) continue;
       try {
-        await copyFile(from, `${to}.part`);
-        const [copied, original] = await Promise.all([stat(`${to}.part`), stat(from)]);
-        if (copied.size !== original.size) throw new Error(`the copy has ${copied.size} bytes, not ${original.size}`);
-        await rename(`${to}.part`, to);
-        const now = this.#index.cachedAudio(entry.url);
-        if (!now || isAbsolute(now.file)) {
-          // Forgotten (or moved by someone else) meanwhile: the copy isn't needed.
-          if (!now || pathKey(now.file) !== pathKey(to)) await rm(to, { force: true });
-          continue;
-        }
-        this.#index.saveCachedAudio({ ...now, file: to, bytes: copied.size });
-        taken.add(pathKey(to));
-        await rm(from, { force: true });
-        moved += 1;
+        if (await this.#retag(entry, path, tags, record)) result.tagged += 1;
       } catch (err) {
-        failed += 1;
-        error = err instanceof Error ? err.message : String(err);
-        await rm(`${to}.part`, { force: true }).catch(() => {});
-        // The drive went away mid-way: the rest wait for next time.
-        if ((await this.archiveState()) !== 'ok') break;
+        if (errorCode(err) === 'ENOENT') continue; // gone: forgotten when it's next asked for
+        await rm(`${path}.part`, { force: true }).catch(() => {});
+        if (await failed(err, onDrive)) return result;
       }
     }
-    return { state: 'ok', moved, failed, ...(error ? { error } : {}) };
+
+    const entries = this.#index.listCachedAudio();
+    const used = usedPaths(this, entries);
+    for (const entry of entries) {
+      const from = this.pathOf(entry);
+      const onDrive = isAbsolute(entry.file);
+      // A song on the drive is sorted only while the drive is there, and only in the archive folder set now.
+      if (onDrive && !(archiveDir && isInside(archiveDir, from))) continue;
+      const root = archiveDir ?? this.dir;
+      const place = this.#place(entry.url, entry);
+      const toDrive = !onDrive && !!archiveDir;
+      if (!toDrive && inPlace(root, from, place)) continue;
+      const to = this.#freePath(root, place, entry.url, used, toDrive ? [entry.replaces] : [from]);
+      let done: () => void = () => {};
+      this.#moving.set(entry.url, new Promise<void>((resolve) => (done = resolve)));
+      try {
+        await mkdir(dirname(to), { recursive: true });
+        if (toDrive) {
+          await copyFile(from, `${to}.part`);
+          const [copied, original] = await Promise.all([stat(`${to}.part`), stat(from)]);
+          if (copied.size !== original.size) throw new Error(`the copy has ${copied.size} bytes, not ${original.size}`);
+          await rename(`${to}.part`, to);
+          const now = this.#index.cachedAudio(entry.url);
+          if (!now || now.file !== entry.file) {
+            // Forgotten or kept again meanwhile: this copy isn't the one wanted.
+            if (pathKey(now ? this.pathOf(now) : '') !== pathKey(to)) await removeFile(to, root);
+            continue;
+          }
+          this.#index.saveCachedAudio({ ...now, file: to, bytes: copied.size, replaces: undefined });
+          await removeFile(from, this.dir);
+          // The earlier copy it replaces, when that was under another name, isn't needed: one copy of a song is kept.
+          if (entry.replaces && pathKey(entry.replaces) !== pathKey(to) && !used.has(pathKey(entry.replaces)) && isInside(archiveDir!, entry.replaces)) {
+            await removeFile(entry.replaces, archiveDir!);
+          }
+          result.moved += 1;
+        } else {
+          // Within one disk a move is a rename: nothing is copied, and the file is never missing.
+          await rename(from, to);
+          this.#index.saveCachedAudio({ ...entry, file: onDrive ? to : relative(this.dir, to) });
+          await pruneEmpty(dirname(from), root);
+          result.sorted += 1;
+        }
+        used.delete(pathKey(from));
+        used.set(pathKey(to), entry.url);
+      } catch (err) {
+        if (toDrive) await rm(`${to}.part`, { force: true }).catch(() => {});
+        if (await failed(err, !!archiveDir)) break;
+      } finally {
+        this.#moving.delete(entry.url);
+        done();
+      }
+    }
+    return result;
   }
 
   stats(): { files: number; bytes: number } {
@@ -229,17 +369,69 @@ export class AudioCache {
     }
     return { here, archived };
   }
+
+  /** A song's place inside either folder: "Artist/Album/01 Title.mp3", each part a tidy name. */
+  #place(url: string, audio: { fileName: string; mimeType: string }): string {
+    const parts = (this.#placeOf?.(url, audio) ?? audio.fileName)
+      .split(/[\\/]+/)
+      .map((part) => cleanName(part))
+      .filter(Boolean);
+    return parts.length > 0 ? parts.join('/') : `${createHash('sha256').update(url).digest('hex').slice(0, 24)}${extensionOf(audio)}`;
+  }
+
+  /**
+   * A free path for a song in a folder: its place, or with "(2)", "(3)"… when another kept song is there. On the drive
+   * a file that isn't kept here (yours, say) is never written over either; only the paths in `own` may be.
+   */
+  #freePath(root: string, place: string, url: string, used: ReadonlyMap<string, string>, own: Array<string | undefined>): string {
+    const mine = new Set(own.filter((path): path is string => !!path).map(pathKey));
+    const extension = extname(place);
+    const stem = place.slice(0, place.length - extension.length);
+    for (let n = 1; ; n += 1) {
+      const path = join(root, n === 1 ? place : `${stem} (${n})${extension}`);
+      const key = pathKey(path);
+      const owner = used.get(key);
+      if (owner !== undefined && owner !== url) continue;
+      if (root !== this.dir && !mine.has(key) && owner === undefined && existsSync(path)) continue;
+      return path;
+    }
+  }
+
+  /** The folder whose absence means a song's drive isn't connected: the archive folder, or the one the file is in. */
+  #rootOf(path: string): string {
+    return this.archiveDir && isInside(this.archiveDir, path) ? this.archiveDir : dirname(path);
+  }
 }
 
-/** A name in the archive for a song: its own, or with "(2)", "(3)"… when another kept song has it. */
-function archiveName(dir: string, fileName: string, taken: ReadonlySet<string>): string {
-  const extension = extname(fileName);
-  const stem = fileName.slice(0, fileName.length - extension.length) || 'track';
-  for (let n = 1; ; n += 1) {
-    const path = join(dir, n === 1 ? `${stem}${extension}` : `${stem} (${n})${extension}`);
-    // A name no kept song uses is free. A file there by that name is an earlier copy of the same song (one asked
-    // for again while the drive was away), which this one replaces.
-    if (!taken.has(pathKey(path))) return path;
+/** Which kept song each path belongs to. */
+function usedPaths(cache: AudioCache, entries: CachedAudio[]): Map<string, string> {
+  return new Map(entries.map((entry) => [pathKey(cache.pathOf(entry)), entry.url]));
+}
+
+/** Whether a file is at its place already, or at its place with "(2)", "(3)"… (another song had the name). */
+function inPlace(root: string, path: string, place: string): boolean {
+  const here = pathKey(relative(root, path));
+  const wanted = pathKey(place);
+  if (here === wanted) return true;
+  const extension = extname(wanted);
+  const stem = wanted.slice(0, wanted.length - extension.length);
+  return here.startsWith(`${stem} (`) && here.endsWith(`)${extension}`) && /^\d+$/.test(here.slice(stem.length + 2, here.length - extension.length - 1));
+}
+
+/** Removes a file, then the folders that leaves empty, up to (not including) `root`. */
+async function removeFile(path: string, root: string): Promise<void> {
+  await rm(path, { force: true });
+  await pruneEmpty(dirname(path), root);
+}
+
+/** Removes a folder if it's empty, then its parents while they are, up to (not including) `root`. Nothing else. */
+async function pruneEmpty(dir: string, root: string): Promise<void> {
+  for (let current = dir; isInside(root, current); current = dirname(current)) {
+    try {
+      await rmdir(current);
+    } catch {
+      return;
+    }
   }
 }
 
@@ -275,7 +467,7 @@ export function cachedFetch(
     if (kept) return kept;
     const audio = await fetchAudio(url, title);
     try {
-      await cache.put(url, audio);
+      return await cache.put(url, audio);
     } catch (err) {
       log(`could not keep ${audio.fileName} for next time: ${err instanceof Error ? err.message : String(err)}`);
     }
