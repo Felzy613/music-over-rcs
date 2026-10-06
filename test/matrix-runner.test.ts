@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { checkAudio } from '../src/audio-check.ts';
-import { fetchAudio } from '../src/audio-fetch.ts';
+import { AudioFetchError, fetchAudio } from '../src/audio-fetch.ts';
 import { createBot, HELP_TEXT } from '../src/bot.ts';
 import { Catalog } from '../src/catalog.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
+import type { Picture, PreparedPicture } from '../src/library/images.ts';
 import { createRunner, type PendingChoices } from '../src/runner.ts';
 import type { Reply } from '../src/types.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
@@ -169,7 +170,7 @@ describe('runner over Matrix (the bridge case)', () => {
     typedOnPhone('paper planes');
     typedOnPhone('night owls');
     await runner.tick();
-    assert.equal(mock.sent.length, 3, 'the audio for the first, then the list for the second');
+    assert.equal(mock.sent.length, 6, 'the name and audio for the first, then the list for the second (heading, two options, how to pick)');
   });
 
   test('offers a numbered choice and takes the number as the answer', async () => {
@@ -177,14 +178,69 @@ describe('runner over Matrix (the bridge case)', () => {
     await runner.prime();
     typedOnPhone('night owls');
     await runner.tick();
-    assert.equal(
-      mock.sent[0]?.content.body,
-      '🎵 Which one?\n1. The Night Owls — Blue Horizon\n2. The Night Owls — Blue Horizon (Live)\n\nReply with a number to choose.',
-    );
+    // One message per option, so a 👍 on one picks it.
+    assert.deepEqual(mock.sent.map((s) => s.content.body), [
+      '🎵 Which one?',
+      '🎵 1. The Night Owls — Blue Horizon',
+      '🎵 2. The Night Owls — Blue Horizon (Live)',
+      '🎵 Reply with a number or 👍 one to choose.',
+    ]);
 
     typedOnPhone('2');
     await runner.tick();
     assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon (Live).mp3');
+  });
+
+  test('"all" sends every song on the list, files only, and the list stays open', async () => {
+    const { runner } = makeRunner();
+    await runner.prime();
+    typedOnPhone('night owls');
+    await runner.tick();
+    const before = mock.sent.length;
+    typedOnPhone('All');
+    await runner.tick();
+    assert.deepEqual(
+      mock.sent.slice(before).map((s) => s.content.body),
+      ['🎵 Here come all 2 songs:', 'The Night Owls — Blue Horizon.mp3', 'The Night Owls — Blue Horizon (Live).mp3'],
+    );
+    typedOnPhone('1');
+    await runner.tick();
+    assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon.mp3', 'a number still picks from it');
+  });
+
+  test('"all" with no list open says how to use it', async () => {
+    const { runner } = makeRunner();
+    await runner.prime();
+    typedOnPhone('all');
+    await runner.tick();
+    assert.match(mock.sent.at(-1)?.content.body, /^🎵 Text me a song first; then "all" sends every song on the list\.$/);
+  });
+
+  test('songs download a few at a time, and one that fails does not stop the rest', async () => {
+    const urls = catalog.all().map((track) => track.url);
+    let inFlight = 0;
+    let most = 0;
+    const matrix = new MatrixClient({ token: mock.token, homeserver: mock.url });
+    const runner = createRunner({
+      chat: matrix,
+      bot: { handle: async () => [...urls, ...urls].map((url, i) => ({ kind: 'audio' as const, url: i === 1 ? `${url}?broken` : url, title: `Song ${i + 1}` })) },
+      chatID: mock.roomId,
+      fetchAudio: async (url, title) => {
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        inFlight -= 1;
+        if (url.endsWith('?broken')) throw new AudioFetchError('the file server answered HTTP 500');
+        return fetchAudio(url, title);
+      },
+      pollMs: 20,
+    });
+    await runner.prime();
+    typedOnPhone('everything please');
+    await runner.tick();
+    assert.ok(most <= 3, `${most} downloads at once`);
+    assert.equal(mock.sent.filter((s) => s.content.msgtype === 'm.audio').length, 5, 'the five that worked');
+    assert.ok(mock.sent.some((s) => s.content.body === '🎵 I couldn\'t send "Song 2": the file server answered HTTP 500.'));
   });
 
   test('another number from the same list picks again, since the list is still on screen', async () => {
@@ -248,7 +304,7 @@ describe('runner over Matrix (the bridge case)', () => {
       sourceUrl: url,
     });
 
-    function runnerWith(bot: { handle: () => Promise<Reply[]> }, fetchImage: (url: string) => Promise<ReturnType<typeof picture>>, now?: () => number) {
+    function runnerWith(bot: { handle: () => Promise<Reply[]> }, prepareImage: (picture: Picture) => Promise<PreparedPicture>, now?: () => number) {
       const logs: string[] = [];
       const matrix = new MatrixClient({ token: mock.token, homeserver: mock.url });
       const runner = createRunner({
@@ -256,7 +312,7 @@ describe('runner over Matrix (the bridge case)', () => {
         bot,
         chatID: mock.roomId,
         fetchAudio: (url, title) => fetchAudio(url, title),
-        fetchImage,
+        prepareImage,
         pollMs: 20,
         log: (line) => logs.push(line),
         ...(now ? { now } : {}),
@@ -264,8 +320,10 @@ describe('runner over Matrix (the bridge case)', () => {
       return { runner, logs };
     }
 
-    test('a picture goes out as an image, before the words that follow it', async () => {
-      const { runner } = runnerWith({ handle: async () => [{ kind: 'image', url: 'https://img.test/a.jpg' }, { kind: 'text', text: 'Ana Elech' }] }, async (url) => picture(url));
+    const card: Reply = { kind: 'image', url: 'https://img.test/a.jpg', caption: { title: 'Ana Elech', artist: 'Oizer Oberlander' } };
+
+    test("a song's card goes out as one picture, with its name drawn on it", async () => {
+      const { runner } = runnerWith({ handle: async () => [card, { kind: 'text', text: 'after it' }] }, async (p) => ({ image: picture(p.kind === 'image' ? p.url : ''), captioned: true }));
       await runner.prime();
       typedOnPhone('ana elech');
       await runner.tick();
@@ -273,18 +331,52 @@ describe('runner over Matrix (the bridge case)', () => {
       assert.equal(mock.uploads[0]?.contentType, 'image/jpeg');
     });
 
-    test('a picture that cannot be fetched is left out and the answer goes on', async () => {
-      const { runner, logs } = runnerWith(
-        { handle: async () => [{ kind: 'image', url: 'https://img.test/gone.jpg' }, { kind: 'text', text: 'still here' }] },
-        async () => {
-          throw new Error('the picture server answered HTTP 404');
+    test("where the name couldn't be drawn on, it follows the picture as text; with no picture at all, the name still goes", async () => {
+      const plain = runnerWith({ handle: async () => [card] }, async (p) => ({ image: picture(p.kind === 'image' ? p.url : ''), captioned: false }));
+      await plain.runner.prime();
+      typedOnPhone('ana elech');
+      await plain.runner.tick();
+      assert.deepEqual(mock.sent.map((s) => [s.content.msgtype, s.content.body]), [
+        ['m.image', 'cover.jpg'],
+        ['m.text', '🎵 Oizer Oberlander — Ana Elech'],
+      ]);
+
+      mock.reset();
+      const broken = runnerWith({ handle: async () => [card] }, async () => {
+        throw new Error('the picture server answered HTTP 404');
+      });
+      await broken.runner.prime();
+      typedOnPhone('ana elech again');
+      await broken.runner.tick();
+      assert.deepEqual(mock.sent.map((s) => s.content.body), ['🎵 Oizer Oberlander — Ana Elech']);
+      assert.ok(broken.logs.some((line) => /could not send a picture: the picture server answered HTTP 404/.test(line)));
+    });
+
+    test('a song starts downloading while its picture is still being made', async () => {
+      const live = catalog.search('blue horizon live')[0]!;
+      const order: string[] = [];
+      const matrix = new MatrixClient({ token: mock.token, homeserver: mock.url });
+      const runner = createRunner({
+        chat: matrix,
+        bot: { handle: async () => [card, { kind: 'audio', url: live.url, title: 'The Night Owls — Blue Horizon (Live)' }] },
+        chatID: mock.roomId,
+        fetchAudio: async (url, title) => {
+          order.push('download started');
+          return fetchAudio(url, title);
         },
-      );
+        prepareImage: async (p) => {
+          order.push('picture started');
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          order.push('picture done');
+          return { image: picture(p.kind === 'image' ? p.url : ''), captioned: true };
+        },
+        pollMs: 20,
+      });
       await runner.prime();
-      typedOnPhone('anything');
+      typedOnPhone('blue horizon live');
       await runner.tick();
-      assert.deepEqual(mock.sent.map((s) => s.content.body), ['🎵 still here']);
-      assert.ok(logs.some((line) => /could not send a picture: the picture server answered HTTP 404/.test(line)));
+      assert.deepEqual(order.slice(0, 2), ['download started', 'picture started'], 'the download did not wait for the picture');
+      assert.deepEqual(mock.sent.map((s) => s.content.msgtype), ['m.image', 'm.audio']);
     });
 
     test('announce sends a message nobody asked for, and its numbers work for as long as it says', async () => {
@@ -297,7 +389,7 @@ describe('runner over Matrix (the bridge case)', () => {
             { kind: 'audio', url: live.url, title: 'The Night Owls — Blue Horizon (Live)' },
           ],
         },
-        async (url) => picture(url),
+        async () => ({ image: picture('https://img.test/x.jpg'), captioned: true }),
         () => clock,
       );
       await runner.prime();
@@ -375,7 +467,7 @@ describe('runner over Matrix (the bridge case)', () => {
             return [{ kind: 'text', text: 'the answer' }];
           },
         },
-        async (url) => picture(url),
+        async () => ({ image: picture('https://img.test/x.jpg'), captioned: true }),
       );
       await runner.prime();
       typedOnPhone('something');

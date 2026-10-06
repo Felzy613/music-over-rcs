@@ -6,8 +6,7 @@ A personal bot that lives in your own "message yourself" chat. You text it a son
 
 ```text
 you:  yoely weiss shabbos
-bot:  [album art]
-      🎵 Yoely Weiss — Shabbos
+bot:  [the cover, with "Shabbos · Yoely Weiss" drawn under it]
       [Yoely Weiss — Shabbos.mp3, 4.4 MB]
 ```
 
@@ -15,16 +14,17 @@ bot:  [album art]
 
 | Text | What you get |
 | --- | --- |
-| A song, like `yoely weiss shabbos` | The song: album art, its name, then the audio file. Typos are fine (`yoely wiess shabos`, `avrohom fried`). |
-| An artist, like `shwekey` or `avraham fried` | Their songs, newest first, ten at a time |
+| A song, like `yoely weiss shabbos` | The song: its cover with its name drawn on, then the audio file. Typos are fine (`yoely wiess shabos`, `avrohom fried`). |
+| An artist, like `shwekey` or `avraham fried` | Their releases, newest first, ten at a time (an album is one entry) |
 | `trending` | What's popular on music-table.com right now |
 | `new` | The newest releases |
 | `more` | The next ten of the last list |
 | A number, like `3` | That song from the last list (or from the daily message) |
-| 👍 on a song in the daily message | That song |
+| 👍 on a song in a list | That song |
+| `all` | Every song on the last list (up to 20) |
 | `help` | A reminder of all this |
 
-Each morning (09:00 unless you change it) it sends a **daily new-music message**: every new release with its cover and a number. It sends names and pictures, not songs; reply with a number or 👍 the ones you want.
+Each morning (09:00 unless you change it) it sends a **daily new-music message**: one picture of the new releases' covers, numbered, then a line for each. It sends names and pictures, not songs; reply with a number, `all`, or 👍 the ones you want.
 
 ## What it does behind the scenes
 
@@ -88,10 +88,14 @@ npm run stack -- enable-bot       # always on, starts at login
 - **Two unofficial pieces.** The bridge reverse-engineers Google Messages for web, and the site lookups use music-table.com's own page API. A change on either side can break things; the rest keeps working.
 - **Your phone and your Mac must be on.** The bridge works through your phone's Google Messages, and the bot runs on the Mac.
 
+## License
+
+[MIT](LICENSE).
+
 ## Development
 
 ```bash
-npm test             # 330+ tests, no network: mocks of a Matrix homeserver, music-table.com, Beeper and Google's API
+npm test             # 340+ tests, no network: mocks of a Matrix homeserver, music-table.com, Beeper and Google's API
 npm run typecheck
 ```
 

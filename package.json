@@ -4,6 +4,7 @@
   "private": true,
   "description": "Text a song name in Google Messages and get the audio file back: a personal bot for the mautrix-gmessages bridge, Beeper, or an RCS for Business agent.",
   "repository": "github:Felzy613/music-over-rcs",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22.18"

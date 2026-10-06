@@ -20,7 +20,9 @@ Beeper asks for personal use and warns that sending too many messages can get an
 
 This is Google's official way for businesses to message phones over RCS. It's a separate chat with an agent, not your own number.
 
-**Prerequisite: partner access.** Agents are created by registered partners; individuals can't sign up directly ([register as a partner](https://developers.google.com/business-communications/rcs-business-messaging/guides/get-started/register-partner)). Google's form asks for a Google Account tied to a corporate email address, and Google decides who is approved. Messaging providers such as Twilio, Sinch or Bird are partners themselves and can host an agent for you, but they set their own prices and use their own APIs; this route calls Google's API directly.
+**Why consider it:** it's the only way to get real **buttons, rich cards and carousels** in Google Messages. Those are an RCS for Business feature: a message from your own number (the bridge route) can only carry text, pictures and files. This route already sends options as tappable chips; cards and carousels would be the next step.
+
+**Prerequisite: partner access.** Agents are created by registered partners; individuals can't sign up directly ([register as a partner](https://developers.google.com/business-communications/rcs-business-messaging/guides/get-started/register-partner)). Google's interest form asks for a corporate email address (not Gmail), and Google decides who is approved. Messaging providers such as Twilio, Sinch, Vonage or Bird are partners themselves and can host an agent for you, but they set their own prices, verify your brand, and use their own APIs; this route calls Google's API directly.
 
 **Tester mode is free.** An unlaunched agent can only message test devices you register (20 invites a day, 200 in total), and [Google doesn't charge for messages to testers](https://developers.google.com/business-communications/rcs-business-messaging/guides/build/test).
 

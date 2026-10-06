@@ -1,6 +1,7 @@
 import { AudioFetchError, type DownloadedAudio } from './audio-fetch.ts';
-import type { Bot } from './bot.ts';
+import { ALL_WORDS, joinLists, type Bot } from './bot.ts';
 import type { DownloadedImage } from './image-fetch.ts';
+import type { Picture, PreparedPicture } from './library/images.ts';
 import type { Chip, Incoming, Reply } from './types.ts';
 
 /**
@@ -15,6 +16,8 @@ const SEEN_LIMIT = 2000;
  * A request repeated word for word within this long is taken as an echo of the first, not a new request.
  */
 const REPEAT_WINDOW_MS = 20_000;
+/** Songs downloading at once, ahead of their turn to be sent. */
+const DOWNLOADS_AHEAD = 3;
 const CHOICE_HINT = 'Reply with a number to choose.';
 /** How long a list of options stays pickable by number. The list is still on screen, so a number is still an answer to it. */
 const CHOICE_TTL_MS = 30 * 60_000;
@@ -47,6 +50,11 @@ export interface ChatClient {
   sendAudio(chatID: string, audio: DownloadedAudio): Promise<string | void>;
   /** Sends a picture (album art). Platforms that can't leave it out, and pictures are skipped. */
   sendImage?(chatID: string, image: DownloadedImage): Promise<string | void>;
+  /**
+   * True when a 👍 tapped on a message reaches the bot. Then lists go one entry per message, so each can be liked;
+   * otherwise each list is one message.
+   */
+  readonly reactions?: boolean;
   /** Shows or clears "typing…" in the chat. Platforms that can't do this leave it out. */
   setTyping?(chatID: string, typing: boolean): Promise<void>;
 }
@@ -78,8 +86,8 @@ export interface RunnerOptions {
   bot: Bot;
   chatID: string;
   fetchAudio(url: string, title: string | undefined): Promise<DownloadedAudio>;
-  /** Gets a picture ready to send. Without it, pictures are skipped. */
-  fetchImage?(url: string): Promise<DownloadedImage>;
+  /** Gets a picture ready to send (a song's card, the daily collage). Without it, pictures are skipped. */
+  prepareImage?(picture: Picture): Promise<PreparedPicture>;
   pollMs?: number;
   /** How often "typing…" is renewed while a request is being worked on. It has to be shorter than the platform's timeout. */
   typingRefreshMs?: number;
@@ -195,29 +203,66 @@ export function createRunner(options: RunnerOptions): Runner {
     return lastRequest !== undefined && lastRequest.text === normalize(message.text) && now() - lastRequest.at < REPEAT_WINDOW_MS;
   }
 
-  async function respond(replies: Reply[]): Promise<void> {
+  async function respond(answer: Reply[]): Promise<void> {
+    const replies = chat.reactions ? answer : joinLists(answer);
+    // Songs start downloading ahead of their turn, so a song gets ready while its picture is drawn and sent; at most
+    // DOWNLOADS_AHEAD at a time, so "all" doesn't fetch twenty files at once.
+    const songs = replies.filter((reply): reply is Extract<Reply, { kind: 'audio' }> => reply.kind === 'audio');
+    const files = new Map<Reply, Promise<DownloadedAudio>>();
+    let started = 0;
+    let sentSongs = 0;
+    const startDownloads = (): void => {
+      while (started < songs.length && started - sentSongs < DOWNLOADS_AHEAD) {
+        const song = songs[started++]!;
+        const file = options.fetchAudio(song.url, song.title);
+        file.catch(() => {}); // handled when it's sent
+        files.set(song, file);
+      }
+    };
+    startDownloads();
     for (const reply of replies) {
       if (!allowSend()) {
         log(`send limit reached (${maxSends} a minute); dropping the rest of this answer`);
         return;
       }
       if (reply.kind === 'audio') {
+        let file: DownloadedAudio | undefined;
         try {
-          await chat.sendAudio(chatID, await options.fetchAudio(reply.url, reply.title));
+          file = await files.get(reply)!;
+        } catch (err) {
+          log(`could not get ${reply.title ?? reply.url} ready: ${errorText(err)}`);
+          const why = err instanceof AudioFetchError ? `: ${err.message}` : '';
+          await chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}${why}.`));
+        } finally {
+          // This one is in hand (or failed), so the next can start: never more than DOWNLOADS_AHEAD at once.
+          sentSongs += 1;
+          startDownloads();
+        }
+        if (!file) continue; // one song that can't be sent doesn't stop the others
+        try {
+          await chat.sendAudio(chatID, file);
           log(`-> audio ${reply.title ?? reply.url}`);
         } catch (err) {
           log(`could not send audio: ${errorText(err)}`);
-          const why = err instanceof AudioFetchError ? `: ${err.message}` : '';
-          await chat.sendText(chatID, markBotText(`I couldn't send that file${why}.`));
-          return;
+          await chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}.`));
         }
-      } else if (reply.kind === 'image') {
-        // A picture is a nicety: when it can't be shown, the answer goes on without it.
-        if (!chat.sendImage || !options.fetchImage) continue;
+      } else if (reply.kind === 'image' || reply.kind === 'collage') {
+        // A picture is a nicety: when it can't be shown, the answer goes on without it, and a song's name goes as text.
+        const caption = reply.kind === 'image' && reply.caption ? markBotText(`${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}`) : undefined;
+        const sendCaption = async () => {
+          if (caption && allowSend()) rememberLink(await chat.sendText(chatID, caption), reply.kind === 'image' ? reply.postback : undefined);
+        };
+        if (!chat.sendImage || !options.prepareImage) {
+          await sendCaption();
+          continue;
+        }
         try {
-          rememberLink(await chat.sendImage(chatID, await options.fetchImage(reply.url)), reply.postback);
+          const prepared = await options.prepareImage(reply);
+          rememberLink(await chat.sendImage(chatID, prepared.image), reply.kind === 'image' ? reply.postback : undefined);
+          if (!prepared.captioned) await sendCaption();
         } catch (err) {
           log(`could not send a picture: ${errorText(err)}`);
+          await sendCaption();
         }
       } else {
         if (reply.chips) setChoices({ chips: reply.chips, at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
@@ -264,15 +309,21 @@ export function createRunner(options: RunnerOptions): Runner {
     const listed = offered && now() - offered.at < offered.validMs ? offered.chips : [];
     const isNumber = /^\d{1,2}$/.test(text);
     const choice = isNumber ? listed[Number(text) - 1] : undefined;
+    // "all": every song on the list. Like a number, it keeps the list.
+    const all = listed.length > 0 && ALL_WORDS.has(normalize(text).replace(/[^\p{L}\p{N} ]/gu, '')) ? listed : undefined;
     // A number meant for the list stays within it; anything else moves on from it.
     const outOfRange = isNumber && listed.length > 0 && !choice;
-    if (!isNumber || listed.length === 0) setChoices(undefined);
+    if (!(isNumber || all) || listed.length === 0) setChoices(undefined);
     log(`<- ${choice ? `choice ${text}` : JSON.stringify(text)}`);
 
     const stopTyping = startTyping();
     try {
       const base = { from: chatID, messageId: message.id };
-      const incoming: Incoming = choice ? { ...base, postback: choice.postback } : { ...base, text };
+      const incoming: Incoming = choice
+        ? { ...base, postback: choice.postback }
+        : all
+          ? { ...base, postback: `all:${all.map((chip) => chip.postback).join('|')}` }
+          : { ...base, text };
       let replies: Reply[];
       if (outOfRange) {
         replies = [{ kind: 'text', text: `Pick a number from 1 to ${listed.length}, or text me another song name.` }];

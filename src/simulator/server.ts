@@ -6,6 +6,8 @@ import { checkAudio, megabytes } from '../audio-check.ts';
 import { AudioFetchError, fetchAudio, sanitizeFileName, type DownloadedAudio } from '../audio-fetch.ts';
 import { createBot } from '../bot.ts';
 import type { Catalog } from '../catalog.ts';
+import { createPictures, type Picture, type PreparedPicture } from '../library/images.ts';
+import { catalogBrowse } from '../library/browse.ts';
 import { LibraryJobs } from '../library/jobs.ts';
 import { createRunner, type Runner } from '../runner.ts';
 import { createMusicTableSource, resolvingAudio, type MusicTable } from '../sources/music-table.ts';
@@ -22,6 +24,8 @@ export interface SimulatorOptions {
   maxBytes?: number;
   pollMs?: number;
   now?: () => number;
+  /** How pictures are made. By default the real way (cards and collages drawn on this Mac), so the page shows what the phone gets. */
+  prepareImage?: (picture: Picture) => Promise<PreparedPicture>;
 }
 
 export interface Simulator {
@@ -83,6 +87,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     fetchAudio: (url: string, title?: string) => fetchAudio(url, title, { maxBytes }),
   };
   const audio = resolvingAudio(musicTable, real, { maxBytes });
+  const pictures = options.prepareImage ?? createPictures();
 
   /** Type and size of a file without downloading it. */
   async function describeFile(url: string): Promise<{ type: string; bytes: number }> {
@@ -106,6 +111,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
       return found;
     },
     get: (id: number) => catalog.get(id),
+    postTracks: (slug: string) => catalog.postTracks(slug),
   };
 
   const bot = createBot({
@@ -122,6 +128,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
       return result;
     },
     onPlay: (track) => catalog.recordPlay(track.id),
+    browse: catalogBrowse(catalog),
     ...(musicTable
       ? { source: createMusicTableSource({ musicTable, catalog, onNote: (note) => trace.add({ label: 'lookup', detail: note, tone: 'note' }) }) }
       : {}),
@@ -216,8 +223,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
       bot,
       chatID: 'simulated-chat',
       fetchAudio: prepare,
-      // The page shows a picture straight from where it lives, so nothing is downloaded here.
-      fetchImage: async (url) => ({ data: new Blob([]), fileName: 'cover.jpg', mimeType: 'image/jpeg', bytes: 0, sourceUrl: url }),
+      prepareImage: pictures,
       pollMs: options.pollMs ?? 40,
       log: onRunnerLog,
     });

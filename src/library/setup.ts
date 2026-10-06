@@ -2,10 +2,10 @@ import { dirname, join, resolve } from 'node:path';
 import type { AudioCheck } from '../audio-check.ts';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { Catalog } from '../catalog.ts';
-import { createImageFetcher, type DownloadedImage } from '../image-fetch.ts';
 import type { MusicTable } from '../sources/music-table.ts';
 import type { Reply, Track } from '../types.ts';
 import { AudioCache, cachedCheck, cachedFetch } from './audio-cache.ts';
+import { createPictures, type Picture, type PreparedPicture } from './images.ts';
 import { LibraryJobs, type DailyTime } from './jobs.ts';
 
 export interface LibraryOptions {
@@ -28,7 +28,8 @@ export interface LibraryOptions {
 export interface Library {
   checkAudio(url: string): Promise<AudioCheck>;
   fetchAudio(url: string, title?: string): Promise<DownloadedAudio>;
-  fetchImage(url: string): Promise<DownloadedImage>;
+  /** Album art ready to send: a song's card with its name drawn on, or the daily collage. */
+  prepareImage(picture: Picture): Promise<PreparedPicture>;
   onPlay(track: Track): void;
   /** Starts the sync, the songs kept ready and the daily message, which goes out through `announce`. */
   start(announce: (replies: Reply[]) => Promise<void>): void;
@@ -55,7 +56,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
   return {
     checkAudio: cache ? cachedCheck(cache, audio.checkAudio) : audio.checkAudio,
     fetchAudio: cache ? cachedFetch(cache, audio.fetchAudio, log) : audio.fetchAudio,
-    fetchImage: createImageFetcher(),
+    prepareImage: createPictures({ log }),
     onPlay: (track) => catalog.recordPlay(track.id),
     start(announce) {
       if (!musicTable) return;

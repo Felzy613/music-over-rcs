@@ -148,10 +148,10 @@ describe('runner over Beeper', () => {
     await runner.tick();
     assert.deepEqual(beeper.sent, [
       { text: '🎵 Nobody — Flaky File' },
-      { text: "🎵 I couldn't send that file: the file server answered HTTP 500." },
+      { text: '🎵 I couldn\'t send "Nobody — Flaky File": the file server answered HTTP 500.' },
     ]);
     assert.equal(beeper.uploads.length, 0);
-    assert.ok(logs.some((line) => line.includes('could not send audio')));
+    assert.ok(logs.some((line) => line.includes('could not get Nobody — Flaky File ready')));
   });
 
   test('stops sending when the per-minute limit is hit, and resumes later', async () => {

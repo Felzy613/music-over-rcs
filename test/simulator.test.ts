@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { get as httpGet, request as httpRequest } from 'node:http';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Catalog } from '../src/catalog.ts';
+import type { Picture, PreparedPicture } from '../src/library/images.ts';
 import { createSimulator, type Simulator } from '../src/simulator/server.ts';
 import { Trace } from '../src/simulator/trace.ts';
 import { MusicTable } from '../src/sources/music-table.ts';
@@ -12,6 +13,18 @@ const POSTS: MockPost[] = [
   { slug: 'yoely-weiss-purim-26', title: "Yoely Weiss - Purim '26", files: [{ name: "Yoely Weiss Purim '26.mp3" }] },
   { slug: 'benny-friedman-live', title: 'Benny Friedman - Live', files: [{ name: 'Benny Friedman - Live.mp3' }] },
 ];
+
+/** Stands in for drawing pictures: a song's card keeps its cover's address; a collage lists its covers. */
+const stubPictures = async (picture: Picture): Promise<PreparedPicture> => ({
+  image: {
+    data: new Blob([]),
+    fileName: 'cover.jpg',
+    mimeType: 'image/jpeg',
+    bytes: 0,
+    sourceUrl: picture.kind === 'collage' ? `collage:${picture.images.map((tile) => tile.number).join(',')}` : picture.url,
+  },
+  captioned: true,
+});
 
 interface Frame {
   event: string;
@@ -97,7 +110,7 @@ describe('message simulator', () => {
       trustedFileUrl: () => true,
       onEvent: (event) => trace.site(event),
     });
-    simulator = createSimulator({ catalog, musicTable, trace, pollMs: 5 });
+    simulator = createSimulator({ catalog, musicTable, trace, pollMs: 5, prepareImage: stubPictures });
     ({ url: base, port } = await simulator.listen(0));
   });
 
@@ -271,9 +284,9 @@ describe('message simulator', () => {
       const live = await stream();
       await say('weiss');
       const first = await live.waitFor((f) => f.event === 'trace-end');
-      const options = live.frames.map((f) => f.data).find((d) => d?.from === 'bot' && /^🎵 Which one\?/.test(d.text ?? ''));
-      assert.ok(options, 'the bot lists its options');
-      assert.match(options.text, /\n1\. .*\n2\. /);
+      const said = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data.text ?? '');
+      assert.ok(said.includes('🎵 Which one?'), 'the bot lists its options');
+      assert.ok(said.some((text) => text.startsWith('🎵 1. ')) && said.some((text) => text.startsWith('🎵 2. ')), 'one message per option');
 
       await say('2');
       const second = await live.waitFor((f) => f.event === 'trace-end' && f.data.id !== first.data.id);
@@ -367,7 +380,7 @@ describe('message simulator', () => {
       catalog = new Catalog(':memory:');
       trace = new Trace();
       const musicTable = new MusicTable({ baseUrl: art.url, minIntervalMs: 0, trustedFileUrl: () => true, onEvent: (event) => trace.site(event) });
-      simulator = createSimulator({ catalog, musicTable, trace, pollMs: 5 });
+      simulator = createSimulator({ catalog, musicTable, trace, pollMs: 5, prepareImage: stubPictures });
       ({ url: base, port } = await simulator.listen(0));
       const live = await stream();
       assert.equal((await post('/api/digest', {}, {})).status, 403, 'only from the page');
@@ -375,7 +388,7 @@ describe('message simulator', () => {
       const ended = await live.waitFor((f) => f.event === 'trace-end' && f.data.text === 'daily new-music message');
       const shown = live.frames.filter((f) => f.event === 'message').map((f) => f.data);
       assert.match(shown[0].text, /^🎵 New music · /);
-      assert.equal(shown[1].image.url, 'https://static.wixstatic.com/media/img1~mv2.png/v1/fill/w_640,h_360,al_c,q_80/cover.jpg');
+      assert.equal(shown[1].image.url, 'collage:1', 'one picture of the covers, numbered');
       assert.equal(shown[2].text, '🎵 1. Oizer Oberlander — Ana Elech · single');
       assert.match(shown[3].text, /Also new, video only:\n• Band - Clip/);
       const steps = labels(live.frames, ended.data.id).join('\n');
@@ -385,10 +398,9 @@ describe('message simulator', () => {
 
       await say('1');
       const picked = await live.waitFor((f) => f.event === 'trace-end' && f.data.choice === true);
-      const reply = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data).slice(-3);
-      assert.ok(reply[0].image, 'the album art first');
-      assert.equal(reply[1].text, '🎵 Oizer Oberlander — Ana Elech');
-      assert.match(reply[2].audio.name, /Ana Elech\.mp3$/);
+      const reply = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data).slice(-2);
+      assert.equal(reply[0].image.url, 'https://static.wixstatic.com/media/img1~mv2.png/v1/fill/w_640,h_360,al_c,q_80/cover.jpg', "the song's card first");
+      assert.match(reply[1].audio.name, /Ana Elech\.mp3$/, 'then the song: two messages');
       assert.equal(picked.data.text, '1');
     } finally {
       await finish();
@@ -400,7 +412,7 @@ describe('message simulator', () => {
     await finish();
     catalog = new Catalog(':memory:');
     trace = new Trace();
-    simulator = createSimulator({ catalog, musicTable: undefined, trace, pollMs: 5 });
+    simulator = createSimulator({ catalog, musicTable: undefined, trace, pollMs: 5, prepareImage: stubPictures });
     ({ url: base, port } = await simulator.listen(0));
     try {
       const live = await stream();

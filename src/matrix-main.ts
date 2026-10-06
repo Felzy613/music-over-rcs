@@ -59,7 +59,7 @@ try {
     bot,
     chatID: config.roomID,
     fetchAudio: library.fetchAudio,
-    fetchImage: library.fetchImage,
+    prepareImage: library.prepareImage,
     choices: choicesIn(catalog),
     links: linksIn(catalog),
     pollMs: config.pollMs,

@@ -21,8 +21,8 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
                                                      MatrixClient.sendImage / sendText / sendAudio ──> bridge ──> phone
 ```
 
-- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42` or `post:<slug>`) and returns replies: `text` (optionally with numbered options), `image`, `audio`.
-- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵), handles numbers and 👍, shows "typing…", prepares files and sends replies in order. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
+- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42`, `post:<slug>` or `all:…`) and returns replies: `text` (optionally with numbered options, or standing for one song), `image` (a cover, with the song's name to draw on it), `collage` (numbered covers), `audio`. A list is a heading, one text per entry, and a closing text with the options.
+- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵), handles numbers, `all` and 👍, shows "typing…", prepares pictures and files (songs download ahead, at most three at once) and sends replies in order. Where a 👍 can't reach the bot it folds a list back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
 - **Transports** implement `ChatClient` (`listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `setTyping`): `src/matrix/` (the bridge route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`) is a webhook server that uses the bot directly.
 
 ## Code layout
@@ -36,6 +36,8 @@ src/query.ts            words of a request ("play", "send me", "by" dropped)
 src/audio-check.ts      checks a link: reachable, audio, within the size limit
 src/audio-fetch.ts      downloads a direct audio link into memory
 src/image-fetch.ts      downloads album art (with a small memory)
+src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies
+src/library/images.ts   a song's card (cover + name) and the daily collage (numbered covers)
 src/sources/            music-table.com: the client, the lookup, relevance and spelling
 src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs
 src/matrix/             Matrix client, and joining a pasted multi-line command for the console

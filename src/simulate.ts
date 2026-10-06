@@ -2,7 +2,7 @@ import './load-env.ts';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { checkAudio, MAX_BYTES } from './audio-check.ts';
-import { createBot } from './bot.ts';
+import { createBot, joinLists } from './bot.ts';
 import { Catalog } from './catalog.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import type { Chip, Incoming, Reply } from './types.ts';
@@ -51,7 +51,11 @@ function print(reply: Reply): void {
     return;
   }
   if (reply.kind === 'image') {
-    console.log(`bot > [picture] ${reply.url}`);
+    console.log(`bot > [picture] ${reply.url}${reply.caption ? `\n      ${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}` : ''}`);
+    return;
+  }
+  if (reply.kind === 'collage') {
+    console.log(`bot > [one picture of ${reply.images.length} numbered covers]`);
     return;
   }
   console.log(`bot > ${reply.text.replaceAll('\n', '\n      ')}`);
@@ -92,7 +96,7 @@ for await (const line of rl) {
     const base = { from: '+15550000000', messageId: randomUUID() };
     const msg: Incoming = tapped ? { ...base, postback: tapped.postback } : { ...base, text: input };
     chips = [];
-    for (const reply of await bot.handle(msg)) print(reply);
+    for (const reply of joinLists(await bot.handle(msg))) print(reply);
   }
   prompt();
 }

@@ -1,4 +1,4 @@
-import type { Bot } from './bot.ts';
+import { joinLists, type Bot } from './bot.ts';
 import type { UserEvent } from './rbm/webhook.ts';
 import type { Reply } from './types.ts';
 
@@ -73,7 +73,8 @@ export function createEventHandler(deps: HandlerDeps): (event: UserEvent) => Pro
       replies = [{ kind: 'text', text: ERROR_NOTICE }];
     }
 
-    for (const reply of replies) {
+    // Options are tappable chips here, so a list stays one message.
+    for (const reply of joinLists(replies)) {
       if (await attempt(`sending ${reply.kind} reply`, () => deps.rbm.send(from, reply))) continue;
       if (reply.kind === 'audio') {
         await attempt('sending failure notice', () => deps.rbm.send(from, { kind: 'text', text: REJECTED_NOTICE }));

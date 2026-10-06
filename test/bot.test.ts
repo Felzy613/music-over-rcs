@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { AudioCheck } from '../src/audio-check.ts';
-import { createBot, describe as describeTrack, HELP_TEXT, SourceError } from '../src/bot.ts';
+import { createBot, describe as describeTrack, HELP_TEXT, joinLists, SourceError } from '../src/bot.ts';
 import { Catalog } from '../src/catalog.ts';
 import type { Reply, Track } from '../src/types.ts';
 import { SAMPLE } from './helpers/sample.ts';
@@ -89,26 +89,36 @@ describe('bot', () => {
     assert.deepEqual((await ask('blue horizon live'))[1], audio(byTitle('Blue Horizon (Live)')));
   });
 
-  test('an ambiguous request lists the options with numbered chips', async () => {
+  test('an ambiguous request lists the options: a heading, one message per option (a 👍 on it picks it), and numbered chips', async () => {
     const { ask, byTitle } = setup();
     const replies = await ask('night owls');
-    assert.equal(replies.length, 1);
-    const reply = textOf(replies[0]);
-    assert.equal(
-      reply.text,
-      'Which one?\n1. The Night Owls — Blue Horizon\n2. The Night Owls — Blue Horizon (Live)',
+    const blue = `play:${byTitle('Blue Horizon').id}`;
+    const live = `play:${byTitle('Blue Horizon (Live)').id}`;
+    assert.deepEqual(
+      replies.map((reply) => (reply.kind === 'text' ? [reply.text, reply.postback ?? ''] : [reply.kind, ''])),
+      [
+        ['Which one?', ''],
+        ['1. The Night Owls — Blue Horizon', blue],
+        ['2. The Night Owls — Blue Horizon (Live)', live],
+        ['Reply with a number or 👍 one to choose.', ''],
+      ],
     );
-    assert.deepEqual(reply.chips, [
-      { label: '1. Blue Horizon', postback: `play:${byTitle('Blue Horizon').id}` },
-      { label: '2. Blue Horizon (Live)', postback: `play:${byTitle('Blue Horizon (Live)').id}` },
+    assert.deepEqual(textOf(replies.at(-1)).chips, [
+      { label: '1. Blue Horizon', postback: blue },
+      { label: '2. Blue Horizon (Live)', postback: live },
     ]);
+    // Where a 👍 can't be seen, it's one message again, without the word about 👍.
+    assert.deepEqual(
+      joinLists(replies).map((reply) => (reply.kind === 'text' ? reply.text : reply.kind)),
+      ['Which one?\n1. The Night Owls — Blue Horizon\n2. The Night Owls — Blue Horizon (Live)\n\nReply with a number to choose.'],
+    );
   });
 
   test('chip labels are cut to 25 characters', async () => {
     const { catalog, ask } = setup();
     catalog.add({ title: 'A very long song title that keeps going 🎵 part one', artist: 'Verbose Band', url: 'https://cdn.example.test/v1.mp3' });
     catalog.add({ title: 'A very long song title that keeps going 🎵 part two', artist: 'Verbose Band', url: 'https://cdn.example.test/v2.mp3' });
-    const chips = textOf((await ask('verbose band'))[0]).chips ?? [];
+    const chips = textOf((await ask('verbose band')).at(-1)).chips ?? [];
     assert.equal(chips.length, 2);
     for (const chip of chips) assert.ok(Array.from(chip.label).length <= 25, chip.label);
     assert.ok(chips[0]?.label.endsWith('…'));
@@ -134,12 +144,11 @@ describe('bot', () => {
     ]);
   });
 
-  test('a song with a picture: the picture first, then its name, then the file', async () => {
+  test('a song with a picture: its card (the cover with its name on it), then the file; two messages', async () => {
     const { catalog, ask } = setup();
     const art = catalog.add({ title: 'Ana Elech', artist: 'Oizer Oberlander', url: 'https://cdn.example.test/ana.mp3', cover: 'https://img.example.test/ana.jpg' });
     assert.deepEqual(await ask('oizer oberlander ana elech'), [
-      { kind: 'image', url: 'https://img.example.test/ana.jpg' },
-      { kind: 'text', text: '🎵 Oizer Oberlander — Ana Elech' },
+      { kind: 'image', url: 'https://img.example.test/ana.jpg', caption: { title: 'Ana Elech', artist: 'Oizer Oberlander' } },
       audio(art),
     ]);
   });
@@ -194,9 +203,13 @@ describe('bot', () => {
         c.add({ title: 'Shabbos', artist: 'Yoely Weiss', url: 'https://cdn.example.test/s.mp3' }),
       ]);
       catalog.add({ title: 'Shabbos', artist: 'Yoely Weiss', url: 'https://cdn.example.test/s.mp3' });
-      const reply = textOf((await ask('yoely weiss'))[0]);
+      const replies = await ask('yoely weiss');
       assert.deepEqual(asked, ['yoely weiss']);
-      assert.equal(reply.text, 'Which one?\n1. Yoely Weiss — Purim\n2. Yoely Weiss — Shabbos', 'its results first, no repeats');
+      assert.deepEqual(
+        replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : [])),
+        ['1. Yoely Weiss — Purim', '2. Yoely Weiss — Shabbos'],
+        'its results first, no repeats',
+      );
     });
 
     test('when the other place fails, what the catalog has is still offered', async () => {

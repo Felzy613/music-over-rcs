@@ -11,7 +11,7 @@ export interface DigestItem {
 
 export interface DigestOptions {
   date: Date;
-  /** How many songs get their picture. More than this are listed in text, so the message stays short. */
+  /** How many covers go in the picture at the top (the rest are listed only). */
   maxPictures?: number;
   /** How long the numbers stay pickable. */
   chipsValidMs?: number;
@@ -30,9 +30,9 @@ function chip(n: number, title: string): Chip['label'] {
 }
 
 /**
- * The daily new-music message: a heading, then each new song with its picture and number, then the posts that are
- * only videos, and a closing line. Replying with a number sends that song. No songs are sent by the message itself.
- * Returns nothing when there is nothing new.
+ * The daily new-music message: a heading, one picture of the new songs' covers (numbered), one line per song, then
+ * the posts that are only videos, and a closing line. Replying with a number, or a 👍 on a song's line, sends that
+ * song; the message itself sends none. Returns nothing when there is nothing new.
  */
 export function buildDigest(items: DigestItem[], options: DigestOptions): Reply[] {
   const songs = items.filter((item): item is DigestItem & { song: Track } => item.song !== undefined);
@@ -43,7 +43,7 @@ export function buildDigest(items: DigestItem[], options: DigestOptions): Reply[
   const count = songs.length === 1 ? '1 new song' : `${songs.length} new songs`;
   const replies: Reply[] = [{ kind: 'text', text: `New music · ${day}${songs.length > 0 ? `\n${count} on music-table.com` : ''}` }];
 
-  const maxPictures = options.maxPictures ?? 6;
+  const maxPictures = options.maxPictures ?? 9;
   const isAlbum = (item: DigestItem): boolean => item.post.audioFiles > 1;
   const line = (n: number, item: DigestItem & { song: Track }): string => {
     if (isAlbum(item)) {
@@ -56,20 +56,16 @@ export function buildDigest(items: DigestItem[], options: DigestOptions): Reply[
   };
   // Picking an album lists its songs; picking a song sends it.
   const pick = (item: DigestItem & { song: Track }): string => (isAlbum(item) ? `post:${item.post.slug}` : `play:${item.song.id}`);
-  const rest: string[] = [];
-  songs.forEach((item, i) => {
-    if (i < maxPictures) {
-      // A 👍 on the picture or the line gets the song.
-      const postback = pick(item);
-      if (item.song.cover ?? item.post.cover) replies.push({ kind: 'image', url: (item.song.cover ?? item.post.cover)!, postback });
-      replies.push({ kind: 'text', text: line(i + 1, item), postback });
-    } else {
-      rest.push(line(i + 1, item));
-    }
-  });
+  // One picture of all the covers, numbered, then one line per song: a 👍 on a line gets that song.
+  const collage = songs
+    .slice(0, maxPictures)
+    .map((item, i) => ({ url: (item.song.cover ?? item.post.cover)!, label: describe(item.song), number: i + 1, has: Boolean(item.song.cover ?? item.post.cover) }))
+    .filter((tile) => tile.has)
+    .map(({ url, label, number }) => ({ url, label, number }));
+  if (collage.length > 0) replies.push({ kind: 'collage', images: collage });
+  songs.forEach((item, i) => replies.push({ kind: 'text', text: line(i + 1, item), postback: pick(item) }));
 
   const closing: string[] = [];
-  if (rest.length > 0) closing.push(rest.join('\n'));
   if (videos.length > 0) closing.push(`Also new, video only:\n${videos.map((item) => `• ${item.post.title}`).join('\n')}`);
   if (songs.length > 0) closing.push('Reply with a number or 👍 a song to get it, or text me any name.');
   replies.push({

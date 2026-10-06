@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import type { DownloadedAudio } from '../src/audio-fetch.ts';
 import { splitArtists } from '../src/artists.ts';
-import { createBot } from '../src/bot.ts';
+import { createBot, joinLists } from '../src/bot.ts';
 import { Catalog, choicesIn, linksIn, type SitePost } from '../src/catalog.ts';
 import { catalogBrowse } from '../src/library/browse.ts';
 import { AudioCache, cachedCheck, cachedFetch, prefetch, songsToKeep } from '../src/library/audio-cache.ts';
@@ -268,7 +268,7 @@ describe('library: the daily message', () => {
     ...(cover ? { cover } : {}),
   });
 
-  test('a heading, then for each song its picture and a numbered line, then the video-only posts and how to pick', () => {
+  test('a heading, one picture of the covers (numbered), a line per song, then the video-only posts and how to pick', () => {
     const replies = buildDigest(
       [
         { post: sitePost('ana-elech', 'Singles'), song: song(7, 'Ana Elech', 'Oizer Oberlander', 'https://img.test/1.jpg') },
@@ -278,20 +278,21 @@ describe('library: the daily message', () => {
       { date: at(5, 9) },
     );
     assert.deepEqual(
-      replies.map((reply) => (reply.kind === 'text' ? reply.text : `[${reply.kind}] ${reply.url}`)),
+      replies.map((reply) =>
+        reply.kind === 'text' ? reply.text : reply.kind === 'collage' ? `[collage] ${reply.images.map((tile) => `${tile.number} ${tile.label} ${tile.url}`).join(' | ')}` : `[${reply.kind}]`,
+      ),
       [
         'New music · Monday, Oct 5\n2 new songs on music-table.com',
-        '[image] https://img.test/1.jpg',
+        '[collage] 1 Oizer Oberlander — Ana Elech https://img.test/1.jpg | 2 Hershey Eisenbach — Makdim Shalom https://img.test/3.jpg',
         '1. Oizer Oberlander — Ana Elech · single',
-        '[image] https://img.test/3.jpg',
         '2. Hershey Eisenbach — Makdim Shalom · music video',
         'Also new, video only:\n• Some Band - The Clip\n\nReply with a number or 👍 a song to get it, or text me any name.',
       ],
     );
-    // The picture and the line of each song stand for it, so a 👍 on either gets it.
+    // Each song's line stands for it, so a 👍 on it gets the song.
     assert.deepEqual(
-      replies.flatMap((reply) => (reply.kind !== 'audio' && reply.postback ? [`${reply.kind} ${reply.postback}`] : [])),
-      ['image play:7', 'text play:7', 'image play:9', 'text play:9'],
+      replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.postback] : [])),
+      ['play:7', 'play:9'],
     );
     const last = replies.at(-1)!;
     assert.ok(last.kind === 'text' && last.chips);
@@ -299,11 +300,13 @@ describe('library: the daily message', () => {
     assert.equal(last.chipsValidMs, 24 * 60 * 60_000, 'the numbers work all day');
   });
 
-  test('songs beyond the picture limit are listed in text, still numbered', () => {
+  test('the picture holds up to the limit of covers; every song still gets its numbered line', () => {
     const items = [1, 2, 3].map((n) => ({ post: sitePost(`p${n}`, 'Singles', 1, `https://img.test/${n}.jpg`), song: song(n, `Song ${n}`, 'Band') }));
     const replies = buildDigest(items, { date: at(5, 9), maxPictures: 2 });
-    assert.equal(replies.filter((reply) => reply.kind === 'image').length, 2);
-    assert.match(texts(replies).at(-1)!, /^3\. Band — Song 3 · single\n\nReply with a number/);
+    const collage = replies.find((reply) => reply.kind === 'collage');
+    assert.ok(collage && collage.kind === 'collage');
+    assert.deepEqual(collage.images.map((tile) => tile.number), [1, 2]);
+    assert.deepEqual(texts(replies).filter((line) => /^\d\. /.test(line)), ['1. Band — Song 1 · single', '2. Band — Song 2 · single', '3. Band — Song 3 · single']);
   });
 
   test('a day with nothing new sends nothing', () => {
@@ -378,7 +381,7 @@ describe('library: the schedule', () => {
     await t.jobs.check();
     assert.equal(t.sent.length, 1);
     assert.match(texts(t.sent[0]!)[0]!, /^New music · Wednesday, Oct 7\n1 new song on music-table\.com$/);
-    assert.ok(t.sent[0]!.some((reply) => reply.kind === 'image'), 'with the album art');
+    assert.ok(t.sent[0]!.some((reply) => reply.kind === 'collage'), 'with the album art');
     t.setClock(at(7, 9, 5));
     await t.jobs.check();
     assert.equal(t.sent.length, 1, 'once a day');
@@ -740,8 +743,9 @@ describe('library: artists, trending and new', () => {
   describe('the bot with lists', () => {
     const bot = () => createBot({ catalog, checkAudio: async () => ({ ok: true, type: 'audio/mpeg' }), browse: catalogBrowse(catalog, () => at(6, 12)), now: () => at(6, 12) });
     const ask = (text: string) => bot().handle({ from: 'me', messageId: 'm', text });
+    // The lists as one message each, as a chat without 👍 gets them; the split form has its own tests.
     const text = (replies: Reply[]) => {
-      const first = replies[0];
+      const first = joinLists(replies)[0];
       assert.ok(first && first.kind === 'text');
       return first;
     };
@@ -780,8 +784,23 @@ describe('library: artists, trending and new', () => {
       assert.match(list.text, /\n1\. TYH Nation — Bardichevers \(Full Album\) · album, 3 songs · Oct 5\n2\. Yaakov Shwekey — Elul · Oct 4/);
       assert.equal(list.chips?.[0]?.postback, 'post:tyh');
       const album = await bot().handle({ from: 'me', messageId: 'm', postback: 'post:tyh' });
-      assert.equal(text(album).text, 'TYH Nation · 3 songs\n1. 01 Intro\n2. 02 Yiddishkeit\n3. 10 Finale', 'track 10 after track 1, not before 2');
+      assert.equal(text(album).text, 'TYH Nation · 3 songs\n1. 01 Intro\n2. 02 Yiddishkeit\n3. 10 Finale\n\nReply with a number to get it.', 'track 10 after track 1, not before 2');
       assert.match(text(await ask('tyh nation')).text, /\n1\. Bardichevers \(Full Album\) · album, 3 songs · Oct 5$/m);
+    });
+
+    test('"all" on a list with an album sends the album\'s songs too, at most twenty, and says what it could not send', async () => {
+      catalog.savePost(post({ slug: 'big', title: 'Band - Big Album', publishedAt: iso(at(5, 12)), audioFiles: 25 }));
+      for (let n = 0; n < 25; n += 1) catalog.add({ title: `Track ${n + 1}`, artist: 'Band', url: `https://x.test/post/big#${n}`, post: 'big' });
+      const single = song('single', 'Single', 'Band', 4, 10);
+      const checked = createBot({
+        catalog,
+        checkAudio: async (url) => (url.endsWith('#2') ? { ok: false, reason: 'gone' } : { ok: true, type: 'audio/mpeg' }),
+        browse: catalogBrowse(catalog, () => at(6, 12)),
+      });
+      const replies = await checked.handle({ from: 'me', messageId: 'm', postback: `all:play:${single.id}|post:big` });
+      assert.equal(replies[0]?.kind === 'text' && replies[0].text, '🎵 Here come all 19 songs (the first 20 of 26):');
+      assert.equal(replies.filter((reply) => reply.kind === 'audio').length, 19);
+      assert.deepEqual(replies.at(-1), { kind: 'text', text: "I couldn't send Band — Track 3." }, 'the file at #2 is the third track');
     });
 
     test('a song name still plays the song, and help mentions the lists', async () => {

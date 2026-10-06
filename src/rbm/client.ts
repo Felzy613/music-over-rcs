@@ -166,9 +166,15 @@ export class RbmClient {
     await this.#sendMessage(to, { contentInfo: { fileUrl, forceRefresh: false } });
   }
 
-  send(to: string, reply: Reply): Promise<void> {
+  async send(to: string, reply: Reply): Promise<void> {
     if (reply.kind === 'audio') return this.sendAudio(to, reply.url);
-    if (reply.kind === 'image') return this.sendImage(to, reply.url);
+    if (reply.kind === 'collage') return; // its songs are listed in the messages around it
+    if (reply.kind === 'image') {
+      // Google shows the cover; the song's name goes under it as text.
+      await this.sendImage(to, reply.url);
+      if (reply.caption) await this.sendText(to, `${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}`);
+      return;
+    }
     return this.sendText(to, reply.text, reply.chips);
   }
 

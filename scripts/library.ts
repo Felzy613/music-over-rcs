@@ -4,7 +4,7 @@ import { checkAudio } from '../src/audio-check.ts';
 import { fetchAudio } from '../src/audio-fetch.ts';
 import { Catalog, choicesIn, linksIn } from '../src/catalog.ts';
 import { loadMatrixConfig } from '../src/config.ts';
-import { createImageFetcher } from '../src/image-fetch.ts';
+import { createPictures } from '../src/library/images.ts';
 import { AudioCache } from '../src/library/audio-cache.ts';
 import { LibraryJobs, localDay, parseDailyTime, STATE } from '../src/library/jobs.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
@@ -108,7 +108,7 @@ try {
       bot: { handle: async () => [] },
       chatID: config.roomID,
       fetchAudio: audio.fetchAudio,
-      fetchImage: createImageFetcher(),
+      prepareImage: createPictures({ log: (line) => console.log(line) }),
       // Kept where the bot looks, so replying with a number from this message works.
       choices: choicesIn(catalog),
       links: linksIn(catalog),
@@ -122,6 +122,7 @@ try {
     if (replies.length === 0) console.log(`Nothing new${days ? ` in the last ${days} days` : ' since the last daily message'}. Try --days 3.`);
     for (const reply of replies) {
       if (reply.kind === 'image') console.log(`  [picture] ${reply.url}`);
+      else if (reply.kind === 'collage') console.log(`  [one picture of ${reply.images.length} numbered covers]`);
       else if (reply.kind === 'text') console.log(`  ${markBotText(reply.text).replaceAll('\n', '\n  ')}`);
     }
     if (replies.length > 0) console.log('\nNothing was sent. Add --send to send it to your chat now.');

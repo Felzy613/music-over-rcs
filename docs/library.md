@@ -42,7 +42,7 @@ They're downloaded after each sync, and once when the bot starts, one at a time 
 
 ## The daily new-music message
 
-At `DIGEST_TIME` (09:00 by default, your Mac's time) the bot syncs, then sends what was published since the last message: a heading, each new song or album with its picture and a number, the posts that are only videos, and a closing line. Replying with a number (all day) or a 👍 on a song gets that song. See [Using the bot](using-the-bot.md#the-daily-new-music-message).
+At `DIGEST_TIME` (09:00 by default, your Mac's time) the bot syncs, then sends what was published since the last message: a heading, one picture of the new covers in a numbered grid (drawn on your Mac), a line per song or album, the posts that are only videos, and a closing line. Replying with a number (all day), `all`, or a 👍 on a song's line gets it. See [Using the bot](using-the-bot.md#the-daily-new-music-message).
 
 - Nothing new, no message; the day still counts as done.
 - The first time the bot runs with it on, it waits for the next scheduled time instead of sending in the middle of the day.

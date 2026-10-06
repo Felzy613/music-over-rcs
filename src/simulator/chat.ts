@@ -23,6 +23,8 @@ export class SimulatedChat implements ChatClient {
   readonly messages: SimMessage[] = [];
   readonly events = new EventEmitter();
   typing = false;
+  /** Shown as the phone shows it: lists one entry per message. */
+  readonly reactions = true;
   /** The play link to attach to the next audio message; set by whoever prepared the file. */
   nextAudioLink: string | undefined;
   #inbox: ChatMessage[] = [];

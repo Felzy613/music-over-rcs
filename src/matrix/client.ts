@@ -174,6 +174,8 @@ export class MatrixClient {
   #since: string | undefined;
   #userId: string | undefined;
   #sent = new Set<string>();
+  /** The bridge passes reactions on, so a 👍 on a song in a list can get it. */
+  readonly reactions = true;
 
   constructor(options: MatrixClientOptions) {
     this.#base = (options.homeserver ?? DEFAULT_HOMESERVER).replace(/\/+$/, '');
