@@ -9,7 +9,8 @@ The bot shows a notification titled **Music over RCS** when something it depends
 | Notification | What to do |
 | --- | --- |
 | Google Messages is logged out of the bridge | `npm run matrix-console`, then `login google`, and follow the bridge's steps (the same as the first time) |
-| The bridge can't reach Google Messages. Is your phone on and online? | The phone is off, offline, or Google Messages was closed for a long time. Open Google Messages on the phone. (Short drops are normal and aren't reported; this one has lasted 15 minutes.) |
+| This Mac has no internet | The Mac can't reach the internet, even if Wi-Fi shows connected: usually the router's or the provider's connection is down, so restarting the modem and router is the fix. Texts you send meanwhile aren't lost: the bridge picks them up within a minute of the internet coming back, and the bot answers them. (Said after ten minutes, and only once.) |
+| The bridge can't reach Google Messages | The internet works but the bridge can't get through to Google. With "phone" in the reason, open Google Messages on the phone; otherwise `npm run stack -- restart` if it lasts. (Short drops are normal and aren't reported; this one has lasted 15 minutes.) |
 | RCS chats are off on your phone | Google Messages → Settings → RCS chats → on. Without RCS, files this size can't be sent. |
 | The Google Messages bridge isn't answering | `npm run stack -- start` (or `npm run stack -- status` to see what stopped) |
 | The bot can't reach the Matrix homeserver | `npm run stack -- start` |

@@ -106,7 +106,8 @@ The bot keeps an eye on the pieces it depends on and shows a **Mac notification*
 
 | Check | How often | Notification |
 | --- | --- | --- |
-| The bridge's login to Google Messages (asked from the bridge on your Mac) | Every 5 minutes | Logged out (log in again); can't reach Google for 15 minutes or more (is the phone on?); RCS chats off on the phone; the bridge not answering |
+| The bridge's login to Google Messages (asked from the bridge on your Mac) | Every 5 minutes | Logged out (log in again); can't reach Google for 15 minutes or more; RCS chats off on the phone; the bridge not answering |
+| This Mac's internet (asked only when the bridge isn't connected: one small request to Google) | Every 5 minutes | After ten minutes without it. Then nothing else is blamed: not the bridge, the phone or the site |
 | The Matrix homeserver | Every check of the chat | After 20 failed checks in a row (about five minutes, as the checks slow down while it fails) |
 | music-table.com | Every sync | After two failed syncs in a row |
 

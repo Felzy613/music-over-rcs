@@ -350,4 +350,48 @@ describe('health on the Mac', () => {
     await watch.check();
     assert.match(shown.at(-1)!, /isn't answering\. Start it: npm run stack -- start/);
   });
+
+  test('the same trouble in other words is not announced again until the hours pass', () => {
+    let clock = day(2026, 10, 6, 1);
+    const { shown, notify } = notices();
+    const health = new Health({ notify, now: () => clock, repeatMs: 6 * 60 * 60_000 });
+    health.problem('bridge', 'error A');
+    clock = day(2026, 10, 6, 1, 5);
+    health.problem('bridge', 'error B');
+    clock = day(2026, 10, 6, 1, 10);
+    health.problem('bridge', 'error A');
+    assert.deepEqual(shown, ['error A']);
+    assert.equal(health.problems()[0]?.message, 'error A', 'kept up to date');
+    clock = day(2026, 10, 6, 7, 30);
+    health.problem('bridge', 'error B');
+    assert.deepEqual(shown, ['error A', 'error B']);
+  });
+
+  test("when this Mac has no internet that's what is said, after ten minutes, and the bridge isn't blamed; then its return", async () => {
+    let clock = day(2026, 10, 6, 23);
+    let up = false;
+    let status: BridgeStatus = { state: 'TRANSIENT_DISCONNECT', error: 'gm-ping-failed', rcsEnabled: true };
+    const { shown, notify } = notices();
+    const health = new Health({ notify, now: () => clock });
+    const watch = new BridgeWatch({ health, now: () => clock, status: async () => status, online: async () => up });
+    await watch.check();
+    clock = day(2026, 10, 6, 23, 5);
+    await watch.check();
+    assert.equal(shown.length, 0, 'a short drop: nothing yet');
+    for (const minute of [10, 15, 20, 25, 30]) {
+      clock = day(2026, 10, 6, 23, minute);
+      await watch.check();
+    }
+    assert.deepEqual(shown, ["This Mac has no internet (it may still show Wi-Fi as connected). Texts you send meanwhile are answered when it's back."]);
+    assert.equal(health.has('bridge'), false, 'nothing blamed on the bridge or the phone');
+
+    up = true;
+    clock = day(2026, 10, 7, 10);
+    await watch.check();
+    assert.equal(shown.at(-1), 'Fixed: this Mac is back online.');
+    status = { state: 'CONNECTED', rcsEnabled: true };
+    clock = day(2026, 10, 7, 10, 5);
+    await watch.check();
+    assert.equal(shown.length, 2, 'the bridge got its fresh while to reconnect, and did');
+  });
 });

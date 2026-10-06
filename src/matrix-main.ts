@@ -3,7 +3,7 @@ import { checkAudio } from './audio-check.ts';
 import { fetchAudio } from './audio-fetch.ts';
 import { createBot } from './bot.ts';
 import { Catalog, choicesIn, linksIn } from './catalog.ts';
-import { Health, BridgeWatch, bridgeStatus } from './health.ts';
+import { Health, BridgeWatch, bridgeStatus, online } from './health.ts';
 import { loadMatrixConfig } from './config.ts';
 import { describeMatrixError, MatrixClient } from './matrix/client.ts';
 import { setUpLibrary } from './library/setup.ts';
@@ -52,7 +52,9 @@ try {
     archiveDir: config.archiveDir,
     onArchive: (problem) => (problem ? health.problem('archive', problem) : health.ok('archive', 'Fixed: the songs folder on the drive can be used again.')),
     quiet: config.quiet,
-    onSite: (ok, problem) => (ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.problem('site', problem ?? "music-table.com isn't answering.")),
+    // With no internet at all, that's the one thing said; the site isn't blamed for it.
+    onSite: (ok, problem) =>
+      ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.has('internet') ? undefined : health.problem('site', problem ?? "music-table.com isn't answering."),
     log,
   });
   const bot = createBot({
@@ -82,7 +84,7 @@ try {
   await runner.start();
   library.start((replies) => runner.announce(replies));
   // Every few minutes: is Google Messages still logged in to the bridge, and reachable?
-  const bridge = new BridgeWatch({ health, status: () => bridgeStatus({ url: config.bridgeUrl, token: config.token, userId }) });
+  const bridge = new BridgeWatch({ health, status: () => bridgeStatus({ url: config.bridgeUrl, token: config.token, userId }), online });
   const watching = setInterval(() => void bridge.check(), 5 * 60_000);
   watching.unref();
   void bridge.check();

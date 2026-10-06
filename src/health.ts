@@ -37,11 +37,18 @@ export class Health {
     this.#save = options.save;
   }
 
-  /** Something is wrong. Announced now, then again only every few hours while it lasts. */
+  /** Something is wrong. Announced now, then again only every few hours while it lasts, whatever its details say by then. */
   problem(key: string, message: string): void {
     const now = this.#now().getTime();
     const known = this.#problems.get(key);
-    if (known && known.message === message && now - known.told < this.#repeatMs) return;
+    if (known && now - known.told < this.#repeatMs) {
+      // The same trouble in other words (the bridge's error alternates between two): kept up to date, not said again.
+      if (known.message !== message) {
+        known.message = message;
+        this.#persist();
+      }
+      return;
+    }
     this.#problems.set(key, { key, message, since: known?.since ?? new Date(now).toISOString(), told: now });
     this.#log(`problem: ${message}`);
     void this.#notify('Music over RCS', message);
@@ -57,6 +64,11 @@ export class Health {
     this.#log(message);
     void this.#notify('Music over RCS', message);
     this.#persist();
+  }
+
+  /** Whether this is a problem right now. */
+  has(key: string): boolean {
+    return this.#problems.has(key);
   }
 
   problems(): Problem[] {
@@ -106,18 +118,39 @@ export async function bridgeStatus(options: { url: string; token: string; userId
 }
 
 /**
- * Turns the bridge's status into problems: logged out (log in again), not reaching Google (after a while: the phone
- * may be off or offline), RCS off on the phone, or the bridge not running.
+ * Whether this Mac can reach the internet: any answer from Google's "no content" address counts. Wi-Fi can stay
+ * connected while nothing gets through (the router's own connection is down), so this asks the internet itself.
+ */
+export async function online(doFetch: typeof fetch = fetch): Promise<boolean> {
+  try {
+    const res = await doFetch('https://www.google.com/generate_204', { method: 'HEAD', signal: AbortSignal.timeout(8000) });
+    await res.body?.cancel().catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const OFFLINE_GRACE_MS = 10 * 60_000;
+const TROUBLE_GRACE_MS = 15 * 60_000;
+
+/**
+ * Turns the bridge's status into problems: logged out (log in again), not reaching Google (after a while), RCS off
+ * on the phone, or the bridge not running. When the bridge can't reach Google because this Mac has no internet,
+ * that is what's said instead (once, after ten minutes), with nothing blamed on the bridge or the phone.
  */
 export class BridgeWatch {
   #health: Health;
   #status: () => Promise<BridgeStatus>;
+  #online: (() => Promise<boolean>) | undefined;
   #now: () => Date;
   #troubleSince: number | undefined;
+  #offlineSince: number | undefined;
 
-  constructor(options: { health: Health; status: () => Promise<BridgeStatus>; now?: () => Date }) {
+  constructor(options: { health: Health; status: () => Promise<BridgeStatus>; online?: () => Promise<boolean>; now?: () => Date }) {
     this.#health = options.health;
     this.#status = options.status;
+    this.#online = options.online;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -129,19 +162,35 @@ export class BridgeWatch {
       this.#health.problem('bridge', "The Google Messages bridge isn't answering. Start it: npm run stack -- start");
       return;
     }
+    const now = this.#now().getTime();
+    const loggedOut = !status.state || status.state === 'BAD_CREDENTIALS' || status.state === 'LOGGED_OUT';
+    const connected = status.state === 'CONNECTED' || status.state === 'BACKFILLING';
+    if (!loggedOut && !connected && this.#online && !(await this.#online())) {
+      this.#offlineSince ??= now;
+      if (now - this.#offlineSince >= OFFLINE_GRACE_MS) {
+        this.#health.problem('internet', "This Mac has no internet (it may still show Wi-Fi as connected). Texts you send meanwhile are answered when it's back.");
+      }
+      return;
+    }
+    if (this.#offlineSince !== undefined) {
+      this.#offlineSince = undefined;
+      this.#health.ok('internet', 'Fixed: this Mac is back online.');
+      // The bridge gets a fresh while to reconnect before it's anything's fault.
+      if (this.#troubleSince !== undefined) this.#troubleSince = now;
+    }
     const why = status.message || status.error;
-    if (!status.state || status.state === 'BAD_CREDENTIALS' || status.state === 'LOGGED_OUT') {
+    if (loggedOut) {
       this.#troubleSince = undefined;
       this.#health.problem('bridge', `Google Messages is logged out of the bridge${why ? ` (${why})` : ''}. Log in again: npm run matrix-console, then "login google".`);
-    } else if (status.state === 'CONNECTED' || status.state === 'BACKFILLING') {
+    } else if (connected) {
       this.#troubleSince = undefined;
       this.#health.ok('bridge', 'Fixed: the bridge is connected to Google Messages again.');
     } else {
       // Brief disconnects happen; only one that lasts is worth a word.
-      const now = this.#now().getTime();
       this.#troubleSince ??= now;
-      if (now - this.#troubleSince >= 15 * 60_000) {
-        this.#health.problem('bridge', `The bridge can't reach Google Messages${why ? ` (${why})` : ''}. Is your phone on and online?`);
+      if (now - this.#troubleSince >= TROUBLE_GRACE_MS) {
+        const hint = /phone/i.test(why ?? '') ? 'Is your phone on and online?' : 'It keeps trying; if this lasts, restart it: npm run stack -- restart';
+        this.#health.problem('bridge', `The bridge can't reach Google Messages${why ? ` (${why})` : ''}. ${hint}`);
       }
     }
     if (status.rcsEnabled === false) this.#health.problem('rcs', "RCS chats are off on your phone, so songs can't be sent. Turn them on: Messages → Settings → RCS chats.");
