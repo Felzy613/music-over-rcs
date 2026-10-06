@@ -1,0 +1,39 @@
+{
+  "name": "music-over-rcs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Text a song name in Google Messages and get the audio file back: a personal bot for the mautrix-gmessages bridge, Beeper, or an RCS for Business agent.",
+  "repository": "github:Felzy613/music-over-rcs",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "simulate": "node --disable-warning=ExperimentalWarning src/simulate.ts",
+    "simulate:web": "node --disable-warning=ExperimentalWarning src/simulate-web.ts",
+    "catalog": "node --disable-warning=ExperimentalWarning scripts/catalog.ts",
+    "invite-tester": "node scripts/invite-tester.ts",
+    "send-test": "node scripts/send-test.ts",
+    "beeper": "node --disable-warning=ExperimentalWarning src/beeper-main.ts",
+    "beeper-chats": "node scripts/beeper-chats.ts",
+    "beeper-send": "node scripts/beeper-send.ts",
+    "matrix": "node --disable-warning=ExperimentalWarning src/matrix-main.ts",
+    "matrix-login": "node scripts/matrix-login.ts",
+    "matrix-console": "node scripts/matrix-console.ts",
+    "matrix-rooms": "node --disable-warning=ExperimentalWarning scripts/matrix-rooms.ts",
+    "matrix-send": "node scripts/matrix-send.ts",
+    "music-table": "node --disable-warning=ExperimentalWarning scripts/music-table.ts",
+    "library": "node --disable-warning=ExperimentalWarning scripts/library.ts",
+    "mac:setup": "bash deploy/mac/setup.sh",
+    "stack": "bash deploy/mac/stack",
+    "homeserver": "bash deploy/mac/stack run synapse",
+    "gmessages-bridge": "bash deploy/mac/stack run bridge",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^7.0.2"
+  }
+}

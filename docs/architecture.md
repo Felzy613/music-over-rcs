@@ -1,0 +1,92 @@
+# Architecture
+
+TypeScript on Node 22.18+, run directly (no build step), with **no runtime dependencies**: `node:sqlite` for the catalog, `node:http` for servers, the built-in `fetch` for everything else.
+
+## The path of a message
+
+```text
+phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse room ──> MatrixClient.listMessages()
+                                                                               │
+                                                               runner (one chat, polls every 1.5 s)
+                                                                               │  text, a number, or a 👍
+                                                                              bot
+                                                    ┌──────────────────────────┼───────────────────────────┐
+                                             catalog (SQLite)          music-table.com lookup           lists
+                                             exact song, artist        search → pick → read posts       trending / new / artist
+                                                    └──────────────────────────┼───────────────────────────┘
+                                                                        replies: image, text, audio
+                                                                               │
+                                                     runner: image fetch, audio from disk or download, send
+                                                                               │
+                                                     MatrixClient.sendImage / sendText / sendAudio ──> bridge ──> phone
+```
+
+- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42` or `post:<slug>`) and returns replies: `text` (optionally with numbered options), `image`, `audio`.
+- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵), handles numbers and 👍, shows "typing…", prepares files and sends replies in order. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
+- **Transports** implement `ChatClient` (`listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `setTyping`): `src/matrix/` (the bridge route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`) is a webhook server that uses the bot directly.
+
+## Code layout
+
+```text
+src/bot.ts              what to answer: songs, lists, choices, albums
+src/runner.ts           watches one chat and answers it; numbers, 👍, typing, announcements, safety limits
+src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, state
+src/artists.ts          splits "A, B & C Ft. D" into artists
+src/query.ts            words of a request ("play", "send me", "by" dropped)
+src/audio-check.ts      checks a link: reachable, audio, within the size limit
+src/audio-fetch.ts      downloads a direct audio link into memory
+src/image-fetch.ts      downloads album art (with a small memory)
+src/sources/            music-table.com: the client, the lookup, relevance and spelling
+src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs
+src/matrix/             Matrix client, and joining a pasted multi-line command for the console
+src/beeper/             Beeper Desktop API client
+src/rbm/                RCS for Business client, auth and webhook verification
+src/simulator/          the browser simulator: server, page, simulated chat, step-by-step trace
+src/matrix-main.ts      starts the bridge route   (npm run matrix)
+src/beeper-main.ts      starts the Beeper route   (npm run beeper)
+src/main.ts, server.ts  the RCS for Business webhook server (npm start)
+src/simulate*.ts        the terminal and browser simulators
+scripts/                command-line tools: catalog, library, music-table, matrix-*, beeper-*, send-test, invite-tester
+deploy/mac/             setup.sh (the installer) and stack (service control)
+test/                   unit and end-to-end tests, with mock servers in test/helpers/
+```
+
+## The catalog database
+
+One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
+
+| Table | Holds |
+| --- | --- |
+| `tracks` (+ `tracks_fts`) | Songs: title, artist credit, URL (unique), album art, source post, release date. Full-text search over title and artist. |
+| `artists`, `artist_tracks` | Artists split out of credits, and which songs each is on |
+| `site_posts` | music-table.com posts: title, category, publish date, views, picture, number of MP3s, when first seen, when announced |
+| `plays` | Every song sent, with its time |
+| `audio_cache` | Songs kept on disk: file, type, size, last used |
+| `message_links` | Messages that stand for one song (for 👍), kept a month |
+| `state` | Small facts: last sync, scan progress, the daily message's date, the current list and its numbers |
+
+## Background jobs
+
+`LibraryJobs` runs inside the bot, checking once a minute, one thing at a time: the sync every three hours, songs kept ready (after each sync and when the bot starts), the daily message when it's due, and the one-time scan of the whole site, a few pages per round. Its state lives in the catalog, so a restart picks up where it was.
+
+## Safety rails
+
+- Every bot message starts with 🎵; messages it sent itself, and anything starting with 🎵, are never answered.
+- At most 30 messages a minute; a word-for-word repeat within 20 seconds is answered once.
+- Downloads are refused unless they're audio and within the size limit; links to web pages are rejected.
+- The site client paces its requests and remembers answers; download hosts must be the site's own over HTTPS.
+- Servers (simulator, webhook) listen on 127.0.0.1; the simulator refuses other hosts and requests without its header.
+
+## Tests
+
+```bash
+npm test
+npm run typecheck
+```
+
+`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list, feed, files, download links), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a Mac asleep at 09:00, retries).
+
+## Extending
+
+- **Another chat platform:** implement `ChatClient` beside `src/matrix/` and `src/beeper/`, then start a runner with it.
+- **Another place to find music:** implement `TrackSource` (`name`, `lookup(query, limit)`) beside `src/sources/music-table.ts`. Its tracks go into the catalog like any others.

@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Message Simulator</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f1f3f8;
+    --surface: #ffffff;
+    --surface-2: #f0f4f9;
+    --line: #dde1e6;
+    --text: #1f1f1f;
+    --muted: #5f6368;
+    --sent: #0b57d0;
+    --on-sent: #ffffff;
+    --received: #e9eef6;
+    --on-received: #1f1f1f;
+    --accent: #0b57d0;
+    --site: #1a73e8;
+    --cached: #8a8f98;
+    --catalog: #8e4ec6;
+    --note: #c47f00;
+    --reply: #188038;
+    --warn: #d93025;
+    --shadow: 0 1px 2px rgba(60, 64, 67, .25), 0 8px 24px rgba(60, 64, 67, .14);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0e0f11;
+      --surface: #131314;
+      --surface-2: #1e1f20;
+      --line: #2f3033;
+      --text: #e3e3e3;
+      --muted: #9aa0a6;
+      --sent: #a8c7fa;
+      --on-sent: #062e6f;
+      --received: #2b2d30;
+      --on-received: #e3e3e3;
+      --accent: #a8c7fa;
+      --site: #8ab4f8;
+      --cached: #80868b;
+      --catalog: #d0a8f5;
+      --note: #fdd663;
+      --reply: #81c995;
+      --warn: #f28b82;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .6), 0 8px 24px rgba(0, 0, 0, .5);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--text);
+    font: 15px/1.4 "Google Sans", Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  button { font: inherit; color: inherit; }
+  .stage {
+    display: grid;
+    grid-template-columns: minmax(340px, 420px) minmax(320px, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 14px 24px;
+    height: 100dvh;
+    padding: 16px 20px 20px;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  .top { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .top h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  .top .tag { color: var(--muted); font-size: 13px; flex: 1; min-width: 160px; }
+  @media (max-width: 860px) {
+    .stage { grid-template-columns: 1fr; grid-template-rows: auto; height: auto; min-height: 100dvh; padding: 12px; }
+    .phone { height: 78dvh; }
+    .inspector { max-height: none; }
+  }
+
+  /* ---------- the phone ---------- */
+  .phone {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 28px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    min-height: 0;
+  }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .icon { display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 50%; background: none; color: var(--muted); }
+  .avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--sent); color: var(--on-sent); display: grid; place-items: center; font-weight: 600; flex: none; }
+  .who { min-width: 0; flex: 1; }
+  .name { font-weight: 600; line-height: 1.2; }
+  .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
+  .textbtn { border: 1px solid var(--line); background: none; border-radius: 999px; padding: 5px 12px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .textbtn:hover { background: var(--surface-2); }
+
+  .messages { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 2px; scroll-behavior: smooth; }
+  .day { align-self: center; color: var(--muted); font-size: 12px; margin: 6px 0 10px; }
+  .msg { display: flex; flex-direction: column; max-width: 86%; min-width: 0; margin-top: 8px; }
+  .msg.cont { margin-top: 2px; }
+  .msg.me { align-self: flex-end; align-items: flex-end; }
+  .msg.bot { align-self: flex-start; align-items: flex-start; }
+  .bubble { padding: 9px 14px; border-radius: 20px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .me .bubble { background: var(--sent); color: var(--on-sent); }
+  .bot .bubble { background: var(--received); color: var(--on-received); }
+  .me.cont .bubble { border-top-right-radius: 6px; }
+  .bot.cont .bubble { border-top-left-radius: 6px; }
+  .time { font-size: 11px; color: var(--muted); margin: 2px 6px 0; }
+  .phone.self .msg.bot { align-self: flex-end; align-items: flex-end; }
+  .phone.self .bot .bubble { background: var(--sent); color: var(--on-sent); }
+  .phone.self .bot.cont .bubble { border-top-left-radius: 20px; border-top-right-radius: 6px; }
+
+  .picture { display: block; width: 260px; max-width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 18px; background: var(--received); }
+  .me .picture, .phone.self .bot .picture { border-top-right-radius: 6px; }
+  .bot .picture { border-top-left-radius: 6px; }
+  .choice { display: block; width: 100%; text-align: left; margin: 2px 0; padding: 6px 10px; border: 0; border-radius: 12px; background: rgba(127, 127, 127, .16); cursor: pointer; }
+  .choice:hover { background: rgba(127, 127, 127, .28); }
+
+  .audio { display: flex; align-items: center; gap: 12px; min-width: 200px; white-space: normal; }
+  .play { flex: none; width: 42px; height: 42px; border: 0; border-radius: 50%; background: var(--surface); color: var(--accent); display: grid; place-items: center; cursor: pointer; }
+  .phone.self .bot .play, .me .play { background: var(--on-sent); color: var(--sent); }
+  .audio .body { min-width: 0; flex: 1; }
+  .audio .title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .audio .meta { font-size: 12px; opacity: .8; }
+  .track { height: 4px; border-radius: 2px; background: rgba(127, 127, 127, .35); margin: 6px 0 4px; overflow: hidden; }
+  .track > i { display: block; height: 100%; width: 0; background: currentColor; opacity: .85; }
+
+  .typing .bubble { display: flex; gap: 4px; padding: 14px 16px; }
+  .typing .bubble i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .35; animation: blink 1.2s infinite; }
+  .typing .bubble i:nth-child(2) { animation-delay: .2s; }
+  .typing .bubble i:nth-child(3) { animation-delay: .4s; }
+  @media (prefers-reduced-motion: reduce) { .typing .bubble i, .run.live .took::before { animation: none; opacity: .7; } }
+  @keyframes blink { 0%, 60%, 100% { opacity: .3; transform: none; } 30% { opacity: 1; transform: translateY(-2px); } }
+  .phone.self .typing { align-self: flex-end; }
+
+  .empty { margin: auto; text-align: center; color: var(--muted); max-width: 300px; padding: 20px; }
+  .empty strong { color: var(--text); display: block; margin-bottom: 6px; font-size: 16px; }
+  .tries { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+  .try { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  .try:hover { background: var(--surface-2); }
+
+  .composer { padding: 8px 12px 14px; }
+  .field { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border-radius: 28px; padding: 4px 4px 4px 16px; }
+  .field input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; padding: 10px 0; }
+  .field input::placeholder { color: var(--muted); }
+  .send { width: 40px; height: 40px; border: 0; border-radius: 50%; background: var(--sent); color: var(--on-sent); display: grid; place-items: center; cursor: pointer; }
+  .send:disabled { opacity: .4; cursor: default; }
+
+  /* ---------- behind the scenes ---------- */
+  .inspector { display: flex; flex-direction: column; min-height: 0; max-height: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; }
+  .inspector > header { padding: 16px 18px 10px; border-bottom: 1px solid var(--line); }
+  .inspector h2 { margin: 0 0 4px; font-size: 16px; }
+  .hint { margin: 0; color: var(--muted); font-size: 12.5px; }
+  .runs { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .nothing { color: var(--muted); text-align: center; padding: 30px 14px; font-size: 13.5px; }
+  .run { flex: none; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .run > header { padding: 10px 14px; background: var(--surface-2); display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .run .ask { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run .took { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .run.live .took::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--note); animation: blink 1s infinite; }
+  .items { list-style: none; margin: 0; padding: 4px 0; }
+  .item { display: grid; grid-template-columns: 54px 10px 112px 1fr auto; gap: 8px; align-items: baseline; padding: 4px 14px; font-size: 13px; }
+  .item .at { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .item .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cached); align-self: start; margin-top: 6px; }
+  .item .label { font-weight: 600; }
+  .item .detail { color: var(--muted); overflow-wrap: anywhere; }
+  .item .ms { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .t-site .dot { background: var(--site); } .t-site .label { color: var(--site); }
+  .t-cached .dot { background: var(--cached); }
+  .t-catalog .dot { background: var(--catalog); } .t-catalog .label { color: var(--catalog); }
+  .t-note .dot { background: var(--note); }
+  .t-reply .dot { background: var(--reply); } .t-reply .label { color: var(--reply); }
+  .t-warn .dot { background: var(--warn); } .t-warn .label, .t-warn .detail { color: var(--warn); }
+  @media (max-width: 520px) { .top .tag { display: none; } .top h1 { flex: 1; } .item { grid-template-columns: 46px 10px 1fr; } .item .detail { grid-column: 3; } .item .ms { display: none; } }
+</style>
+</head>
+<body>
+<main class="stage">
+  <header class="top">
+    <h1>Message simulator</h1>
+    <span class="tag">The real bot and the real music-table.com search, in a chat that looks like Google Messages.</span>
+    <label class="toggle" title="In the real setup you text your own number, so the bot's replies look like messages you sent yourself"><input type="checkbox" id="self"> Chat with myself</label>
+    <button class="textbtn" id="digest" type="button" title="Shows the daily new-music message here, as it would go out now (covering the last three days)">Daily message</button>
+    <button class="textbtn" id="reset" type="button">Clear</button>
+  </header>
+  <section class="phone" id="phone" aria-label="Chat">
+    <header class="bar">
+      <button class="icon" tabindex="-1" aria-hidden="true" title="Back">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <div class="avatar" aria-hidden="true">M</div>
+      <div class="who">
+        <div class="name">Music</div>
+        <div class="sub" id="sub">Simulator · the real bot</div>
+      </div>
+      <button class="icon" tabindex="-1" aria-hidden="true" title="More">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+      </button>
+    </header>
+    <div class="messages" id="messages" role="log" aria-live="polite">
+      <div class="empty" id="empty">
+        <strong>Text it a song name</strong>
+        This is the real bot, searching the real site. Try one of these, or type your own:
+        <div class="tries" id="tries"></div>
+      </div>
+    </div>
+    <form class="composer" id="composer" autocomplete="off">
+      <div class="field">
+        <input id="text" type="text" placeholder="RCS message" aria-label="Message" maxlength="400" autofocus>
+        <button class="send" id="sendbtn" type="submit" aria-label="Send" disabled>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+    </form>
+  </section>
+
+  <aside class="inspector" aria-label="Behind the scenes">
+    <header>
+      <h2>Behind the scenes</h2>
+      <p class="hint" id="state">Connecting…</p>
+    </header>
+    <div class="runs" id="runs"><div class="nothing" id="nothing">Every request shows up here with each step the bot took and how long it took.</div></div>
+  </aside>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const make = (tag, cls, text) => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const seconds = (ms) => (ms / 1000).toFixed(2) + ' s';
+  const clock = (at) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const megabytes = (bytes) => (bytes > 0 ? (bytes / 1048576).toFixed(1) + ' MB' : 'size unknown');
+  const TRIES = ['yoely weiss shabbos', 'benny friedman', 'play chuppah medley', 'yoely wiess shabbos'];
+
+  const messages = $('messages');
+  const phone = $('phone');
+  let last = null;          // sender of the last bubble, for grouping
+  let typingNode = null;
+  const players = new Set();
+
+  /* ---------- the chat ---------- */
+  function scrollDown() { messages.scrollTop = messages.scrollHeight; }
+
+  function clearChat() {
+    messages.querySelectorAll('.msg, .day').forEach((n) => n.remove());
+    typingNode = null;
+    last = null;
+    players.forEach((a) => a.pause());
+    players.clear();
+    $('empty').style.display = '';
+  }
+
+  function renderText(bubble, text, from) {
+    const lines = text.split('\n');
+    // One numbered song of the daily message: tapping it answers with its number.
+    const single = from === 'bot' && lines.length === 1 ? /^🎵 (\d{1,2})\. /.exec(text) : null;
+    if (single) {
+      const button = make('button', 'choice', text);
+      button.type = 'button';
+      button.title = 'Reply with ' + single[1];
+      button.addEventListener('click', () => post(single[1]));
+      bubble.append(button);
+      return;
+    }
+    const numbered = from === 'bot' && lines.filter((l) => /^\d{1,2}\. /.test(l)).length >= 2;
+    if (!numbered) { bubble.textContent = text; return; }
+    const plain = [];
+    for (const line of lines) {
+      const m = /^(\d{1,2})\. /.exec(line);
+      if (!m) { plain.push(line); continue; }
+      if (plain.length) { bubble.append(document.createTextNode(plain.join('\n') + '\n')); plain.length = 0; }
+      const button = make('button', 'choice', line);
+      button.type = 'button';
+      button.title = 'Reply with ' + m[1];
+      button.addEventListener('click', () => post(m[1]));
+      bubble.append(button);
+    }
+    if (plain.length) bubble.append(document.createTextNode(plain.join('\n')));
+  }
+
+  function audioBubble(bubble, message) {
+    const a = message.audio;
+    const wrap = make('div', 'audio');
+    const play = make('button', 'play');
+    play.type = 'button';
+    play.setAttribute('aria-label', 'Play ' + a.name);
+    const icon = (playing) => {
+      play.innerHTML = playing
+        ? '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>'
+        : '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+    };
+    icon(false);
+    const body = make('div', 'body');
+    const title = make('div', 'title', a.name);
+    const track = make('div', 'track');
+    const fill = make('i');
+    track.append(fill);
+    const meta = make('div', 'meta', megabytes(a.bytes) + ' · not downloaded yet, press play');
+    body.append(title, track, meta);
+    wrap.append(play, body);
+    bubble.append(wrap);
+    let audio = null;
+    play.addEventListener('click', async () => {
+      if (!audio) {
+        meta.textContent = 'getting the download link…';
+        try {
+          const res = await fetch('/api/play/' + encodeURIComponent(a.linkId || ''));
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'could not get the file');
+          audio = new Audio();
+          audio.preload = 'none';
+          audio.src = data.url;
+          players.add(audio);
+          audio.addEventListener('playing', () => { icon(true); meta.textContent = 'playing'; });
+          audio.addEventListener('pause', () => { icon(false); if (!audio.ended) meta.textContent = 'paused'; });
+          audio.addEventListener('waiting', () => { meta.textContent = 'loading…'; });
+          audio.addEventListener('ended', () => { icon(false); fill.style.width = '0'; meta.textContent = 'finished'; });
+          audio.addEventListener('timeupdate', () => {
+            if (audio.duration) fill.style.width = (100 * audio.currentTime / audio.duration) + '%';
+          });
+          audio.addEventListener('error', () => { icon(false); meta.textContent = 'could not play this file'; });
+        } catch (err) {
+          meta.textContent = String(err.message || err);
+          return;
+        }
+      }
+      if (audio.paused) {
+        players.forEach((p) => { if (p !== audio) p.pause(); });
+        audio.play().catch((err) => { meta.textContent = 'could not play: ' + (err.message || err); });
+      } else {
+        audio.pause();
+      }
+    });
+  }
+
+  function addMessage(message) {
+    $('empty').style.display = 'none';
+    if (typingNode) typingNode.remove();
+    if (!messages.querySelector('.day')) messages.insertBefore(make('div', 'day', 'Today'), messages.firstChild);
+    const cont = last === message.from;
+    last = message.from;
+    const row = make('div', 'msg ' + message.from + (cont ? ' cont' : ''));
+    if (message.image) {
+      const picture = make('img', 'picture');
+      picture.alt = 'Album art';
+      picture.loading = 'lazy';
+      picture.referrerPolicy = 'no-referrer';
+      picture.src = message.image.url;
+      row.append(picture, make('div', 'time', clock(message.at)));
+    } else {
+      const bubble = make('div', 'bubble');
+      if (message.audio) audioBubble(bubble, message);
+      else renderText(bubble, message.text || '', message.from);
+      row.append(bubble, make('div', 'time', clock(message.at)));
+    }
+    messages.append(row);
+    if (typingNode) messages.append(typingNode);
+    scrollDown();
+  }
+
+  function setTyping(on) {
+    if (on && !typingNode) {
+      typingNode = make('div', 'msg bot typing');
+      const bubble = make('div', 'bubble');
+      bubble.append(make('i'), make('i'), make('i'));
+      typingNode.append(bubble);
+      messages.append(typingNode);
+      scrollDown();
+    } else if (!on && typingNode) {
+      typingNode.remove();
+      typingNode = null;
+    }
+  }
+
+  /* ---------- behind the scenes ---------- */
+  const cards = new Map();
+  function runCard(run) {
+    $('nothing').style.display = 'none';
+    let card = cards.get(run.id);
+    if (!card) {
+      const root = make('article', 'run live');
+      const head = make('header');
+      const ask = make('div', 'ask', run.choice ? 'Picked option ' + run.text : '“' + run.text + '”');
+      const took = make('div', 'took', 'working…');
+      head.append(ask, took);
+      const list = make('ol', 'items');
+      root.append(head, list);
+      card = { root, took, list };
+      cards.set(run.id, card);
+      $('runs').prepend(root);
+    }
+    return card;
+  }
+  function addItem(run, item) {
+    const card = runCard(run);
+    const row = make('li', 'item t-' + item.tone);
+    row.append(make('span', 'at', '+' + seconds(item.at)), make('span', 'dot'), make('span', 'label', item.label), make('span', 'detail', item.detail), make('span', 'ms', item.ms !== undefined ? item.ms + ' ms' : ''));
+    card.list.append(row);
+  }
+  function finish(run) {
+    const card = runCard(run);
+    card.root.classList.remove('live');
+    const parts = [];
+    if (run.firstReplyMs !== undefined) parts.push('first reply ' + seconds(run.firstReplyMs));
+    parts.push('done ' + seconds(run.totalMs || 0));
+    card.took.textContent = parts.join(' · ');
+  }
+  function fullRun(run) {
+    runCard(run);
+    (run.items || []).forEach((item) => addItem(run, item));
+    if (run.totalMs !== undefined) finish(run);
+  }
+
+  /* ---------- talking to the server ---------- */
+  async function post(text) {
+    try {
+      const res = await fetch('/api/send', { method: 'POST', headers: { 'content-type': 'application/json', 'x-simulator': '1' }, body: JSON.stringify({ text }) });
+      if (!res.ok) throw new Error((await res.json()).error || 'could not send');
+    } catch (err) {
+      addMessage({ from: 'bot', at: Date.now(), text: 'Could not send: ' + (err.message || err) });
+    }
+  }
+
+  const setup = { musicTable: true, full: false };
+  function showStatus(catalogTracks) {
+    $('state').textContent = [
+      catalogTracks + ' saved track' + (catalogTracks === 1 ? '' : 's') + ' (answered without the site next time)',
+      setup.musicTable ? 'music-table.com: live' : 'music-table.com: off',
+      setup.full ? 'files are really downloaded' : 'files are checked, not downloaded (Play streams them)',
+    ].join(' · ');
+  }
+
+  function applyState(s) {
+    clearChat();
+    $('runs').querySelectorAll('.run').forEach((n) => n.remove());
+    cards.clear();
+    $('nothing').style.display = '';
+    s.messages.forEach(addMessage);
+    s.runs.forEach(fullRun);
+    setTyping(!!s.typing);
+    setup.musicTable = s.musicTable;
+    setup.full = s.full;
+    $('digest').hidden = !s.musicTable;
+    showStatus(s.catalogTracks);
+    $('sub').textContent = 'Simulator · the real bot · ' + (s.musicTable ? 'live search' : 'catalog only');
+  }
+
+  function connect() {
+    const source = new EventSource('/api/stream');
+    source.addEventListener('snapshot', (e) => applyState(JSON.parse(e.data)));
+    source.addEventListener('reset', (e) => applyState(JSON.parse(e.data)));
+    source.addEventListener('message', (e) => addMessage(JSON.parse(e.data)));
+    source.addEventListener('typing', (e) => setTyping(JSON.parse(e.data)));
+    source.addEventListener('trace-begin', (e) => runCard(JSON.parse(e.data)));
+    source.addEventListener('trace-item', (e) => { const d = JSON.parse(e.data); addItem({ id: d.runId }, d.item); });
+    source.addEventListener('trace-end', (e) => {
+      const run = JSON.parse(e.data);
+      finish(run);
+      if (typeof run.catalogTracks === 'number') showStatus(run.catalogTracks);
+    });
+  }
+
+  /* ---------- controls ---------- */
+  const input = $('text');
+  input.addEventListener('input', () => { $('sendbtn').disabled = input.value.trim() === ''; });
+  $('composer').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    $('sendbtn').disabled = true;
+    post(text);
+  });
+  $('reset').addEventListener('click', () => fetch('/api/reset', { method: 'POST', headers: { 'content-type': 'application/json', 'x-simulator': '1' }, body: '{}' }));
+  $('digest').addEventListener('click', () => fetch('/api/digest', { method: 'POST', headers: { 'content-type': 'application/json', 'x-simulator': '1' }, body: '{}' }));
+  TRIES.forEach((text) => {
+    const button = make('button', 'try', text);
+    button.type = 'button';
+    button.addEventListener('click', () => post(text));
+    $('tries').append(button);
+  });
+  try { $('self').checked = localStorage.getItem('sim-self') === '1'; } catch { /* storage may be unavailable */ }
+  const syncSelf = () => {
+    phone.classList.toggle('self', $('self').checked);
+    try { localStorage.setItem('sim-self', $('self').checked ? '1' : '0'); } catch { /* storage may be unavailable */ }
+  };
+  $('self').addEventListener('change', syncSelf);
+  syncSelf();
+  connect();
+})();
+</script>
+</body>
+</html>

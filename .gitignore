@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# secrets and personal data: never published
+.env
+keys/
+data/
+*.db
+*.db-wal
+*.db-shm
+my-songs.csv
+audio-cache/
+
+# local runtime and tools
+bridge/
+*.log
+.DS_Store
+.claude/
+
+# an abandoned Windows/WSL setup with machine-specific paths
+deploy/dell/

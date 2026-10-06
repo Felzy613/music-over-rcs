@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Controls the Music over RCS background services on this Mac (launchd user agents).
+#   bash deploy/mac/stack status | start | stop | restart | logs [synapse|bridge|bot]
+#                         | create-user [name] | sync-bot | enable-bot | disable-bot | run synapse|bridge | uninstall
+# The services live in ~/Library/Application Support/music-over-rcs (see setup.sh for why not in the project folder).
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RT=${MORS_HOME:-$HOME/Library/Application Support/music-over-rcs}
+VENV=$RT/venv
+SYNAPSE_DIR=$RT/synapse
+GM_DIR=$RT/gmessages
+BOT_DIR=$RT/bot
+LOG_DIR=$RT/logs
+LAUNCHD_DIR=$RT/launchd
+AGENTS_DIR=$HOME/Library/LaunchAgents
+DOMAIN=gui/$(id -u)
+LABELS=(com.musicoverrcs.synapse com.musicoverrcs.bridge com.musicoverrcs.bot)
+
+short() { echo "${1#com.musicoverrcs.}"; }
+label_for() { case "${1:-}" in synapse|homeserver) echo com.musicoverrcs.synapse ;; bridge) echo com.musicoverrcs.bridge ;; bot) echo com.musicoverrcs.bot ;; *) echo "unknown part '${1:-}' (synapse, bridge, bot)" >&2; exit 2 ;; esac; }
+loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
+pid_of() { launchctl print "$DOMAIN/$1" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3}'; }
+env_has() { grep -q "^$1=.\+" "$ROOT/.env" 2>/dev/null; }
+installed() { [ -d "$RT" ] || { echo "run 'bash deploy/mac/setup.sh' first (nothing is installed in $RT)" >&2; exit 1; }; }
+
+install_agent() { # label: copy the definition into LaunchAgents (so it also starts at login) and start it
+  [ -f "$LAUNCHD_DIR/$1.plist" ] || { echo "missing $LAUNCHD_DIR/$1.plist: run deploy/mac/setup.sh first" >&2; exit 1; }
+  mkdir -p "$AGENTS_DIR"
+  cp "$LAUNCHD_DIR/$1.plist" "$AGENTS_DIR/$1.plist"
+  launchctl enable "$DOMAIN/$1"
+  if loaded "$1"; then launchctl bootout "$DOMAIN/$1" 2>/dev/null || true; fi
+  launchctl bootstrap "$DOMAIN" "$AGENTS_DIR/$1.plist"
+}
+
+sync_bot() { # the background bot cannot read ~/Documents, so it runs from a copy of the code and .env
+  installed
+  mkdir -p "$BOT_DIR"
+  rsync -a --delete "$ROOT/src/" "$BOT_DIR/src/"
+  cp "$ROOT/package.json" "$BOT_DIR/package.json"
+  if [ -f "$ROOT/.env" ]; then cp "$ROOT/.env" "$BOT_DIR/.env"; chmod 600 "$BOT_DIR/.env"; else rm -f "$BOT_DIR/.env"; fi
+  chmod 700 "$BOT_DIR"
+  echo "bot copy updated in $BOT_DIR"
+}
+
+cmd=${1:-status}; shift || true
+case "$cmd" in
+  status)
+    installed
+    total_rss=0
+    printf '%-9s %-20s %9s %6s %10s %12s\n' service state memory cpu 'cpu time' 'up for'
+    for label in "${LABELS[@]}"; do
+      name=$(short "$label")
+      if loaded "$label"; then
+        pid=$(pid_of "$label")
+        if [ -n "$pid" ]; then
+          read -r rss cpu cputime etime <<<"$(ps -o rss=,pcpu=,time=,etime= -p "$pid" 2>/dev/null || echo '0 0 - -')"
+          total_rss=$((total_rss + rss))
+          printf '%-9s %-20s %6d MB %5s%% %10s %12s\n' "$name" running $((rss / 1024)) "$cpu" "$cputime" "$etime"
+        else
+          printf '%-9s %-20s\n' "$name" 'loaded, not running'
+        fi
+      else
+        printf '%-9s %-20s\n' "$name" stopped
+      fi
+    done
+    printf '%-9s %-20s %6d MB\n' total '' $((total_rss / 1024))
+    printf 'homeserver answering: %s\n' "$(curl -fsS -m 3 http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && echo yes || echo no)"
+    printf 'disk used by the services: %s\n' "$(du -sh "$RT" 2>/dev/null | cut -f1)"
+    if [ -f "$RT/catalog.db" ] && command -v node >/dev/null; then
+      printf 'catalog: %s tracks\n' "$(node --disable-warning=ExperimentalWarning -e 'const {DatabaseSync}=require("node:sqlite"); console.log(new DatabaseSync(process.argv[1],{readOnly:true}).prepare("select count(*) c from tracks").get().c)' "$RT/catalog.db" 2>/dev/null || echo '?')"
+    else
+      echo "catalog: empty (import songs with: npm run catalog -- import my-songs.csv)"
+    fi
+    ;;
+  start)
+    installed
+    for label in com.musicoverrcs.synapse com.musicoverrcs.bridge; do
+      if loaded "$label"; then :; else install_agent "$label"; fi
+    done
+    if [ -f "$RT/.bot-enabled" ] && env_has MATRIX_ACCESS_TOKEN && env_has MATRIX_ROOM_ID && ! loaded com.musicoverrcs.bot; then
+      sync_bot
+      install_agent com.musicoverrcs.bot
+    fi
+    echo started
+    ;;
+  stop)
+    installed
+    for label in "${LABELS[@]}"; do
+      if loaded "$label"; then launchctl bootout "$DOMAIN/$label" || true; fi
+      launchctl disable "$DOMAIN/$label"
+    done
+    echo "stopped, and they will not start at login until you run: start"
+    ;;
+  restart)
+    installed
+    if loaded com.musicoverrcs.bot; then sync_bot; fi
+    for label in "${LABELS[@]}"; do
+      if loaded "$label"; then launchctl kickstart -k "$DOMAIN/$label" || true; fi
+    done
+    echo restarted
+    ;;
+  logs)
+    installed
+    part=${1:-bridge}; label=$(label_for "$part")
+    tail -n 60 -f "$LOG_DIR/$(short "$label").log"
+    ;;
+  create-user)
+    installed
+    user=${1:-me}
+    echo "Choosing the password for @$user:localhost. You will be asked to type it twice; it is not shown."
+    exec "$VENV/bin/register_new_matrix_user" -c "$SYNAPSE_DIR/homeserver.yaml" -u "$user" --no-admin http://127.0.0.1:8008
+    ;;
+  sync-bot)
+    sync_bot
+    ;;
+  enable-bot)
+    installed
+    env_has MATRIX_ACCESS_TOKEN || { echo "run 'npm run matrix-login' first" >&2; exit 1; }
+    env_has MATRIX_ROOM_ID || { echo "put your room id in .env as MATRIX_ROOM_ID first (find it with 'npm run matrix-rooms')" >&2; exit 1; }
+    sync_bot
+    touch "$RT/.bot-enabled"
+    install_agent com.musicoverrcs.bot
+    echo "bot started (and it will start at login). Re-run 'stack restart' after changing code or .env."
+    ;;
+  disable-bot)
+    installed
+    rm -f "$RT/.bot-enabled"
+    if loaded com.musicoverrcs.bot; then launchctl bootout "$DOMAIN/com.musicoverrcs.bot" || true; fi
+    rm -f "$AGENTS_DIR/com.musicoverrcs.bot.plist"
+    echo "bot stopped and removed from login (the homeserver and bridge keep running)"
+    ;;
+  run)
+    installed
+    case "${1:-}" in
+      synapse|homeserver) cd "$SYNAPSE_DIR" && exec "$VENV/bin/python" -m synapse.app.homeserver -c "$SYNAPSE_DIR/homeserver.yaml" ;;
+      bridge) cd "$GM_DIR" && exec ./mautrix-gmessages ;;
+      *) echo "usage: stack run synapse|bridge   (stop the background copy first: stack stop)" >&2; exit 2 ;;
+    esac
+    ;;
+  uninstall)
+    for label in "${LABELS[@]}"; do
+      if loaded "$label"; then launchctl bootout "$DOMAIN/$label" || true; fi
+      rm -f "$AGENTS_DIR/$label.plist"
+      launchctl enable "$DOMAIN/$label" 2>/dev/null || true
+    done
+    rm -f "$RT/.bot-enabled"
+    echo "removed the background services. Your data is still in $RT (delete that folder to remove everything, including the catalog)."
+    ;;
+  *) echo "usage: stack status | start | stop | restart | logs [synapse|bridge|bot] | create-user [name] | sync-bot | enable-bot | disable-bot | run synapse|bridge | uninstall" >&2; exit 2 ;;
+esac
