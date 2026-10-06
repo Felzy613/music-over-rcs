@@ -41,6 +41,11 @@ export interface LibraryJobsOptions {
   watchEveryMs?: number;
   /** Told whether the site answers, so a lasting problem can be shown on the Mac. */
   onSite?: (ok: boolean, problem?: string) => void;
+  /**
+   * Told how the archive folder is doing, when there is one: nothing when fine, or what's wrong (macOS not letting
+   * the bot in, or its drive away for a day with songs waiting on this Mac).
+   */
+  onArchive?: (problem: string | undefined) => void;
 }
 
 const HOUR_MS = 60 * 60_000;
@@ -84,6 +89,8 @@ export class LibraryJobs {
   #keptReady = false;
   #lastWatch = 0;
   #siteFailures = 0;
+  /** Since when the archive's drive has been away (this run). */
+  #archiveAwaySince: number | undefined;
 
   constructor(options: LibraryJobsOptions) {
     this.#o = options;
@@ -121,6 +128,7 @@ export class LibraryJobs {
 
   async #round(): Promise<void> {
     try {
+      await this.archive();
       if (this.#syncDue()) await this.refresh();
       else if (!this.#keptReady && this.#o.cache) await this.keepReady();
       else await this.#watch();
@@ -129,6 +137,32 @@ export class LibraryJobs {
       if (!this.#o.catalog.getState(STATE.scanDone)) await this.scanStep();
     } catch (err) {
       this.#log(`background work failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Moves the songs downloaded on this Mac into the archive folder, when there is one and it's there. A drive that's
+   * away is normal (they wait here, and the bot works as before); one away for a day with songs waiting is said.
+   */
+  async archive(): Promise<void> {
+    const cache = this.#o.cache;
+    if (!cache?.archiveDir) return;
+    const result = await cache.archive();
+    if (result.moved > 0) this.#log(`moved ${result.moved} song${result.moved === 1 ? '' : 's'} to ${cache.archiveDir}`);
+    if (result.failed > 0) this.#log(`could not move ${result.failed} song${result.failed === 1 ? '' : 's'} to ${cache.archiveDir}: ${result.error ?? 'unknown error'}`);
+    const now = this.#now().getTime();
+    if (result.state === 'ok') {
+      this.#archiveAwaySince = undefined;
+      this.#o.onArchive?.(undefined);
+    } else if (result.state === 'denied') {
+      this.#o.onArchive?.(`macOS won't let the bot use ${cache.archiveDir}. Allow it: System Settings → Privacy & Security → Files and Folders (node).`);
+    } else {
+      this.#archiveAwaySince ??= now;
+      const waiting = cache.where().here;
+      if (now - this.#archiveAwaySince >= 24 * HOUR_MS && waiting.files > 0) {
+        const mb = Math.round(waiting.bytes / 1_048_576);
+        this.#o.onArchive?.(`The drive for ${cache.archiveDir} has been away for a day; ${waiting.files} song${waiting.files === 1 ? '' : 's'} (${mb} MB) wait on this Mac. Connect it and they'll move.`);
+      }
     }
   }
 

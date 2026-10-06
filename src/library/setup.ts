@@ -11,6 +11,9 @@ import { catalogFollows, type Follows } from './follows.ts';
 import { createPictures, type Picture, type PreparedPicture } from './images.ts';
 import { LibraryJobs, type DailyTime } from './jobs.ts';
 
+/** Songs aren't kept on this Mac when that would leave its disk with less free than this (they're still sent). */
+const MIN_FREE_BYTES = 5 * 1024 ** 3;
+
 export interface LibraryOptions {
   catalog: Catalog;
   musicTable: MusicTable | undefined;
@@ -24,6 +27,10 @@ export interface LibraryOptions {
   digestAt: DailyTime | undefined;
   /** Disk space for songs kept ready, in MB: Infinity for no limit, 0 for none kept. */
   prefetchMb: number;
+  /** A folder (on an external drive, say) the kept songs move into whenever it's there. */
+  archiveDir?: string | undefined;
+  /** Told how that folder is doing: nothing when fine, or what's wrong. */
+  onArchive?: (problem: string | undefined) => void;
   /** No alerts for new songs by followed artists in these hours. */
   quiet?: { from: DailyTime; to: DailyTime } | undefined;
   /** Told whether the site answers (for alerts on the Mac). */
@@ -57,13 +64,20 @@ export function setUpLibrary(options: LibraryOptions): Library {
   const limited = Number.isFinite(options.prefetchMb);
   const cache =
     options.prefetchMb > 0
-      ? new AudioCache({ dir: join(dirname(resolve(options.dbPath)), 'audio-cache'), index: catalog, maxBytes: limited ? options.prefetchMb * 1024 * 1024 : undefined })
+      ? new AudioCache({
+          dir: join(dirname(resolve(options.dbPath)), 'audio-cache'),
+          archiveDir: options.archiveDir,
+          index: catalog,
+          maxBytes: limited ? options.prefetchMb * 1024 * 1024 : undefined,
+          minFreeBytes: MIN_FREE_BYTES,
+        })
       : undefined;
   let jobs: LibraryJobs | undefined;
   const at = options.digestAt;
   const parts = [
     musicTable ? (at ? `daily new-music message at ${String(at.hour).padStart(2, '0')}:${String(at.minute).padStart(2, '0')}` : 'daily message off') : '',
     cache ? (limited ? `up to ${options.prefetchMb} MB of songs kept ready` : 'songs kept ready, no size limit') : 'no songs kept ready',
+    cache?.archiveDir ? `moved to ${cache.archiveDir} whenever it's there` : '',
   ].filter(Boolean);
 
   return {
@@ -86,6 +100,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
         categories,
         quiet: options.quiet,
         ...(options.onSite ? { onSite: options.onSite } : {}),
+        ...(options.onArchive ? { onArchive: options.onArchive } : {}),
       });
       jobs.start();
     },

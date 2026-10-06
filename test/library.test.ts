@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
@@ -601,17 +601,95 @@ describe('library: songs kept ready', () => {
     assert.equal(kept.has('https://x.test/huge'), false);
   });
 
-  test('a file that went missing or changed is forgotten instead of sent', async () => {
+  test('a file that went missing is forgotten; one changed where it is kept (its tags edited, say) is sent as it is now', async () => {
     const kept = cache();
     await kept.put('https://x.test/1', song(1));
     await kept.put('https://x.test/2', song(2));
     const [first, second] = catalog.listCachedAudio();
     await rm(join(dir, first!.file));
-    await writeFile(join(dir, second!.file), 'short');
+    await writeFile(join(dir, second!.file), 'retagged');
     assert.equal(await kept.get(first!.url), undefined);
-    assert.equal(await kept.get(second!.url), undefined);
-    assert.deepEqual(kept.stats(), { files: 0, bytes: 0 });
-    assert.equal(existsSync(join(dir, second!.file)), false);
+    assert.equal((await kept.get(second!.url))?.bytes, 8);
+    assert.deepEqual(kept.stats(), { files: 1, bytes: 8 });
+    assert.equal(existsSync(join(dir, second!.file)), true, 'never deleted');
+  });
+
+  test('songs move to the archive folder when it is there, under their own names, and are sent from there', async () => {
+    const drive = join(dir, 'drive'); // the folder on the drive that the archive goes in
+    await mkdir(drive);
+    const archiveDir = join(drive, 'Music over RCS');
+    const kept = new AudioCache({ dir: join(dir, 'here'), archiveDir, index: catalog, now: () => clock });
+    await kept.put('https://x.test/1', { ...song(1), fileName: 'Band — One.mp3' });
+    await kept.put('https://x.test/2', { ...song(2), fileName: 'Band — One.mp3' }); // another song by that name
+    await kept.put('https://x.test/3', { ...song(3), fileName: 'Band — Three.mp3' });
+    assert.deepEqual(await kept.archive(), { state: 'ok', moved: 3, failed: 0 });
+    assert.deepEqual((await readdir(archiveDir)).sort(), ['Band — One (2).mp3', 'Band — One.mp3', 'Band — Three.mp3']);
+    assert.deepEqual(await readdir(join(dir, 'here')), [], 'nothing left on this Mac');
+    const back = await kept.get('https://x.test/3');
+    assert.deepEqual(Buffer.from(await back!.data.arrayBuffer()), Buffer.alloc(1000, 3));
+    assert.equal(back!.fileName, 'Band — Three.mp3');
+    assert.deepEqual(kept.where(), { here: { files: 0, bytes: 0 }, archived: { files: 3, bytes: 3000 } });
+    assert.deepEqual(await kept.archive(), { state: 'ok', moved: 0, failed: 0 }, 'nothing more to move');
+  });
+
+  test("while the drive is away songs stay on this Mac, the ones on it are downloaded again, and nothing is made where it'd be", async () => {
+    const drive = join(dir, 'drive'); // not plugged in yet
+    const archiveDir = join(drive, 'Music over RCS');
+    const kept = new AudioCache({ dir: join(dir, 'here'), archiveDir, index: catalog, now: () => clock });
+    await kept.put('https://x.test/1', song(1));
+    assert.deepEqual(await kept.archive(), { state: 'offline', moved: 0, failed: 0 });
+    assert.equal(existsSync(drive), false, 'nothing made where the drive would be');
+    assert.ok(await kept.get('https://x.test/1'), 'sent from this Mac meanwhile');
+
+    await mkdir(drive);
+    assert.equal((await kept.archive()).moved, 1);
+    await rename(drive, join(dir, 'unplugged'));
+    assert.equal(await kept.get('https://x.test/1'), undefined, 'on the drive that is away: downloaded instead');
+    assert.equal(kept.has('https://x.test/1'), true, 'and not forgotten');
+
+    // Asked for again while it's away: the fresh copy is kept here, then replaces the one on the drive.
+    await kept.put('https://x.test/1', song(1));
+    await rename(join(dir, 'unplugged'), drive);
+    assert.equal((await kept.archive()).moved, 1);
+    assert.deepEqual(await readdir(archiveDir), ['Song 1.mp3'], 'the same file, not a second copy');
+    assert.ok(await kept.get('https://x.test/1'));
+  });
+
+  test('a limit counts only the songs on this Mac; nothing on the drive is ever trimmed', async () => {
+    const drive = join(dir, 'drive');
+    await mkdir(drive);
+    const kept = new AudioCache({ dir: join(dir, 'here'), archiveDir: join(drive, 'songs'), index: catalog, maxFiles: 1, now: () => clock });
+    await kept.put('https://x.test/1', song(1));
+    await kept.archive();
+    await kept.put('https://x.test/2', song(2));
+    assert.deepEqual(kept.where(), { here: { files: 1, bytes: 1000 }, archived: { files: 1, bytes: 1000 } });
+  });
+
+  test('each round moves songs to the drive; one away for a day with songs waiting is said, and its return', async () => {
+    const drive = join(dir, 'drive');
+    const kept = new AudioCache({ dir: join(dir, 'here'), archiveDir: join(drive, 'songs'), index: catalog, now: () => clock });
+    await kept.put('https://x.test/1', song(1, 3 * 1_048_576));
+    const told: Array<string | undefined> = [];
+    const jobs = new LibraryJobs({
+      musicTable: new MusicTable({ baseUrl: 'http://127.0.0.1:9', minIntervalMs: 0 }),
+      catalog,
+      announce: async () => {},
+      cache: kept,
+      fetchAudio: async () => song(1),
+      now: () => clock,
+      onArchive: (problem) => void told.push(problem),
+    });
+    await jobs.archive();
+    clock = new Date(clock.getTime() + 23 * 60 * 60_000);
+    await jobs.archive();
+    assert.deepEqual(told, [], 'away for less than a day is normal');
+    clock = new Date(clock.getTime() + 2 * 60 * 60_000);
+    await jobs.archive();
+    assert.match(told.at(-1)!, /has been away for a day; 1 song \(3 MB\) wait on this Mac\. Connect it and they'll move\.$/);
+    await mkdir(drive);
+    await jobs.archive();
+    assert.equal(told.at(-1), undefined, 'back, and moved');
+    assert.equal(kept.where().archived.files, 1);
   });
 
   test('the downloader looks on disk first: a song is downloaded once, then sent from disk', async () => {

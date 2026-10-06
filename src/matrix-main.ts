@@ -49,6 +49,8 @@ try {
     dbPath: config.dbPath,
     digestAt: config.digestAt,
     prefetchMb: config.prefetchMb,
+    archiveDir: config.archiveDir,
+    onArchive: (problem) => (problem ? health.problem('archive', problem) : health.ok('archive', 'Fixed: the songs folder on the drive can be used again.')),
     quiet: config.quiet,
     onSite: (ok, problem) => (ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.problem('site', problem ?? "music-table.com isn't answering.")),
     log,

@@ -13,6 +13,8 @@ The bot shows a notification titled **Music over RCS** when something it depends
 | RCS chats are off on your phone | Google Messages → Settings → RCS chats → on. Without RCS, files this size can't be sent. |
 | The Google Messages bridge isn't answering | `npm run stack -- start` (or `npm run stack -- status` to see what stopped) |
 | The bot can't reach the Matrix homeserver | `npm run stack -- start` |
+| The drive for … has been away for a day; N songs wait on this Mac | Connect the drive (or check `SONGS_ARCHIVE_DIR`); the songs move within a minute. Nothing is lost meanwhile. |
+| macOS won't let the bot use … | System Settings → Privacy & Security → Files and Folders: allow `node` to use removable volumes (or the drive's folder). |
 | music-table.com isn't answering the bot | Usually the site is down or slow; songs already on your Mac still work. If it lasts, the reason in the notification helps, and `npm run music-table -- search <words>` shows what the site answers now. |
 
 A problem that lasts is repeated every six hours. **No notifications at all?** macOS shows them from Script Editor (the bot uses `osascript`): System Settings → Notifications → Script Editor → Allow notifications.

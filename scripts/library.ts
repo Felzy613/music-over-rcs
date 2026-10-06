@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { checkAudio } from '../src/audio-check.ts';
 import { fetchAudio } from '../src/audio-fetch.ts';
 import { Catalog, choicesIn, linksIn } from '../src/catalog.ts';
-import { loadMatrixConfig, parsePrefetchMb } from '../src/config.ts';
+import { loadMatrixConfig, parseArchiveDir, parsePrefetchMb } from '../src/config.ts';
 import { createPictures } from '../src/library/images.ts';
 import { AudioCache } from '../src/library/audio-cache.ts';
 import { LibraryJobs, localDay, parseDailyTime, STATE } from '../src/library/jobs.ts';
@@ -51,11 +51,23 @@ if (prefetchMb instanceof Error) {
   console.error(prefetchMb.message);
   process.exit(1);
 }
+const archiveDir = parseArchiveDir(env.SONGS_ARCHIVE_DIR);
+if (archiveDir instanceof Error) {
+  console.error(archiveDir.message);
+  process.exit(1);
+}
 const limited = Number.isFinite(prefetchMb);
 const cache =
   prefetchMb > 0
-    ? new AudioCache({ dir: join(dirname(resolve(dbPath)), 'audio-cache'), index: catalog, maxBytes: limited ? prefetchMb * 1024 * 1024 : undefined })
+    ? new AudioCache({
+        dir: join(dirname(resolve(dbPath)), 'audio-cache'),
+        archiveDir,
+        index: catalog,
+        maxBytes: limited ? prefetchMb * 1024 * 1024 : undefined,
+        minFreeBytes: 5 * 1024 ** 3,
+      })
     : undefined;
+const mb = (bytes: number) => `${(bytes / 1048576).toFixed(0)} MB`;
 
 let announce: (replies: Reply[]) => Promise<void> = async () => {
   throw new Error('nothing to send through');
@@ -75,12 +87,22 @@ const when = (iso: string | undefined) => (iso ? new Date(iso).toLocaleString() 
 try {
   if (command === 'status') {
     const newest = catalog.newestPosts(1)[0];
-    const kept = cache?.stats();
+    const kept = cache?.where();
     console.log(`catalog:        ${catalog.count()} songs by ${catalog.artistCount()} artists, ${catalog.postCount()} music-table.com posts known`);
     console.log(`whole site:     ${catalog.getState(STATE.scanDone) ? `read ${when(catalog.getState(STATE.scanDone))}` : `${catalog.getState(STATE.scanOffset) ?? 0} posts read so far (the bot reads the rest in the background; npm run library -- scan does it now)`}`);
     console.log(`newest post:    ${newest ? `${newest.title} (${new Date(newest.publishedAt).toLocaleDateString()})` : 'none yet; run: npm run library -- sync'}`);
     console.log(`last sync:      ${when(catalog.getState(STATE.lastSync))}`);
-    console.log(`kept ready:     ${cache ? `${kept!.files} songs, ${(kept!.bytes / 1048576).toFixed(0)} MB ${limited ? `of ${prefetchMb} MB` : '(no size limit)'}, in ${cache.dir}` : 'off (PREFETCH_MB=0)'}`);
+    if (!cache || !kept) {
+      console.log('kept ready:     off (PREFETCH_MB=0)');
+    } else {
+      console.log(`kept ready:     ${kept.here.files + kept.archived.files} songs ${limited ? `(${prefetchMb} MB at most on this Mac)` : '(no size limit)'}`);
+      console.log(`  on this Mac:  ${kept.here.files} songs, ${mb(kept.here.bytes)}, in ${cache.dir}`);
+      if (cache.archiveDir) {
+        const state = await cache.archiveState();
+        const note = state === 'ok' ? '' : state === 'denied' ? " (macOS won't let the bot in)" : ' (its drive is away; songs wait on this Mac)';
+        console.log(`  on the drive: ${kept.archived.files} songs, ${mb(kept.archived.bytes)}, in ${cache.archiveDir}${note}`);
+      }
+    }
     const time = digestAt instanceof Error ? `invalid DIGEST_TIME: ${digestAt.message}` : digestAt ? `${String(digestAt.hour).padStart(2, '0')}:${String(digestAt.minute).padStart(2, '0')} every day` : 'off';
     console.log(`daily message:  ${time}; last sent ${when(catalog.getState(STATE.digestSentAt))}${catalog.getState(STATE.digestDate) === localDay(new Date()) ? ' (done for today)' : ''}`);
     const top = catalog.mostPlayed(5);
@@ -113,7 +135,7 @@ try {
     await jobs.sync();
     await jobs.keepReady();
     const kept = cache.stats();
-    console.log(`${kept.files} songs kept ready (${(kept.bytes / 1048576).toFixed(0)} MB) in ${cache.dir}`);
+    console.log(`${kept.files} songs kept ready (${mb(kept.bytes)}); new ones are in ${cache.dir}${cache.archiveDir ? `, and the bot moves them to ${cache.archiveDir} when it's there` : ''}`);
   } else if (command === 'digest' && args.includes('--send')) {
     const config = loadMatrixConfig();
     const matrix = new MatrixClient({ token: config.token, homeserver: config.homeserver });

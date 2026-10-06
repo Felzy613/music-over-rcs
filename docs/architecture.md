@@ -69,7 +69,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 | `site_posts` | music-table.com posts: title, category, the site's category ids, publish date, views, picture, number of MP3s, when first seen, when in a daily message, when in an alert |
 | `plays` | Every song sent, with its time |
 | `follows` | Artists you follow (or unfollowed, so they're never followed for you again), whether by your choice or from your plays, and since when |
-| `audio_cache` | Songs kept on disk: file, type, size, last used |
+| `audio_cache` | Songs kept on disk: the file (a name in the folder on the Mac, or its full path once moved to `SONGS_ARCHIVE_DIR`), type, size, last used |
 | `message_links` | Messages that stand for one song (for 👍), kept a month |
 | `state` | Small facts: last sync, scan progress, the daily message's date, the current list and its numbers |
 

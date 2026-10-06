@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { loadBeeperConfig, loadConfig, loadMatrixConfig } from '../src/config.ts';
+import { loadBeeperConfig, loadConfig, loadMatrixConfig, parseArchiveDir } from '../src/config.ts';
 
 const valid = {
   RBM_AGENT_ID: 'bot@rbm.goog',
@@ -75,6 +75,7 @@ describe('loadBeeperConfig', () => {
       maxDownloadMb: 100,
       digestAt: { hour: 9, minute: 0 },
       prefetchMb: Number.POSITIVE_INFINITY,
+      archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
     });
   });
@@ -126,6 +127,10 @@ describe('loadBeeperConfig', () => {
     assert.deepEqual(loadBeeperConfig({ ...base, QUIET_HOURS: '23:30-6:15' }).quiet, { from: { hour: 23, minute: 30 }, to: { hour: 6, minute: 15 } });
     assert.equal(loadBeeperConfig({ ...base, QUIET_HOURS: 'off' }).quiet, undefined);
     assert.throws(() => loadBeeperConfig({ ...base, QUIET_HOURS: 'nights' }), /QUIET_HOURS must look like 22:00-07:00/);
+    assert.equal(loadBeeperConfig({ ...base, SONGS_ARCHIVE_DIR: '/Volumes/Music Drive/Music/Music over RCS/' }).archiveDir, '/Volumes/Music Drive/Music/Music over RCS');
+    assert.equal(parseArchiveDir('~/Music/Kept', '/Users/someone'), '/Users/someone/Music/Kept');
+    assert.equal(parseArchiveDir('  '), undefined);
+    assert.throws(() => loadBeeperConfig({ ...base, SONGS_ARCHIVE_DIR: 'Music/Kept' }), /SONGS_ARCHIVE_DIR must be a full path/);
   });
 
   test('the chat is optional for the script that lists chats', () => {
@@ -148,6 +153,7 @@ describe('loadMatrixConfig', () => {
       maxDownloadMb: 100,
       digestAt: { hour: 9, minute: 0 },
       prefetchMb: Number.POSITIVE_INFINITY,
+      archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
     });
   });

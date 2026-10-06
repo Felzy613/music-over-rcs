@@ -43,7 +43,22 @@ Songs are kept on disk, in an `audio-cache` folder beside the catalog, so they'r
 
 They're downloaded after each sync, and once when the bot starts, one at a time with a pause between them. Every song you get is kept too, and a kept song is sent without asking the site anything.
 
-**Nothing is ever removed: the folder has no size limit.** At the site's pace (about 50 new releases a month, 20 MB a song on average) it grows by roughly 1 to 1.5 GB a month, plus the songs you ask for. `npm run library -- status` shows its size. If you'd rather cap it, set `PREFETCH_MB` to a number of MB: then, when it's full, the songs used least recently go first, never the ones above. `PREFETCH_MB=0` keeps none.
+**Nothing is ever removed: there's no size limit.** At the site's pace (about 50 new releases a month, 20 MB a song on average) the songs grow by roughly 1 to 1.5 GB a month, plus the songs you ask for. `npm run library -- status` shows how many and where. If you'd rather cap the folder on the Mac, set `PREFETCH_MB` to a number of MB: then, when it's full, the songs used least recently go first, never the ones above. `PREFETCH_MB=0` keeps none.
+
+### Moving them to an external drive
+
+Set `SONGS_ARCHIVE_DIR` to a folder on another drive, and the songs move there so they don't fill your Mac:
+
+```bash
+SONGS_ARCHIVE_DIR="/Volumes/Music Drive/Music/Music over RCS"
+```
+
+- **Songs always download to the Mac first**, so a request never waits on the drive and never fails because of it.
+- **Every minute, when the drive is connected, the songs on the Mac move to it**, named the way you'd name them yourself: `Yoely Weiss — Shabbos.mp3` (`(2)` when two songs share a name). Each is copied, checked, and recorded at its new place before it's removed from the Mac. From then on it's sent from the drive. (A spinning drive that has gone to sleep adds a couple of seconds.)
+- **While the drive is unplugged** the bot works as before: a song that's on the drive is downloaded again when you ask for it, and new songs wait on the Mac until the drive is back. A song downloaded again replaces its old copy on the drive rather than making a second one.
+- **Only the last folder is made** (`Music over RCS` above), and only when the folder it goes in is there, so nothing is ever created where an unplugged drive would be.
+- **Nothing on the drive is ever deleted**, and a song changed there (its tags edited in a music app, say) is sent as it is now.
+- If the drive has been away for a day with songs waiting, or macOS won't let the bot use the folder, you get a Mac notification. When this Mac's disk gets down to 5 GB free, new songs are still sent but not kept.
 
 ## The daily new-music message
 

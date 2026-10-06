@@ -35,7 +35,7 @@ Each morning (09:00 unless you change it) it sends a **daily new-music message**
 ## What it does behind the scenes
 
 - **Knows the whole site.** On its first run it reads all of music-table.com (about 3,600 posts: 5,000+ songs by 1,000+ artists) into a local catalog, in the background, and then keeps it current every three hours. Most requests are answered from your Mac without searching the site.
-- **Keeps popular songs ready.** Your most played songs, the newest releases and the month's most viewed songs are downloaded ahead of time, so they're sent without waiting for a download. Every song you get stays on your Mac too; there's no size limit unless you set one.
+- **Keeps popular songs ready.** Your most played songs, the newest releases and the month's most viewed songs are downloaded ahead of time, so they're sent without waiting for a download. Every song you get is kept too, with no size limit unless you set one. Songs always download to the Mac first; with `SONGS_ARCHIVE_DIR` set (a folder on an external drive, say), they move there whenever the drive is connected, named "Artist — Title.mp3".
 - **Forgiving search.** When a request doesn't match exactly, it tries the request with each word left out and learns how the site spells your words from the titles around them.
 - **Polite to the site.** It identifies itself, paces its requests, and remembers what it learned so it doesn't ask twice.
 - **Tells you on the Mac when something breaks.** The chat can't carry news of its own breakdown, so a Mac notification says when Google Messages is logged out of the bridge, your phone can't be reached, RCS is off, or the homeserver, the bridge or the site stops answering, and again when it's fixed.

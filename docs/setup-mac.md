@@ -24,7 +24,7 @@ It's safe to run again: every step checks what's already there, and it prints no
 - starts the homeserver and the bridge as launchd agents (they start at login and restart if they crash), and checks that they're talking to each other.
 - puts `CATALOG_DB` in `.env`, so `npm run catalog`, `npm run library` and the bot share one catalog.
 
-Idle, the homeserver and bridge use about 150 MB of memory and well under one percent of a CPU core; the bot adds a small Node process. The catalog of the whole site is about 4 MB, and the songs kept ready grow by roughly 1 to 1.5 GB a month, with no limit unless you set `PREFETCH_MB`.
+Idle, the homeserver and bridge use about 150 MB of memory and well under one percent of a CPU core; the bot adds a small Node process. The catalog of the whole site is about 4 MB, and the songs kept ready grow by roughly 1 to 1.5 GB a month, with no limit unless you set `PREFETCH_MB` (or move them to an external drive with `SONGS_ARCHIVE_DIR`).
 
 ### Controlling the services
 

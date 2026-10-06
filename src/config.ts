@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { isAbsolute, join, normalize } from 'node:path';
 import { parseDailyTime, type DailyTime } from './library/jobs.ts';
 import { DEFAULT_BASE_URL } from './beeper/client.ts';
 import { DEFAULT_HOMESERVER } from './matrix/client.ts';
@@ -95,6 +97,8 @@ interface ChatSettings {
   digestAt: DailyTime | undefined;
   /** How much disk the songs kept ready may use, in MB: Infinity (the default) for no limit, 0 for none kept. */
   prefetchMb: number;
+  /** A folder (on an external drive, say) the kept songs move into whenever it's there. */
+  archiveDir: string | undefined;
   /** No alerts for new songs by artists you follow in these hours. Undefined when QUIET_HOURS=off. */
   quiet: { from: DailyTime; to: DailyTime } | undefined;
 }
@@ -114,12 +118,15 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   if (prefetchMb instanceof Error) problems.push(prefetchMb.message);
   const quiet = parseQuietHours(env.QUIET_HOURS);
   if (quiet instanceof Error) problems.push(quiet.message);
+  const archiveDir = parseArchiveDir(env.SONGS_ARCHIVE_DIR);
+  if (archiveDir instanceof Error) problems.push(archiveDir.message);
   return {
     pollMs,
     maxDownloadMb,
     dbPath: env.CATALOG_DB?.trim() || 'data/catalog.db',
     digestAt: digestAt instanceof Error ? undefined : digestAt,
     prefetchMb: prefetchMb instanceof Error ? 0 : prefetchMb,
+    archiveDir: archiveDir instanceof Error ? undefined : archiveDir,
     quiet: quiet instanceof Error ? undefined : quiet,
   };
 }
@@ -135,6 +142,15 @@ export function parsePrefetchMb(raw: string | undefined): number | Error {
   const mb = Number(text);
   if (!(Number.isFinite(mb) && mb >= 0)) return new Error(`PREFETCH_MB must be "unlimited" (the default), a number of MB, or 0 for none (got "${raw}")`);
   return mb;
+}
+
+/** The folder kept songs move into (SONGS_ARCHIVE_DIR): a full path, or one starting with ~/. Nothing when unset. */
+export function parseArchiveDir(raw: string | undefined, home = homedir()): string | undefined | Error {
+  const text = raw?.trim();
+  if (!text) return undefined;
+  const path = text.startsWith('~/') ? join(home, text.slice(2)) : text;
+  if (!isAbsolute(path)) return new Error(`SONGS_ARCHIVE_DIR must be a full path, like /Volumes/Drive/Music/Music over RCS (got "${raw}")`);
+  return normalize(path).replace(/\/+$/, '');
 }
 
 /** Reads "22:00-07:00" (24-hour, may cross midnight); "off" for none. */
