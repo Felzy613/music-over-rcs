@@ -163,7 +163,7 @@ describe('id3: kept songs are tagged', () => {
     assert.deepEqual(covers.length, 1, 'its cover was already there');
   });
 
-  test('a song the site calls an MP3 that is really an M4A is kept, named and sent as an M4A, untouched', async () => {
+  test("a song the site calls an MP3 that is really an M4A is kept, named and sent as an M4A; one whose tags can't be written is left untouched", async () => {
     const placeOf = (_url: string, audio: { fileName: string; mimeType: string }) => `Shulem Lemmer/Singles/Mama Rachel Medley${extensionOf(audio)}`;
     const kept = new AudioCache({ dir, index: catalog, placeOf, tagsOf: () => TAGS });
     const sent = await kept.put('https://x.test/1', { ...mp3(M4A), fileName: 'Shulem Lemmer — Mama Rachel Medley.mp3' });

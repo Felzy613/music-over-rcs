@@ -7,6 +7,7 @@ import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { CachedAudio, Catalog, SitePost } from '../catalog.ts';
 import type { Track } from '../types.ts';
 import { audioTypeOf, hasCover, writeTags, type CoverPicture, type SongTags } from './id3.ts';
+import { hasMp4Cover, writeMp4Tags } from './mp4.ts';
 import { cleanName, extensionOf } from './naming.ts';
 
 type CacheIndex = Pick<Catalog, 'cachedAudio' | 'saveCachedAudio' | 'touchCachedAudio' | 'listCachedAudio' | 'forgetCachedAudio'>;
@@ -26,9 +27,9 @@ export interface AudioCacheOptions {
    * left out, a song goes in no folder, under the name it was downloaded with.
    */
   placeOf?: ((url: string, audio: { fileName: string; mimeType: string }) => string) | undefined;
-  /** The tags written into each MP3 kept (artist, album, number, title), so music apps show it right. None when left out. */
+  /** The tags written into each MP3 and M4A kept (artist, album, number, title), so music apps show it right. None when left out. */
   tagsOf?: ((url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined) | undefined;
-  /** Gets a cover, for an MP3 that has none. */
+  /** Gets a cover, for a song that has none. */
   fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
   /** The most the songs on this Mac may take, in bytes. No limit when left out. */
   maxBytes?: number | undefined;
@@ -57,6 +58,14 @@ export interface Organized {
 
 /** Song types that have ID3 tags. */
 const MP3 = /mpeg|mp3|mpg/i;
+
+/** How a song's tags are written, by its type: ID3 in an MP3, iTunes-style in an M4A. */
+interface Tagger {
+  write(data: Uint8Array, tags: SongTags, cover?: CoverPicture): Uint8Array | undefined;
+  hasCover(data: Uint8Array): boolean;
+}
+const taggerFor = (mimeType: string): Tagger | undefined =>
+  MP3.test(mimeType) ? { write: writeTags, hasCover } : /mp4|m4a/i.test(mimeType) ? { write: writeMp4Tags, hasCover: hasMp4Cover } : undefined;
 
 const errorCode = (err: unknown): string | undefined => (err as NodeJS.ErrnoException | null)?.code;
 /** How a path is compared with another: Mac disks ignore case. */
@@ -192,19 +201,19 @@ export class AudioCache {
    * (that needs a download, so `organize` does it, not the request waiting for the song).
    */
   async #tagged(url: string, downloaded: DownloadedAudio): Promise<{ audio: DownloadedAudio; tags?: string }> {
-    if (!MP3.test(downloaded.mimeType)) return { audio: downloaded };
+    if (!taggerFor(downloaded.mimeType)) return { audio: downloaded };
     const data = new Uint8Array(await downloaded.data.arrayBuffer());
+    // Called an MP3 but really an M4A, say: kept, tagged and sent as what it is.
     const retyped = asItIs(downloaded, data);
-    // Not an MP3 after all (an M4A, say): kept and sent as what it is, with no ID3 tags to write.
-    if (retyped !== downloaded) return { audio: { ...retyped, data: new Blob([data], { type: retyped.mimeType }) } };
-    const audio = downloaded;
-    const tags = this.#tagsOf?.(url, audio);
-    if (!tags) return { audio };
-    const written = writeTags(data, tags);
-    if (!written) return { audio, tags: JSON.stringify(tags) }; // not a song file we can tell: nothing to write, now or later
+    const audio = retyped === downloaded ? downloaded : { ...retyped, data: new Blob([data], { type: retyped.mimeType }) };
+    const tagger = taggerFor(audio.mimeType);
+    const tags = tagger && this.#tagsOf?.(url, audio);
+    if (!tagger || !tags) return { audio };
+    const written = tagger.write(data, tags);
+    if (!written) return { audio, tags: JSON.stringify(tags) }; // a file whose tags can't be written: left as it is, now and later
     return {
       audio: { ...audio, data: new Blob([written], { type: audio.mimeType }), bytes: written.byteLength },
-      ...(tags.cover && !hasCover(written) ? {} : { tags: JSON.stringify(tags) }),
+      ...(tags.cover && !tagger.hasCover(written) ? {} : { tags: JSON.stringify(tags) }),
     };
   }
 
@@ -257,20 +266,21 @@ export class AudioCache {
    */
   async #retag(entry: CachedAudio, path: string, tags: SongTags, record: string): Promise<boolean> {
     const data = new Uint8Array(await readFile(path));
+    // Called an MP3 but really an M4A, say: typed as what it is (so it's renamed to match), and tagged that way.
+    const tagger = taggerFor(asItIs(entry, data).mimeType);
     let cover: CoverPicture | undefined;
-    if (tags.cover && this.#fetchCover && !hasCover(data)) cover = await this.#fetchCover(tags.cover).catch(() => undefined);
-    const written = writeTags(data, tags, cover);
+    if (tagger && tags.cover && this.#fetchCover && !tagger.hasCover(data)) cover = await this.#fetchCover(tags.cover).catch(() => undefined);
+    const written = tagger?.write(data, tags, cover);
     const now = this.#index.cachedAudio(entry.url);
     if (!now || now.file !== entry.file) return false; // moved or forgotten meanwhile: next time
     if (!written) {
-      // Not an MP3 after all (an M4A the site called one, say): it's typed as what it is, so it's renamed to match.
       this.#index.saveCachedAudio({ ...asItIs(now, data), tags: record });
       return false;
     }
     // Written beside it, then renamed over it: a reader sees the old file or the new one, never half of one.
     await writeFile(`${path}.part`, written);
     await rename(`${path}.part`, path);
-    this.#index.saveCachedAudio({ ...now, bytes: written.byteLength, tags: record });
+    this.#index.saveCachedAudio({ ...asItIs(now, data), bytes: written.byteLength, tags: record });
     return true;
   }
 
@@ -292,7 +302,7 @@ export class AudioCache {
     };
 
     for (const entry of this.#tagsOf ? this.#index.listCachedAudio() : []) {
-      const tags = MP3.test(entry.mimeType) ? this.#tagsOf!(entry.url, entry) : undefined;
+      const tags = taggerFor(entry.mimeType) ? this.#tagsOf!(entry.url, entry) : undefined;
       const record = tags && JSON.stringify(tags);
       const path = this.pathOf(entry);
       const onDrive = isAbsolute(entry.file);
