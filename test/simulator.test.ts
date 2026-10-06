@@ -21,7 +21,7 @@ const stubPictures = async (picture: Picture): Promise<PreparedPicture> => ({
     fileName: 'cover.jpg',
     mimeType: 'image/jpeg',
     bytes: 0,
-    sourceUrl: picture.kind === 'collage' ? `collage:${picture.images.map((tile) => tile.number).join(',')}` : picture.url,
+    sourceUrl: picture.kind === 'collage' ? `collage:${picture.images.length}` : picture.url,
   },
   captioned: true,
 });
@@ -127,6 +127,8 @@ describe('message simulator', () => {
       body: JSON.stringify(body),
     });
   const say = (text: string) => post('/api/send', { text });
+  /** A 👍 tapped on one of the chat's messages. */
+  const react = (id: number) => post('/api/react', { id });
   const stream = async () => {
     const opened = await openStream(base);
     streams.push(opened);
@@ -192,7 +194,7 @@ describe('message simulator', () => {
       const live = await stream();
       await live.waitFor((f) => f.event === 'snapshot');
 
-      assert.equal((await say('yoely weiss shabbos')).status, 202);
+      assert.equal((await say('search yoely weiss shabbos')).status, 202);
       const ended = await live.waitFor((f) => f.event === 'trace-end');
 
       const events = live.frames.map((f) => f.event);
@@ -202,7 +204,7 @@ describe('message simulator', () => {
 
       const messages = live.frames.filter((f) => f.event === 'message').map((f) => f.data);
       assert.equal(messages[0].from, 'me');
-      assert.equal(messages[0].text, 'yoely weiss shabbos');
+      assert.equal(messages[0].text, 'search yoely weiss shabbos');
       assert.equal(messages[1].from, 'bot');
       assert.match(messages[1].text, /Yoely Weiss .* Shabbos/);
       assert.equal(messages[2].from, 'bot');
@@ -219,7 +221,7 @@ describe('message simulator', () => {
       assert.ok(steps.some((s) => s.startsWith('file ready: ') && s.includes('not downloaded')), steps.join('\n'));
       assert.ok(steps.some((s) => s.startsWith('reply sent: ')), steps.join('\n'));
 
-      assert.equal(ended.data.text, 'yoely weiss shabbos');
+      assert.equal(ended.data.text, 'search yoely weiss shabbos');
       assert.equal(ended.data.choice, false);
       assert.equal(typeof ended.data.firstReplyMs, 'number');
       assert.ok(ended.data.firstReplyMs <= ended.data.totalMs);
@@ -232,7 +234,7 @@ describe('message simulator', () => {
   test('the site file is only checked, not downloaded, unless asked', async () => {
     try {
       const live = await stream();
-      await say('benny friedman');
+      await say('search benny friedman');
       await live.waitFor((f) => f.event === 'trace-end');
       assert.deepEqual(site.fileRequests, [], 'the file itself was never requested, only described');
       assert.equal(site.signed, 1, 'a link is signed to check the file, then reused');
@@ -244,7 +246,7 @@ describe('message simulator', () => {
   test('Play asks for a fresh signed link and the file behind it is the real one', async () => {
     try {
       const live = await stream();
-      await say('yoely weiss shabbos');
+      await say('search yoely weiss shabbos');
       await live.waitFor((f) => f.event === 'trace-end');
       const audio = live.frames.map((f) => f.data).find((d) => d?.audio)?.audio;
       assert.ok(audio);
@@ -268,7 +270,7 @@ describe('message simulator', () => {
   test('a misspelled name still finds the song, and the trace says how', async () => {
     try {
       const live = await stream();
-      await say('yoely wiess shabbos');
+      await say('search yoely wiess shabbos');
       const ended = await live.waitFor((f) => f.event === 'trace-end');
       const steps = labels(live.frames, ended.data.id).join('\n');
       assert.match(steps, /lookup: .*left out/);
@@ -279,24 +281,36 @@ describe('message simulator', () => {
     }
   });
 
-  test('a broad request lists numbered choices, and the number plays that one', async () => {
+  test('a broad request lists its choices, one message each and no numbers, and a 👍 on one plays it', async () => {
     try {
       const live = await stream();
-      await say('weiss');
+      await say('search weiss');
       const first = await live.waitFor((f) => f.event === 'trace-end');
-      const said = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data.text ?? '');
-      assert.ok(said.includes('🎵 Which one?'), 'the bot lists its options');
-      assert.ok(said.some((text) => text.startsWith('🎵 1. ')) && said.some((text) => text.startsWith('🎵 2. ')), 'one message per option');
+      const said = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data);
+      const heading = said.findIndex((message) => message.text === '🎵 Which one?');
+      const closing = said.findIndex((message) => message.text === '🎵 Tap 👍 on one to choose.');
+      assert.ok(heading >= 0 && closing > heading, 'the bot lists its options');
+      const options = said.slice(heading + 1, closing);
+      assert.ok(options.length >= 2, 'one message per option');
+      assert.ok(options.every((message) => !/^🎵 \d/.test(message.text ?? '')), 'no numbers');
 
-      await say('2');
+      assert.equal((await post('/api/react', { id: options[1].id }, {})).status, 403, 'only from the page');
+      assert.equal((await react(9999)).status, 404);
+      assert.equal((await react(options[1].id)).status, 202);
       const second = await live.waitFor((f) => f.event === 'trace-end' && f.data.id !== first.data.id);
       assert.equal(second.data.choice, true);
-      assert.equal(second.data.text, '2');
+      assert.equal(second.data.text, `👍 ${options[1].text.replace('🎵 ', '')}`);
+      assert.ok(live.frames.some((f) => f.event === 'reaction' && f.data.id === options[1].id && f.data.key === '👍'), 'the page sees the 👍');
       const audio = live.frames.map((f) => f.data).filter((d) => d?.audio);
-      assert.equal(audio.length, 1, 'picking an option sends that one song');
+      assert.equal(audio.length, 1, 'a 👍 on an option sends that one song');
 
-      await say('1'); // the list is still on screen, so the other option can be picked too
-      await live.waitFor((f) => f.event === 'trace-end' && f.data.id !== first.data.id && f.data.id !== second.data.id);
+      await say('1');
+      const number = await live.waitFor((f) => f.event === 'trace-end' && f.data.text === '1');
+      assert.equal(number.data.choice, false, 'a number picks nothing here');
+      assert.ok(live.frames.some((f) => f.event === 'message' && f.data.text === '🎵 To get a song from the list, tap 👍 on it.'));
+
+      await react(options[0].id); // the list is still on screen, so the other option can be picked too
+      await live.waitFor((f) => f.event === 'trace-end' && f.data.text === `👍 ${options[0].text.replace('🎵 ', '')}`);
       assert.equal(live.frames.map((f) => f.data).filter((d) => d?.audio).length, 2);
     } finally {
       await finish();
@@ -306,9 +320,9 @@ describe('message simulator', () => {
   test('asking the same thing again right away is ignored and says why', async () => {
     try {
       const live = await stream();
-      await say('benny friedman');
+      await say('search benny friedman');
       await live.waitFor((f) => f.event === 'trace-end');
-      await say('benny friedman');
+      await say('search benny friedman');
       const ignored = await live.waitFor((f) => f.event === 'trace-item' && f.data.item.label === 'ignored');
       assert.match(ignored.data.item.detail, /20 seconds/);
       const answers = live.frames.map((f) => f.data).filter((d) => d?.audio);
@@ -321,7 +335,7 @@ describe('message simulator', () => {
   test('a song nobody has gets a plain no-match answer', async () => {
     try {
       const live = await stream();
-      await say('zzzz qqqq');
+      await say('search zzzz qqqq');
       await live.waitFor((f) => f.event === 'trace-end');
       const reply = live.frames.map((f) => f.data).find((d) => d?.from === 'bot');
       assert.match(reply.text, /^🎵 No match for "zzzz qqqq" \(I looked on music-table\.com too\)/);
@@ -333,7 +347,7 @@ describe('message simulator', () => {
   test('a page that connects late gets the whole conversation and the trace so far', async () => {
     try {
       const early = await stream();
-      await say('benny friedman');
+      await say('search benny friedman');
       await early.waitFor((f) => f.event === 'trace-end');
 
       const late = await stream();
@@ -351,7 +365,7 @@ describe('message simulator', () => {
   test('Clear starts a fresh chat and the bot keeps working', async () => {
     try {
       const live = await stream();
-      await say('benny friedman');
+      await say('search benny friedman');
       await live.waitFor((f) => f.event === 'trace-end');
 
       assert.equal((await post('/api/reset', {})).status, 200);
@@ -359,8 +373,8 @@ describe('message simulator', () => {
       assert.deepEqual(reset.data.messages, []);
       assert.deepEqual(reset.data.runs, []);
 
-      await say('yoely weiss shabbos');
-      await live.waitFor((f) => f.event === 'trace-end' && f.data.text === 'yoely weiss shabbos');
+      await say('search yoely weiss shabbos');
+      await live.waitFor((f) => f.event === 'trace-end' && f.data.text === 'search yoely weiss shabbos');
       const state = (await (await fetch(`${base}/api/state`)).json()) as { messages: unknown[]; runs: unknown[] };
       assert.equal(state.messages.length, 3);
       assert.equal(state.runs.length, 1);
@@ -369,7 +383,7 @@ describe('message simulator', () => {
     }
   });
 
-  test('Daily message shows the new-music message with album art, and a number from it plays that song', async () => {
+  test('Daily message shows the new-music message with album art, and a 👍 on a song plays it', async () => {
     await finish();
     const recent = new Date(Date.now() - 60 * 60_000).toISOString();
     const art = await startMockMusicTable([
@@ -388,20 +402,20 @@ describe('message simulator', () => {
       const ended = await live.waitFor((f) => f.event === 'trace-end' && f.data.text === 'daily new-music message');
       const shown = live.frames.filter((f) => f.event === 'message').map((f) => f.data);
       assert.match(shown[0].text, /^🎵 New music · /);
-      assert.equal(shown[1].image.url, 'collage:1', 'one picture of the covers, numbered');
-      assert.equal(shown[2].text, '🎵 1. Oizer Oberlander — Ana Elech · single');
+      assert.equal(shown[1].image.url, 'collage:1', 'one picture of the covers');
+      assert.equal(shown[2].text, '🎵 Oizer Oberlander — Ana Elech · single');
       assert.match(shown[3].text, /Also new, video only:\n• Band - Clip/);
       const steps = labels(live.frames, ended.data.id).join('\n');
       assert.match(steps, /site feed/);
       assert.match(steps, /newest posts/);
       assert.equal(art.postReads.length, 0, 'the list carried everything; no post was read on its own');
 
-      await say('1');
+      await react(shown[2].id);
       const picked = await live.waitFor((f) => f.event === 'trace-end' && f.data.choice === true);
       const reply = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data).slice(-2);
       assert.equal(reply[0].image.url, 'https://static.wixstatic.com/media/img1~mv2.png/v1/fill/w_640,h_360,al_c,q_80/cover.jpg', "the song's card first");
       assert.match(reply[1].audio.name, /Ana Elech\.mp3$/, 'then the song: two messages');
-      assert.equal(picked.data.text, '1');
+      assert.equal(picked.data.text, '👍 Oizer Oberlander — Ana Elech');
     } finally {
       await finish();
       await art.close();
@@ -416,7 +430,7 @@ describe('message simulator', () => {
     ({ url: base, port } = await simulator.listen(0));
     try {
       const live = await stream();
-      await say('anything at all');
+      await say('search anything at all');
       await live.waitFor((f) => f.event === 'trace-end');
       const reply = live.frames.map((f) => f.data).find((d) => d?.from === 'bot');
       assert.match(reply.text, /^🎵 No match for "anything at all"\./);

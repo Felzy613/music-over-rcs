@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { allowedEdits, canBeCorrected, correct, correctableEdits, editDistance, fewestMatches, fit, pick, wordMatches } from '../src/sources/relevance.ts';
+import {
+  allowedEdits,
+  canBeCorrected,
+  correct,
+  correctableEdits,
+  editDistance,
+  fewestMatches,
+  fit,
+  namesSong,
+  pick,
+  rankSongs,
+  searchWords,
+  wordMatches,
+} from '../src/sources/relevance.ts';
 
 const post = (title: string, slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-')) => ({ slug, title });
 
@@ -54,6 +67,67 @@ describe('fit', () => {
 
   test('falls back to the words in the address when a result has no title', () => {
     assert.deepEqual(fit({ slug: 'yoely-weiss-shabbos', title: '' }, ['yoely', 'weiss', 'shabbos']), { matched: 3, exact: true });
+  });
+});
+
+describe('searchWords', () => {
+  test('the words as written, then without the apostrophes and hyphens inside a word, then each two neighbours run together', () => {
+    assert.deepEqual(searchWords('V’Nusni'), ['v', 'nusni', 'vnusni']);
+    assert.ok(searchWords("Mi'Ma'amakim").includes('mimaamakim'));
+    assert.ok(searchWords('U’v’tuvcha HaGadol').includes('uvtuvcha'));
+    assert.ok(searchWords('Yom-Tov').includes('yomtov'));
+    assert.ok(searchWords('A Git Yom Tov').includes('yomtov'));
+  });
+});
+
+describe('namesSong', () => {
+  const vnusni = { title: 'V’Nusni', artist: 'Lipa Schmeltzer' };
+
+  test('the title with or without its apostrophes, alone or with some of the artist\'s name before or after it', () => {
+    for (const words of [['vnusni'], ['v', 'nusni'], ['lipa', 'vnusni'], ['lipa', 'schmeltzer', 'vnusni'], ['shmeltzer', 'vnusni'], ['vnusni', 'lipa']]) {
+      assert.ok(namesSong(vnusni, words), words.join(' '));
+    }
+  });
+
+  test('not with part of the title, a typo in it, another word in it, or only the artist', () => {
+    for (const words of [['lipa'], ['lipa', 'schmeltzer'], ['vnusn'], ['vnusin'], ['vnusni', 'remix'], ['lipa', 'yeah', 'vnusni']]) {
+      assert.ok(!namesSong(vnusni, words), words.join(' '));
+    }
+  });
+
+  test('a track number in front of the title may be left out', () => {
+    assert.ok(namesSong({ title: "02 The Bochurim's Kumzitz", artist: 'Yehuda Langer' }, ['the', 'bochurims', 'kumzitz']));
+  });
+});
+
+describe('rankSongs', () => {
+  const songs = [
+    { title: 'ShabbaTrump', artist: 'Lipa Schmeltzer' },
+    { title: 'V’Nusni', artist: 'Lipa Schmeltzer' },
+    { title: 'Nusni Remix', artist: 'Someone Else' },
+  ];
+
+  test('finds a song typed without its apostrophes, or with a typo in a long word', () => {
+    assert.deepEqual(rankSongs(songs, ['lipa', 'vnusni'], 5), [songs[1]]);
+    assert.deepEqual(rankSongs(songs, ['vnusni'], 5), [songs[1], songs[2]], '"nusni" is a letter off, so it comes after');
+    assert.deepEqual(rankSongs(songs, ['shmeltzer'], 5), [songs[0], songs[1]], 'the shorter title first');
+  });
+
+  test('the song the words name comes first, and a word in the title counts more than one in the artist\'s name', () => {
+    const shabbos = [{ title: 'Kodesh Shabbos', artist: 'A' }, { title: 'Shabbos', artist: 'B' }];
+    assert.deepEqual(rankSongs(shabbos, ['shabbos'], 5), [shabbos[1], shabbos[0]]);
+    assert.deepEqual(rankSongs([...songs, { title: 'Schmeltzer Medley', artist: 'Band' }], ['schmeltzer'], 5)[0]?.title, 'Schmeltzer Medley');
+  });
+
+  test('three or more words may miss one, but only when no song has them all; short requests must match fully', () => {
+    assert.deepEqual(rankSongs(songs, ['lipa', 'schmeltzer', 'zzzz'], 5), [songs[0], songs[1]]);
+    assert.deepEqual(rankSongs(songs, ['lipa', 'zzzz'], 5), []);
+    assert.deepEqual(rankSongs(songs, ['zzzz'], 5), []);
+    assert.deepEqual(rankSongs(songs, [], 5), []);
+  });
+
+  test('respects the limit', () => {
+    assert.equal(rankSongs(songs, ['lipa'], 1).length, 1);
   });
 });
 

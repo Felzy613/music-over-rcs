@@ -58,7 +58,7 @@ describe('runner over Matrix (the bridge case)', () => {
   const typedOnPhone = (body: string) => mock.addMessage(mock.ghost, { msgtype: 'm.text', body });
 
   test('never replays history that was in the room before it started', async () => {
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     const { runner } = makeRunner();
     await runner.prime();
     await runner.tick();
@@ -68,7 +68,7 @@ describe('runner over Matrix (the bridge case)', () => {
   test('answers a request typed on the phone with a caption and an audio message', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
 
     assert.equal(mock.sent.length, 2);
@@ -85,7 +85,7 @@ describe('runner over Matrix (the bridge case)', () => {
     mock.echoAsGhost = true;
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     const sentAfterFirst = mock.sent.length;
     assert.equal(sentAfterFirst, 2);
@@ -96,7 +96,7 @@ describe('runner over Matrix (the bridge case)', () => {
   test('shows "typing…" while it works on a request and clears it once the answer is out', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     assert.equal(mock.typing.length, 2);
     const [on, off] = mock.typing;
@@ -108,7 +108,7 @@ describe('runner over Matrix (the bridge case)', () => {
   test('renews "typing…" while a slow request is still being worked on', async () => {
     const { runner } = makeRunner({ typingRefreshMs: 15, fetchDelayMs: 140 });
     await runner.prime();
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     assert.ok(mock.typing.filter((call) => call.typing).length >= 3, 'renewed more than once during the wait');
     assert.equal(mock.typing.at(-1)?.typing, false, 'and the last word is "stopped"');
@@ -121,7 +121,7 @@ describe('runner over Matrix (the bridge case)', () => {
     mock.failTyping = true;
     const { runner, logs } = makeRunner({ typingRefreshMs: 10, fetchDelayMs: 60 });
     await runner.prime();
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     assert.equal(mock.sent.length, 2);
     assert.equal(logs.filter((line) => line.includes('typing indicator failed')).length, 1);
@@ -135,8 +135,8 @@ describe('runner over Matrix (the bridge case)', () => {
     await runner.tick();
     assert.equal(mock.typing.length, 0);
 
-    typedOnPhone('paper planes');
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     assert.equal(mock.typing.filter((call) => call.typing).length, 1, 'one request, one "typing…"');
   });
@@ -144,8 +144,8 @@ describe('runner over Matrix (the bridge case)', () => {
   test('does not answer again when a copy of the request bounces back a moment later', async () => {
     const { runner, logs } = makeRunner();
     await runner.prime();
-    typedOnPhone('paper planes');
-    typedOnPhone('Paper  planes '); // the echo: same words, different case and spacing
+    typedOnPhone('search paper planes');
+    typedOnPhone('search Paper  planes '); // the echo: same words, different case and spacing
     await runner.tick();
     assert.equal(mock.sent.length, 2, 'one caption and one audio file, not two of each');
     assert.ok(logs.some((line) => line.includes('ignoring a repeat')));
@@ -155,11 +155,11 @@ describe('runner over Matrix (the bridge case)', () => {
     let clock = 1_000_000;
     const { runner } = makeRunner({ now: () => clock });
     await runner.prime();
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     assert.equal(mock.sent.length, 2);
     clock += 21_000;
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     assert.equal(mock.sent.length, 4);
   });
@@ -167,26 +167,25 @@ describe('runner over Matrix (the bridge case)', () => {
   test('a different request right after the first is answered as usual', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('paper planes');
-    typedOnPhone('night owls');
+    typedOnPhone('search paper planes');
+    typedOnPhone('search night owls');
     await runner.tick();
     assert.equal(mock.sent.length, 6, 'the name and audio for the first, then the list for the second (heading, two options, how to pick)');
   });
 
-  test('offers a numbered choice and takes the number as the answer', async () => {
+  test('offers a choice, one message per option and no numbers, and a 👍 on one is the answer', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('night owls');
+    typedOnPhone('search night owls');
     await runner.tick();
-    // One message per option, so a 👍 on one picks it.
     assert.deepEqual(mock.sent.map((s) => s.content.body), [
       '🎵 Which one?',
-      '🎵 1. The Night Owls — Blue Horizon',
-      '🎵 2. The Night Owls — Blue Horizon (Live)',
-      '🎵 Reply with a number or 👍 one to choose.',
+      '🎵 The Night Owls — Blue Horizon',
+      '🎵 The Night Owls — Blue Horizon (Live)',
+      '🎵 Tap 👍 on one to choose.',
     ]);
 
-    typedOnPhone('2');
+    mock.addReaction(mock.ghost, mock.sent[2]!.eventId!, '👍');
     await runner.tick();
     assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon (Live).mp3');
   });
@@ -194,7 +193,7 @@ describe('runner over Matrix (the bridge case)', () => {
   test('"all" sends every song on the list, files only, and the list stays open', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('night owls');
+    typedOnPhone('search night owls');
     await runner.tick();
     const before = mock.sent.length;
     typedOnPhone('All');
@@ -203,9 +202,9 @@ describe('runner over Matrix (the bridge case)', () => {
       mock.sent.slice(before).map((s) => s.content.body),
       ['🎵 Here come all 2 songs:', 'The Night Owls — Blue Horizon.mp3', 'The Night Owls — Blue Horizon (Live).mp3'],
     );
-    typedOnPhone('1');
+    mock.addReaction(mock.ghost, mock.sent[1]!.eventId!, '👍');
     await runner.tick();
-    assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon.mp3', 'a number still picks from it');
+    assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon.mp3', 'a 👍 still picks from it');
   });
 
   test('"all" with no list open says how to use it', async () => {
@@ -213,7 +212,7 @@ describe('runner over Matrix (the bridge case)', () => {
     await runner.prime();
     typedOnPhone('all');
     await runner.tick();
-    assert.match(mock.sent.at(-1)?.content.body, /^🎵 Text me a song first; then "all" sends every song on the list\.$/);
+    assert.match(mock.sent.at(-1)?.content.body, /^🎵 Text "search" and a song first; then "all" sends every song on the list\.$/);
   });
 
   test('songs download a few at a time, and one that fails does not stop the rest', async () => {
@@ -243,15 +242,16 @@ describe('runner over Matrix (the bridge case)', () => {
     assert.ok(mock.sent.some((s) => s.content.body === '🎵 I couldn\'t send "Song 2": the file server answered HTTP 500.'));
   });
 
-  test('another number from the same list picks again, since the list is still on screen', async () => {
+  test('a 👍 on another option picks again, since the list is still on screen', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('night owls');
+    typedOnPhone('search night owls');
     await runner.tick();
-    typedOnPhone('2');
+    const [, first, second] = mock.sent.map((s) => s.eventId!);
+    mock.addReaction(mock.ghost, second!, '👍');
     await runner.tick();
     assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon (Live).mp3');
-    typedOnPhone('1');
+    mock.addReaction(mock.ghost, first!, '👍');
     await runner.tick();
     assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon.mp3');
   });
@@ -259,9 +259,9 @@ describe('runner over Matrix (the bridge case)', () => {
   test('a new search ends the list, so a later number is no longer an answer', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('night owls');
+    typedOnPhone('search night owls');
     await runner.tick();
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     const before = mock.sent.length;
     typedOnPhone('1');
@@ -270,29 +270,30 @@ describe('runner over Matrix (the bridge case)', () => {
     assert.equal(mock.sent.at(-1)?.content.body, `🎵 ${HELP_TEXT}`);
   });
 
-  test('a number beyond the list is explained, and the list still works afterwards', async () => {
+  test('a number picks nothing where a 👍 does: it says how to pick, and the list stays open', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    typedOnPhone('night owls');
+    typedOnPhone('search night owls');
     await runner.tick();
-    typedOnPhone('7');
+    typedOnPhone('2');
     await runner.tick();
-    assert.equal(mock.sent.at(-1)?.content.body, '🎵 Pick a number from 1 to 2, or text me another song name.');
-    typedOnPhone('1');
+    assert.equal(mock.sent.at(-1)?.content.body, '🎵 To get a song from the list, tap 👍 on it.');
+    assert.equal(mock.sent.filter((s) => s.content.msgtype === 'm.audio').length, 0);
+    typedOnPhone('all');
     await runner.tick();
-    assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon.mp3');
+    assert.equal(mock.sent.filter((s) => s.content.msgtype === 'm.audio').length, 2, '"all" still has the list');
   });
 
-  test('a list stops answering numbers after half an hour', async () => {
+  test('a list stops answering "all" after half an hour', async () => {
     let clock = 1_000_000;
     const { runner } = makeRunner({ now: () => clock });
     await runner.prime();
-    typedOnPhone('night owls');
+    typedOnPhone('search night owls');
     await runner.tick();
     clock += 31 * 60_000;
-    typedOnPhone('2');
+    typedOnPhone('all');
     await runner.tick();
-    assert.equal(mock.sent.at(-1)?.content.body, `🎵 ${HELP_TEXT}`);
+    assert.match(mock.sent.at(-1)?.content.body, /^🎵 Text "search" and a song first; then "all"/);
   });
 
   describe('pictures and messages the bot starts itself', () => {
@@ -325,7 +326,7 @@ describe('runner over Matrix (the bridge case)', () => {
     test("a song's card goes out as one picture, with its name drawn on it", async () => {
       const { runner } = runnerWith({ handle: async () => [card, { kind: 'text', text: 'after it' }] }, async (p) => ({ image: picture(p.kind === 'image' ? p.url : ''), captioned: true }));
       await runner.prime();
-      typedOnPhone('ana elech');
+      typedOnPhone('search ana elech');
       await runner.tick();
       assert.deepEqual(mock.sent.map((s) => s.content.msgtype), ['m.image', 'm.text']);
       assert.equal(mock.uploads[0]?.contentType, 'image/jpeg');
@@ -334,7 +335,7 @@ describe('runner over Matrix (the bridge case)', () => {
     test("where the name couldn't be drawn on, it follows the picture as text; with no picture at all, the name still goes", async () => {
       const plain = runnerWith({ handle: async () => [card] }, async (p) => ({ image: picture(p.kind === 'image' ? p.url : ''), captioned: false }));
       await plain.runner.prime();
-      typedOnPhone('ana elech');
+      typedOnPhone('search ana elech');
       await plain.runner.tick();
       assert.deepEqual(mock.sent.map((s) => [s.content.msgtype, s.content.body]), [
         ['m.image', 'cover.jpg'],
@@ -346,7 +347,7 @@ describe('runner over Matrix (the bridge case)', () => {
         throw new Error('the picture server answered HTTP 404');
       });
       await broken.runner.prime();
-      typedOnPhone('ana elech again');
+      typedOnPhone('search ana elech again');
       await broken.runner.tick();
       assert.deepEqual(mock.sent.map((s) => s.content.body), ['🎵 Oizer Oberlander — Ana Elech']);
       assert.ok(broken.logs.some((line) => /could not send a picture: the picture server answered HTTP 404/.test(line)));
@@ -373,13 +374,13 @@ describe('runner over Matrix (the bridge case)', () => {
         pollMs: 20,
       });
       await runner.prime();
-      typedOnPhone('blue horizon live');
+      typedOnPhone('search blue horizon live');
       await runner.tick();
       assert.deepEqual(order.slice(0, 2), ['download started', 'picture started'], 'the download did not wait for the picture');
       assert.deepEqual(mock.sent.map((s) => s.content.msgtype), ['m.image', 'm.audio']);
     });
 
-    test('announce sends a message nobody asked for, and its numbers work for as long as it says', async () => {
+    test('announce sends a message nobody asked for, and its list works for as long as it says', async () => {
       let clock = 1_000_000;
       const live = catalog.search('blue horizon live')[0]!;
       const { runner } = runnerWith(
@@ -395,34 +396,36 @@ describe('runner over Matrix (the bridge case)', () => {
       await runner.prime();
       await runner.announce([
         { kind: 'text', text: 'New music today' },
-        { kind: 'text', text: '1. The Night Owls — Blue Horizon (Live)\n\nReply with a number to get the song.', chips: [{ label: '1', postback: `play:${live.id}` }], chipsValidMs: 24 * 60 * 60_000 },
+        { kind: 'text', text: 'The Night Owls — Blue Horizon (Live)', postback: `play:${live.id}` },
+        { kind: 'text', text: 'Tap 👍 on it to get it.', chips: [{ label: '1', postback: `play:${live.id}` }], chipsValidMs: 24 * 60 * 60_000 },
       ]);
       assert.deepEqual(mock.sent.map((s) => s.content.body), [
         '🎵 New music today',
-        '🎵 1. The Night Owls — Blue Horizon (Live)\n\nReply with a number to get the song.',
-      ], 'its own hint, not a second one');
+        '🎵 The Night Owls — Blue Horizon (Live)',
+        '🎵 Tap 👍 on it to get it.',
+      ], 'no word about numbers');
       clock += 5 * 60 * 60_000; // five hours later
-      typedOnPhone('1');
+      typedOnPhone('all');
       await runner.tick();
       assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon (Live).mp3');
     });
 
-    test('a list sent by another process (or before a restart) still answers a number, through the shared store', async () => {
+    test('a list sent by another process (or before a restart) still answers "all", through the shared store', async () => {
       const live = catalog.search('blue horizon live')[0]!;
       let kept: PendingChoices | undefined;
       const store = { load: () => kept, save: (choices: PendingChoices | undefined) => void (kept = choices) };
       const matrix = new MatrixClient({ token: mock.token, homeserver: mock.url });
       const sender = createRunner({ chat: matrix, bot: { handle: async () => [] }, chatID: mock.roomId, fetchAudio: (url, title) => fetchAudio(url, title), choices: store });
-      await sender.announce([{ kind: 'text', text: '1. Blue Horizon (Live)', chips: [{ label: '1', postback: `play:${live.id}` }], chipsValidMs: 60 * 60_000 }]);
+      await sender.announce([{ kind: 'text', text: 'Tap 👍 on it to get it.', chips: [{ label: '1', postback: `play:${live.id}` }], chipsValidMs: 60 * 60_000 }]);
       assert.equal(kept?.chips[0]?.postback, `play:${live.id}`);
 
       const bot = createBot({ catalog, checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true }) });
       const answerer = createRunner({ chat: new MatrixClient({ token: mock.token, homeserver: mock.url }), bot, chatID: mock.roomId, fetchAudio: (url, title) => fetchAudio(url, title), choices: store });
       await answerer.prime();
-      typedOnPhone('1');
+      typedOnPhone('all');
       await answerer.tick();
       assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon (Live).mp3');
-      typedOnPhone('paper planes');
+      typedOnPhone('search paper planes');
       await answerer.tick();
       assert.equal(kept, undefined, 'a new search ends the list for everyone');
     });
@@ -442,7 +445,7 @@ describe('runner over Matrix (the bridge case)', () => {
       await runner.prime();
       await runner.announce([
         { kind: 'text', text: 'New music today' },
-        { kind: 'text', text: '1. The Night Owls — Blue Horizon (Live)', postback: `play:${live.id}` },
+        { kind: 'text', text: 'The Night Owls — Blue Horizon (Live)', postback: `play:${live.id}` },
       ]);
       const [heading, item] = mock.sent.map((s) => s.eventId);
       mock.addReaction(mock.ghost, heading!, '👍');
@@ -453,6 +456,52 @@ describe('runner over Matrix (the bridge case)', () => {
       await runner.tick();
       assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon (Live).mp3');
       assert.ok(logs.some((line) => line === `<- 👍 play:${live.id}`));
+    });
+
+    test('songs picked one after another (three 👍 in a row) go out songGapMs apart, each with its name', async () => {
+      const songs = ['blue horizon', 'blue horizon live', 'paper planes'].map((words) => catalog.search(words)[0]!);
+      const bot = createBot({ catalog, checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true }) });
+      let clock = 1_000_000;
+      const waits: Array<{ ms: number; afterSends: number }> = [];
+      const runner = createRunner({
+        chat: new MatrixClient({ token: mock.token, homeserver: mock.url }),
+        bot,
+        chatID: mock.roomId,
+        fetchAudio: (url, title) => fetchAudio(url, title),
+        songGapMs: 15_000,
+        now: () => clock,
+        sleep: async (ms) => {
+          waits.push({ ms, afterSends: mock.sent.length });
+          clock += ms;
+        },
+      });
+      await runner.prime();
+      await runner.announce(songs.map((track, i): Reply => ({ kind: 'text', text: `${i + 1}. ${track.title}`, postback: `play:${track.id}` })));
+      const items = mock.sent.map((s) => s.eventId!);
+      for (const item of items) mock.addReaction(mock.ghost, item, '👍');
+      await runner.tick();
+      assert.deepEqual(
+        mock.sent.slice(items.length).map((s) => (s.content.msgtype === 'm.audio' ? s.content.filename : s.content.body)),
+        [
+          '🎵 The Night Owls — Blue Horizon',
+          'The Night Owls — Blue Horizon.mp3',
+          '🎵 The Night Owls — Blue Horizon (Live)',
+          'The Night Owls — Blue Horizon (Live).mp3',
+          '🎵 Mira Vale — Paper Planes at Dawn',
+          'Mira Vale — Paper Planes at Dawn.mp3',
+        ],
+      );
+      // The first song goes at once; the others wait their turn, each with its name held back until then.
+      assert.deepEqual(waits, [
+        { ms: 15_000, afterSends: items.length + 2 },
+        { ms: 15_000, afterSends: items.length + 4 },
+      ]);
+      // A song asked for once the last one had its time goes at once.
+      clock += 15_000;
+      mock.addReaction(mock.ghost, items[0]!, '👍');
+      await runner.tick();
+      assert.equal(waits.length, 2);
+      assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon.mp3');
     });
 
     test('announce waits for a request that is being answered', async () => {
@@ -498,7 +547,7 @@ describe('runner over Matrix (the bridge case)', () => {
     const { runner, logs } = makeRunner();
     await runner.prime();
     mock.failSync = true;
-    typedOnPhone('paper planes');
+    typedOnPhone('search paper planes');
     await runner.tick();
     assert.ok(logs.some((line) => line.includes('poll failed')));
     assert.deepEqual(mock.sent, []);

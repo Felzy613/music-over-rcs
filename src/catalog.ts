@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { artistKey, splitArtists } from './artists.ts';
 import { parseQuery } from './query.ts';
-import { allowedEdits, correctableEdits, editDistance } from './sources/relevance.ts';
+import { allowedEdits, correctableEdits, editDistance, rankSongs } from './sources/relevance.ts';
 import type { SongFacts } from './library/naming.ts';
 import type { ChoiceStore, MessageLinks, PendingChoices } from './runner.ts';
 import type { Track } from './types.ts';
@@ -270,7 +270,10 @@ export class Catalog {
     return row ? toTrack(row) : undefined;
   }
 
-  /** Full-text search: every word must match the start of a word in the title or artist. */
+  /**
+   * Full-text search: every word must match the start of a word in the title or artist. When no song has them all,
+   * a looser look through every song: apostrophes left out ("vnusni" for "V’Nusni"), typos, a missing word.
+   */
   search(raw: string, limit = 6): Track[] {
     const tokens = parseQuery(raw);
     if (tokens.length === 0) return [];
@@ -284,7 +287,8 @@ export class Catalog {
          LIMIT ?`,
       )
       .all(match, limit);
-    return rows.map(toTrack);
+    if (rows.length > 0) return rows.map(toTrack);
+    return rankSongs(this.#db.prepare(`SELECT ${TRACK_COLUMNS} FROM tracks ORDER BY id`).all().map(toTrack), tokens, limit);
   }
 
   list(limit = 50, offset = 0): Track[] {

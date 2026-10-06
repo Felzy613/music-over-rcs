@@ -27,7 +27,7 @@ The site is a Wix blog. The bot uses the same public endpoints the site's own pa
 
 ## How a request is matched
 
-1. **Your catalog first.** A request that names exactly one song it has (artist and title, in either order) is answered from the catalog at once. A request that's just an artist's name lists their releases.
+1. **Your catalog first.** A request that names exactly one song it has (its whole title, alone or with some or all of the artist's name before or after it) is answered from the catalog at once. A request that's just an artist's name lists their releases. When no song in the catalog has every word as typed, the catalog looks again more loosely: apostrophes and hyphens left out or put in (`vnusni` for "V’Nusni", `yomtov` for "Yom Tov"), a letter or two off in a longer word (`shmeltzer` for "Schmeltzer"), and one word missing from a request of three or more. This matters because the site's own search can't find such songs at all: it finds nothing for `vnusni`, or even `nusni`.
 2. **Then the site, merged with the catalog.** Anything broader is also searched on the site, and the results are merged, so songs the catalog doesn't have yet are offered too.
 3. **Only posts that fit the whole request.** The site's search lists anything matching one word, so the bot keeps the posts whose titles have all your words (typos allowed), exact titles first. A request of three or more words may miss one word.
 4. **Spelling.** The quick search is strict about spelling, so when no title has all your words the bot:

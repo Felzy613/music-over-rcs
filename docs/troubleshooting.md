@@ -38,8 +38,9 @@ A problem that lasts is repeated every six hours. **No notifications at all?** m
 - **A song you know is there isn't found:** try the artist and title as the site writes them, or fewer words. `npm run simulate:web` and **Behind the scenes** show what was searched and what the site listed.
 - **An artist's name gives songs instead of their list:** the name fits several artists and none clearly has the most songs (like `weiss`). Use the full name.
 - **`trending` or `new` say the catalog is still being filled:** the first run reads the whole site in the background (about 20 minutes). `npm run library -- status` shows how far it got; `npm run library -- scan` finishes it in about two minutes.
-- **A number gets "Text me a song name…":** no list is open. Lists last half an hour ("Which one?"), two hours (`trending`, `new`, artists) or a day (the daily message), and a new song name ends them.
-- **A 👍 does nothing:** it works on messages that stand for one song: a list's options, the songs in the daily message (their picture or numbered line), and a new-song alert. On anything else a 👍 is just a reaction.
+- **A number gets "tap 👍 on it":** lists have no numbers; tap 👍 on the song's own message. (With no list open, a number gets the help text.) Lists last, for `all`, half an hour ("Which one?"), two hours (`trending`, `new`, artists) or a day (the daily message), and a new search ends them.
+- **A song name gets "To look for a song, start with "search"":** every message starts with a command now; send the line it suggests (`search` and the name).
+- **A 👍 does nothing:** it works on messages that stand for one song: a list's options, the songs in the daily message (the picture or a song's line), and a new-song alert. On anything else a 👍 is just a reaction.
 - **`chanukah`, `purim`, `wedding` or `vocal` is slow the first time:** it reads the whole category from the site once (a few seconds); after that it's instant.
 - **`follow <name>` says it doesn't know the artist:** it only knows artists with songs in the catalog. Text the name alone first to see whether it's found, or try the name as the site writes it.
 - **A one-letter message or a stray number** gets the help text, not a search.

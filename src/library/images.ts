@@ -42,8 +42,8 @@ export async function drawCard(cover: Uint8Array, caption: { title: string; arti
   return jpeg(await compose(composition, { cover }), 'cover.jpg');
 }
 
-/** The daily message's picture: the covers in a grid (up to nine), each numbered, with its name over its foot. */
-export async function drawCollage(items: Array<{ cover: Uint8Array; label: string; number: number }>): Promise<DownloadedImage> {
+/** The daily message's picture: the covers in a grid (up to nine), each with its name over its foot (and its number where the list is numbered). */
+export async function drawCollage(items: Array<{ cover: Uint8Array; label: string; number?: number | undefined }>): Promise<DownloadedImage> {
   const shown = items.slice(0, 9);
   if (shown.length === 0) throw new Error('no pictures to put together');
   const columns = shown.length <= 2 ? shown.length : shown.length <= 4 ? 2 : 3;
@@ -61,7 +61,7 @@ export async function drawCollage(items: Array<{ cover: Uint8Array; label: strin
         y: GAP + Math.floor(i / columns) * (TILE_H + GAP),
         w: TILE_W,
         h: TILE_H,
-        badge: String(item.number),
+        ...(item.number !== undefined ? { badge: String(item.number) } : {}),
         overlay: item.label,
       };
     }),

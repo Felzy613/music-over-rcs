@@ -71,6 +71,15 @@ describe('Catalog.search', () => {
     assert.deepEqual(titles(seeded().search('blue horizon')), ['Blue Horizon', 'Blue Horizon (Live)']);
   });
 
+  test('when no song has every word as typed, looks again more loosely: apostrophes left out, a typo in a long word', () => {
+    const catalog = seeded();
+    catalog.add({ title: 'V’Nusni', artist: 'Lipa Schmeltzer', url: 'https://cdn.example.test/vnusni.mp3' });
+    for (const query of ['lipa vnusni', 'vnusni', 'lipa shmeltzer vnusni', "v'nusni"]) {
+      assert.deepEqual(titles(catalog.search(query)), ['V’Nusni'], query);
+    }
+    assert.deepEqual(titles(catalog.search('paper plaens')), ['Paper Planes at Dawn']);
+  });
+
   test('understands a leading "play" or "send me"', () => {
     const catalog = seeded();
     assert.deepEqual(titles(catalog.search('play paper planes')), ['Paper Planes at Dawn']);

@@ -104,7 +104,7 @@ Then start the bot as a background service that also starts at login:
 npm run stack -- enable-bot
 ```
 
-Text a song name in that chat. For a trial in the foreground use `npm run matrix` instead, after `npm run stack -- disable-bot`: two bots would both answer every message.
+Text `search` and a song name in that chat (`search yoely weiss shabbos`). For a trial in the foreground use `npm run matrix` instead, after `npm run stack -- disable-bot`: two bots would both answer every message.
 
 On its first run the bot reads the whole site into the catalog in the background (about 20 minutes, a few pages a minute). `npm run library -- scan` does it in about two minutes instead.
 

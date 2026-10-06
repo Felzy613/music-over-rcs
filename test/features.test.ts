@@ -130,8 +130,8 @@ describe('holiday and category lists', () => {
     );
     assert.deepEqual(texts(replies).slice(0, 3), [
       'New music · Monday, May 24\n2 new songs on music-table.com\n🎤 It\'s Sefirah: text "vocal" for a cappella songs.',
-      '1. Band — A Cappella One · vocal',
-      '2. Band — Loud One · single',
+      'Band — A Cappella One · vocal',
+      'Band — Loud One · single',
     ]);
   });
 });
@@ -179,12 +179,12 @@ describe('following artists', () => {
     add(5, 'Mendy Weiss');
     for (const n of [5, 6, 7]) catalog.add({ title: `Other ${n}`, artist: 'Mendy Weiss', url: `https://x.test/post/m${n}#0`, post: `m${n}` });
     const ask = chat();
-    assert.equal((await ask('yoely weiss song 1')).length, 0, 'a card and a file, no text');
-    await ask('yoely weiss song 1'); // the same song again doesn't count twice
-    await ask('yoely weiss song 2');
-    const third = await ask('yoely weiss song 3');
+    assert.equal((await ask('search yoely weiss song 1')).length, 0, 'a card and a file, no text');
+    await ask('search yoely weiss song 1'); // the same song again doesn't count twice
+    await ask('search yoely weiss song 2');
+    const third = await ask('search yoely weiss song 3');
     assert.deepEqual(third, ['🔔 You\'ve had a few songs by Yoely Weiss, so I\'ll send you their new ones as soon as they\'re out. (Text "unfollow yoely weiss" to stop.)']);
-    assert.deepEqual(await ask('yoely weiss song 4'), [], 'said once');
+    assert.deepEqual(await ask('search yoely weiss song 4'), [], 'said once');
     assert.deepEqual(catalog.followed().map((artist) => [artist.name, artist.auto]), [['Yoely Weiss', true]]);
 
     await ask('unfollow mendy weiss');
@@ -234,7 +234,7 @@ describe('following artists', () => {
     const [alert] = sent;
     assert.deepEqual(
       alert!.map((reply) => (reply.kind === 'text' ? reply.text : `[${reply.kind}]`)),
-      ['[image]', '🔔 New from Yoely Weiss: Yoely Weiss — Brand New', 'Reply 1 or 👍 it to get it.'],
+      ['[image]', '🔔 New from Yoely Weiss: Yoely Weiss — Brand New', 'Tap 👍 on it to get it.'],
     );
     const card = alert![0]!;
     assert.ok(card.kind === 'image' && card.postback?.startsWith('play:') && card.caption?.title === 'Brand New');

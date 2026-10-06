@@ -12,7 +12,7 @@ Everything the bot knows lives in one SQLite file, the **catalog** (`CATALOG_DB`
 | **Plays**: each song sent to you, and when | Keeping your most played songs ready; following an artist after three of their songs |
 | **Artists you follow**, whether you chose them or your plays did, and the ones you unfollowed | New-song alerts |
 | **Songs kept ready**: which files are on disk, and when each was last used | Sending without downloading |
-| **The current list and its numbers**, and which messages stand for which song | Numbers and 👍 working across restarts |
+| **The current list**, and which messages stand for which song | `all` and 👍 working across restarts |
 
 A site song is stored as a link to its post (`https://www.music-table.com/post/<name>#<n>`), never as the song's own download address: the site's download links expire, so a fresh one is asked for when the song is sent.
 
@@ -83,7 +83,7 @@ SONGS_ARCHIVE_DIR="/Volumes/Music Drive/Music/Music over RCS"
 
 ## The daily new-music message
 
-At `DIGEST_TIME` (09:00 by default, your Mac's time) the bot syncs, then sends what was published since the last message: a heading, one picture of the new covers in a numbered grid (drawn on your Mac), a line per song or album, the posts that are only videos, and a closing line. Replying with a number (all day), `all`, or a 👍 on a song's line gets it. See [Using the bot](using-the-bot.md#the-daily-new-music-message).
+At `DIGEST_TIME` (09:00 by default, your Mac's time) the bot syncs, then sends what was published since the last message: a heading, one picture of the new covers in a grid (drawn on your Mac), a line per song or album, the posts that are only videos, and a closing line. A 👍 on a song's line gets it; `all` gets them all (all day). See [Using the bot](using-the-bot.md#the-daily-new-music-message).
 
 - Nothing new, no message; the day still counts as done.
 - The first time the bot runs with it on, it waits for the next scheduled time instead of sending in the middle of the day.
@@ -98,7 +98,7 @@ Every minute the bot looks in the catalog for posts with music by an artist you 
 - you haven't had any of its songs already;
 - it's not the quiet hours (`QUIET_HOURS`, 22:00 to 07:00 by default). Overnight posts go out when they end.
 
-Each goes out as its card (the cover with the name drawn on) and a line, then one closing line; a number or 👍 gets the song, for a day. An album is announced once, and its number lists its songs. A post that couldn't be sent is tried again the next minute; one that was sent is marked so it's never announced twice. See [Using the bot](using-the-bot.md#following-artists).
+Each goes out as its card (the cover with the name drawn on) and a line, then one closing line; a 👍 gets the song. An album is announced once, and a 👍 on it lists its songs. A post that couldn't be sent is tried again the next minute; one that was sent is marked so it's never announced twice. See [Using the bot](using-the-bot.md#following-artists).
 
 ## Health checks
 
@@ -125,4 +125,4 @@ npm run library -- digest --days 3   # the same, covering the last three days
 npm run library -- digest --send     # send it to your chat now (MATRIX_ROOM_ID), exactly as the bot would
 ```
 
-The bot does all of this on its own while it runs; these commands are for looking and trying. They share the catalog with the running bot safely. A message sent with `digest --send` works like the bot's own: its numbers and 👍 are answered by the running bot.
+The bot does all of this on its own while it runs; these commands are for looking and trying. They share the catalog with the running bot safely. A message sent with `digest --send` works like the bot's own: its 👍 and `all` are answered by the running bot.

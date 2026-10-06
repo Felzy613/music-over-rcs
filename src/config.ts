@@ -101,6 +101,8 @@ interface ChatSettings {
   archiveDir: string | undefined;
   /** No alerts for new songs by artists you follow in these hours. Undefined when QUIET_HOURS=off. */
   quiet: { from: DailyTime; to: DailyTime } | undefined;
+  /** The least time between two songs sent, in ms, so the phone has sent one before the next arrives. */
+  songGapMs: number;
 }
 
 function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: string[]): ChatSettings {
@@ -120,6 +122,8 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   if (quiet instanceof Error) problems.push(quiet.message);
   const archiveDir = parseArchiveDir(env.SONGS_ARCHIVE_DIR);
   if (archiveDir instanceof Error) problems.push(archiveDir.message);
+  const songGapMs = parseSongGap(env.SONG_GAP_SECONDS);
+  if (songGapMs instanceof Error) problems.push(songGapMs.message);
   return {
     pollMs,
     maxDownloadMb,
@@ -128,7 +132,18 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
     prefetchMb: prefetchMb instanceof Error ? 0 : prefetchMb,
     archiveDir: archiveDir instanceof Error ? undefined : archiveDir,
     quiet: quiet instanceof Error ? undefined : quiet,
+    songGapMs: songGapMs instanceof Error ? 0 : songGapMs,
   };
+}
+
+/** Seconds between two songs (SONG_GAP_SECONDS), in ms: 15 unless set, 0 or "off" for none, at most 300. */
+export function parseSongGap(raw: string | undefined): number | Error {
+  const text = raw?.trim().toLowerCase() || '15';
+  const seconds = text === 'off' ? 0 : Number(text);
+  if (!(Number.isFinite(seconds) && seconds >= 0 && seconds <= 300)) {
+    return new Error(`SONG_GAP_SECONDS must be a number of seconds from 0 to 300, or "off" (got "${raw}")`);
+  }
+  return seconds * 1000;
 }
 
 /**

@@ -42,10 +42,94 @@ export function wordMatches(token: string, word: string): boolean {
   return edits > 0 && Math.abs(word.length - token.length) <= edits && editDistance(token, word) <= edits;
 }
 
+/** Apostrophes, hyphens and the like between two letters of one word: "V’Nusni", "Mi'Ma'amakim", "Yom-Tov". */
+const JOINERS = /(?<=[\p{L}\p{N}])['’‘ʼ`´׳״-]+(?=[\p{L}\p{N}])/gu;
+
+/** Without accents ("Océan" as "Ocean"), the way the catalog's own search compares. Other alphabets keep their marks. */
+const fold = (text: string): string => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+/**
+ * A title's words in every form they may be typed in: as written ("v", "nusni"), with the apostrophes and hyphens
+ * inside a word left out ("vnusni", "mimaamakim"), and two neighbouring words run together ("yom tov" as "yomtov").
+ */
+export function searchWords(text: string): string[] {
+  const words = tokenize(text);
+  const pairs = words.slice(1).map((word, i) => `${words[i]}${word}`);
+  return [...new Set([...words, ...tokenize(text.replace(JOINERS, '')), ...pairs])];
+}
+
+/**
+ * True when the words name this one song: its title as written, give or take apostrophes and spaces ("vnusni" for
+ * "V’Nusni"), alone or with words of the artist's name before or after it ("lipa vnusni", "vnusni lipa schmeltzer").
+ * The title must be all there and spelled right; the artist's words may be a typo off. A track number in front of
+ * the title ("02 Kumzitz") may be left out.
+ */
+export function namesSong(song: { title: string; artist: string }, wanted: string[]): boolean {
+  const title = tokenize(fold(song.title));
+  const forms = new Set([title.join('')]);
+  if (title.length > 1 && /^\d+$/.test(title[0]!)) forms.add(title.slice(1).join(''));
+  const artist = searchWords(fold(song.artist));
+  const tokens = wanted.map(fold);
+  const byArtist = (token: string): boolean => artist.some((word) => wordMatches(token, word));
+  // Words of the artist's name may lead (start) and trail (end); what's between them must be the title.
+  for (let start = 0; start < tokens.length; start += 1) {
+    for (let end = tokens.length; end > start; end -= 1) {
+      if (forms.has(tokens.slice(start, end).join(''))) return true;
+      if (!byArtist(tokens[end - 1]!)) break;
+    }
+    if (!byArtist(tokens[start]!)) break;
+  }
+  return false;
+}
+
+/** How close a typed word comes to any of these words: 3 the same word, 2 the start of one, 1 a typo away, 0 not. */
+function closeness(token: string, words: string[]): number {
+  let best = 0;
+  for (const word of words) {
+    if (word === token) return 3;
+    if (word.startsWith(token)) best = 2;
+    else if (best === 0 && wordMatches(token, word)) best = 1;
+  }
+  return best;
+}
+
+/**
+ * The songs that fit the words, best first: the looser search for when the exact one finds nothing. Apostrophes and
+ * spaces may be left out or put in ("vnusni" finds "V’Nusni"), a longer word may be a letter or two off ("shmeltzer"
+ * finds "Schmeltzer"), and, as on the site, a request of three or more words may miss one when no song has them all.
+ * A song the words name comes first, then the closest, then the shortest title.
+ */
+export function rankSongs<T extends { title: string; artist: string }>(songs: Iterable<T>, wanted: string[], limit: number): T[] {
+  const tokens = wanted.map(fold);
+  if (tokens.length === 0) return [];
+  const scored: Array<{ song: T; matched: number; score: number; named: boolean; length: number }> = [];
+  for (const song of songs) {
+    const title = searchWords(fold(song.title));
+    const artist = searchWords(fold(song.artist));
+    let matched = 0;
+    let score = 0;
+    for (const token of tokens) {
+      const inTitle = closeness(token, title);
+      const best = Math.max(inTitle, closeness(token, artist));
+      if (best === 0) continue;
+      matched += 1;
+      // A word found in the title counts a little more than one found only in the artist's name.
+      score += best + (inTitle > 0 ? 0.5 : 0);
+    }
+    if (matched < fewestMatches(tokens)) continue;
+    scored.push({ song, matched, score, named: namesSong(song, tokens), length: tokenize(song.title).length });
+  }
+  const full = scored.filter((entry) => entry.matched === tokens.length);
+  return (full.length > 0 ? full : scored)
+    .sort((a, b) => Number(b.named) - Number(a.named) || b.matched - a.matched || b.score - a.score || a.length - b.length)
+    .slice(0, limit)
+    .map((entry) => entry.song);
+}
+
 export interface Fit {
-  /** How many of the typed words appear in the title (typos allowed). */
+  /** How many of the typed words appear in the title (typos allowed, apostrophes and spaces too: see searchWords). */
   matched: number;
-  /** The request is the whole title, or exactly the song's name, and nothing more or less. */
+  /** The request is the whole title, or exactly the song's name (with or without some of the artist's), and nothing more or less. */
   exact: boolean;
 }
 
@@ -56,15 +140,16 @@ export function titleWords(hit: Titled): string[] {
 }
 
 export function fit(hit: Titled, wanted: string[]): Fit {
+  const text = titleText(hit);
   const words = titleWords(hit);
-  const song = tokenize(splitTitle(titleText(hit)).title);
+  const song = tokenize(splitTitle(text).title);
   const count = (list: string[]): number => wanted.filter((token) => list.some((word) => wordMatches(token, word))).length;
-  const matched = count(words);
+  const matched = count(searchWords(text));
   // The song's name alone only counts when the typed words are really in the song's name, not the artist's.
   const exact =
     wanted.length > 0 &&
     matched === wanted.length &&
-    (words.length === wanted.length || (song.length === wanted.length && count(song) === wanted.length));
+    (words.length === wanted.length || (song.length === wanted.length && count(song) === wanted.length) || namesSong(splitTitle(text), wanted));
   return { matched, exact };
 }
 

@@ -5,6 +5,7 @@ import { categoryFor } from './library/category-list.ts';
 import type { Follows } from './library/follows.ts';
 import { seasonOn } from './library/seasons.ts';
 import { parseQuery, tokenize } from './query.ts';
+import { editDistance, namesSong } from './sources/relevance.ts';
 import { splitTitle } from './sources/titles.ts';
 import type { Chip, Incoming, Reply, Track } from './types.ts';
 
@@ -50,17 +51,25 @@ export interface Bot {
 const MAX_CHOICES = 5;
 const MAX_QUERY_CHARS = 200;
 const MAX_CHIP_LABEL = 25;
-const GREETINGS = new Set(['help', 'hi', 'hello', 'hey', 'start', 'menu']);
+/** A message starting with one of these gets the help. */
+const GREETINGS = new Set(['help', 'hi', 'hello', 'hey', 'start', 'menu', 'commands']);
+/**
+ * Every message starts with its command, so a song's name is never taken for a command or the other way round.
+ * "search" (a letter off is fine: "serach", "seach") and what to look for searches.
+ */
+const FIRST_WORD = /^\s*(\p{L}+)[\s:,-]*/u;
+const isSearch = (word: string): boolean => editDistance(word.toLowerCase(), 'search') <= 1;
 
 export const HELP_TEXT =
-  "Text me a song name (artist and title work best) and I'll send you the audio file.\nExample: blue horizon night owls";
+  'Text "search" and a song name (artist and title work best), and I\'ll send you the audio file.\nExample: search blue horizon night owls';
 
-/** The help when the lists are there too. */
+/** The help when the lists are there too: every command, since a message has to start with one. */
 export const BROWSE_HELP_TEXT = [
-  "Text me a song or an artist and I'll send you the music.",
-  'Also: "trending", "new", "chanukah", "purim", "wedding" or "vocal" for lists, "more" for the next ones, and "all" for every song on a list.',
-  '"follow <artist>" sends their new songs as soon as they\'re out.',
-  'Reply with a number or 👍 a song to pick it.',
+  'Start each message with a command:',
+  '"search" and a song or an artist, like "search lipa vnusni".',
+  '"trending", "new", "chanukah", "purim", "wedding" or "vocal" for lists, "more" for the next ones, and "all" for every song on a list.',
+  '"follow" and an artist to get their new songs as soon as they\'re out ("unfollow", "following").',
+  'Tap 👍 on a song in a list to get it.',
 ].join('\n');
 
 const TRENDING = new Set(['trending', 'top', 'top songs', 'top 10', 'popular', 'hot', 'whats hot', 'what s hot', 'trending songs', 'charts']);
@@ -98,17 +107,10 @@ function merge(first: Track[], second: Track[], limit: number): Track[] {
   return out;
 }
 
-/** True when the query is exactly the title, "artist title" or "title artist". */
-function isExact(track: Track, tokens: string[]): boolean {
-  const query = tokens.join(' ');
-  const title = tokenize(track.title).join(' ');
-  const artist = tokenize(track.artist).join(' ');
-  return query === title || query === `${artist} ${title}`.trim() || query === `${title} ${artist}`.trim();
-}
-
 /**
- * A list as messages: a heading, one message per entry (so a 👍 on it gets that entry), and a last line on how to pick
- * that also makes every number shown so far pickable.
+ * A list as messages: a heading, one message per entry, without numbers (a 👍 on it gets that entry), and a last line
+ * on how to pick. Its chips are the list itself: every song shown so far, for "all", and numbered for the chats where
+ * a 👍 can't reach the bot (see joinLists).
  */
 function listReplies(heading: string, entries: Array<{ line: string; postback: string }>, closing: string, chips: Chip[], validMs: number): Reply[] {
   return [
@@ -121,10 +123,24 @@ function listReplies(heading: string, entries: Array<{ line: string; postback: s
 type TextReply = Extract<Reply, { kind: 'text' }>;
 
 /**
- * For chats where a 👍 can't be seen (Beeper, RCS for Business, a terminal): a list's lines folded back into one
- * message, under its heading and above how to pick, without the word about 👍. Everything else is left as it is.
+ * For chats where a 👍 can't reach the bot (Beeper, RCS for Business, a terminal), where a number picks instead: each
+ * song in a list (and each cover in a collage) gets its number from the list's chips, a list's lines are folded back
+ * into one message under its heading, and how to pick says to reply with a number. Everything else is left as it is.
  */
-export function joinLists(replies: Reply[]): Reply[] {
+export function joinLists(answer: Reply[]): Reply[] {
+  const numbers = new Map<string, number>();
+  for (const reply of answer) {
+    if (reply.kind === 'text' && reply.chips) reply.chips.forEach((chip, i) => numbers.set(chip.postback, i + 1));
+  }
+  const replies = answer.map((reply): Reply => {
+    if (reply.kind === 'collage') {
+      return { ...reply, images: reply.images.map((image) => (numbers.has(image.postback) ? { ...image, number: numbers.get(image.postback)! } : image)) };
+    }
+    if (reply.kind !== 'text') return reply;
+    if (reply.chips) return { ...reply, text: reply.text.replace(/^Tap 👍 on (?:one|a song|it) to\b/m, 'Reply with a number to') };
+    const n = reply.postback === undefined ? undefined : numbers.get(reply.postback);
+    return n === undefined ? reply : { ...reply, text: `${n}. ${reply.text}` };
+  });
   const out: Reply[] = [];
   const isLine = (reply: Reply | undefined): reply is TextReply => reply?.kind === 'text' && Boolean(reply.postback) && !reply.chips;
   for (let i = 0; i < replies.length; i += 1) {
@@ -139,7 +155,7 @@ export function joinLists(replies: Reply[]): Reply[] {
         const heading = before?.kind === 'text' && !before.postback && !before.chips ? (out.pop() as TextReply).text : undefined;
         out.push({
           kind: 'text',
-          text: [...(heading !== undefined ? [heading] : []), ...lines, '', closing.text.replace(/ or 👍 (?:one|a song)/, '')].join('\n'),
+          text: [...(heading !== undefined ? [heading] : []), ...lines, '', closing.text].join('\n'),
           chips: closing.chips,
           ...(closing.chipsValidMs !== undefined ? { chipsValidMs: closing.chipsValidMs } : {}),
         });
@@ -164,7 +180,7 @@ function shortDate(iso: string | undefined, now: Date): string {
 export function createBot(deps: BotDeps): Bot {
   const now = deps.now ?? (() => new Date());
 
-  /** One page of a list: the heading, ten numbered songs, and how to go on. Numbers run on across pages. */
+  /** One page of a list: the heading, ten songs, and how to go on. Where numbers pick, they run on across pages. */
   async function showList(page: ListPage, heading: string, empty: string): Promise<Reply[]> {
     const browse = deps.browse!;
     const fetch = async (limit: number, offset: number): Promise<ListedTrack[]> =>
@@ -191,7 +207,7 @@ export function createBot(deps: BotDeps): Bot {
     const next: ListPage = { ...page, shown: page.shown + songs.length, title: heading };
     browse.setPage(more ? next : undefined);
     const today = now();
-    const line = (track: ListedTrack, n: number): string => {
+    const line = (track: ListedTrack): string => {
       const when = shortDate(track.releasedAt, today);
       let name: string;
       if (track.album) {
@@ -201,15 +217,15 @@ export function createBot(deps: BotDeps): Bot {
       } else {
         name = page.kind === 'artist' ? track.title : describe(track);
       }
-      return `${n}. ${name}${when ? ` · ${when}` : ''}`;
+      return `${name}${when ? ` · ${when}` : ''}`;
     };
     const shownSoFar = [...(page.shown > 0 ? await fetch(page.shown, 0) : []), ...songs];
     // Picking an album lists its songs; picking a song sends it.
     const pick = (track: ListedTrack): string => (track.album && track.post ? `post:${track.post}` : `play:${track.id}`);
     return listReplies(
       page.shown === 0 ? heading : `${heading} (continued)`,
-      songs.map((track, i) => ({ line: line(track, page.shown + i + 1), postback: pick(track) })),
-      `Reply with a number or 👍 one to get it${more ? ', or "more" for the next ones' : ''}.`,
+      songs.map((track) => ({ line: line(track), postback: pick(track) })),
+      `Tap 👍 on one to get it${more ? ', or text "more" for the next ones' : ''}.`,
       shownSoFar.map((track, i) => ({ label: chipLabel(i + 1, track.album ? splitTitle(track.album.title).title || track.title : track.title), postback: pick(track) })),
       LIST_VALID_MS,
     );
@@ -277,7 +293,7 @@ export function createBot(deps: BotDeps): Bot {
     }
     if (MORE.has(phrase)) {
       const page = browse.page();
-      if (!page) return [say('Text me "trending", "new" or an artist first; then "more" shows the next ones.')];
+      if (!page) return [say('Text "trending", "new" or "search" and an artist first; then "more" shows the next ones.')];
       return showList(page, page.title ?? 'More', "That's all of them.");
     }
     return undefined;
@@ -346,6 +362,50 @@ export function createBot(deps: BotDeps): Bot {
     return replies;
   }
 
+  /** "search …": the song the words name (sent at once), an artist's songs, or the songs that fit to choose from. */
+  async function search(raw: string): Promise<Reply[]> {
+    const tokens = parseQuery(raw);
+    if (tokens.every((token) => token.length < 2)) {
+      return [say(`Text "search" and ${deps.browse ? 'a song or an artist, like "search lipa vnusni"' : 'a song name, like "search blue horizon night owls"'}.`)];
+    }
+    const local = deps.catalog.search(raw, MAX_CHOICES);
+    // Naming exactly one song the catalog has is answered at once, without asking anyone else.
+    const named = local.filter((track) => namesSong(track, tokens));
+    if (named.length === 1) return play(named[0]!);
+
+    // Just an artist's name: their songs, newest first.
+    const byArtist = artistList(tokens);
+    if (byArtist) return byArtist;
+
+    // Otherwise the catalog may hold only some of what fits (the songs synced or asked for before), so the other
+    // source is asked too and its results come first.
+    let found = local;
+    if (deps.source) {
+      try {
+        found = merge(await deps.source.lookup(raw, MAX_CHOICES), local, MAX_CHOICES);
+      } catch (err) {
+        if (!(err instanceof SourceError)) throw err;
+        if (local.length === 0) return [say(`I couldn't search ${deps.source.name}: ${err.message}.`)];
+      }
+    }
+    if (found.length === 0) {
+      const also = deps.source ? ` (I looked on ${deps.source.name} too)` : '';
+      return [say(`No match for "${raw}"${also}. Try the artist and title, or fewer words.`)];
+    }
+    if (found.length === 1) return play(found[0]!);
+
+    const exact = found.filter((track) => namesSong(track, tokens));
+    if (exact.length === 1) return play(exact[0]!);
+
+    return listReplies(
+      'Which one?',
+      found.map((track) => ({ line: describe(track), postback: `play:${track.id}` })),
+      'Tap 👍 on one to choose.',
+      found.map((track, i) => ({ label: chipLabel(i + 1, track.title), postback: `play:${track.id}` })),
+      CHOICE_VALID_MS,
+    );
+  }
+
   return {
     async handle(msg) {
       if (msg.postback !== undefined) {
@@ -360,8 +420,8 @@ export function createBot(deps: BotDeps): Bot {
           const heading = shown[0]!.artist ? `${shown[0]!.artist} · ${tracks.length} songs` : `${tracks.length} songs`;
           return listReplies(
             heading,
-            shown.map((track, i) => ({ line: `${i + 1}. ${track.title}`, postback: `play:${track.id}` })),
-            'Reply with a number or 👍 one to get it.',
+            shown.map((track) => ({ line: track.title, postback: `play:${track.id}` })),
+            'Tap 👍 on one to get it.',
             shown.map((track, i) => ({ label: chipLabel(i + 1, track.title), postback: `play:${track.id}` })),
             LIST_VALID_MS,
           );
@@ -373,56 +433,23 @@ export function createBot(deps: BotDeps): Bot {
       }
 
       const raw = (msg.text ?? '').trim().slice(0, MAX_QUERY_CHARS);
-      const tokens = parseQuery(raw);
-      // Nothing to search for: no words, a greeting, or only single characters (a stray "a", or a "2" with no list to pick from).
-      if (tokens.every((token) => token.length < 2) || (tokens.length === 1 && GREETINGS.has(tokens[0]!))) {
+      const words = tokenize(raw);
+      // Nothing to answer: no words, a greeting or "help", or only single characters (a stray "a", or a "2" with no list to pick from).
+      if (words.every((word) => word.length < 2) || GREETINGS.has(words[0]!)) {
         return [say(deps.browse ? BROWSE_HELP_TEXT : HELP_TEXT)];
       }
+      const first = FIRST_WORD.exec(raw);
+      if (first && isSearch(first[1]!)) return search(raw.slice(first[0].length).trim());
       // "all" with no list open (the runner answers it when one is).
-      if (ALL_WORDS.has(tokens.join(' '))) {
-        return [say(`Text me ${deps.browse ? '"trending", "new", an artist or ' : ''}a song first; then "all" sends every song on the list.`)];
+      if (ALL_WORDS.has(words.join(' '))) {
+        return [say(`Text ${deps.browse ? '"trending", "new" or ' : ''}"search" and a song first; then "all" sends every song on the list.`)];
       }
-      const following = followFor(tokens);
+      const following = followFor(words);
       if (following) return following;
-      const listed = await browseFor(tokens);
+      const listed = await browseFor(words);
       if (listed) return listed;
-
-      const local = deps.catalog.search(raw, MAX_CHOICES);
-      // Naming exactly one song the catalog has is answered at once, without asking anyone else.
-      const exactLocal = local.filter((track) => isExact(track, tokens));
-      if (exactLocal.length === 1) return play(exactLocal[0]!);
-
-      // Just an artist's name: their songs, newest first.
-      const byArtist = artistList(tokens);
-      if (byArtist) return byArtist;
-
-      // Otherwise the catalog may hold only some of what fits (the songs synced or asked for before), so the other
-      // source is asked too and its results come first.
-      let found = local;
-      if (deps.source) {
-        try {
-          found = merge(await deps.source.lookup(raw, MAX_CHOICES), local, MAX_CHOICES);
-        } catch (err) {
-          if (!(err instanceof SourceError)) throw err;
-          if (local.length === 0) return [say(`I couldn't search ${deps.source.name}: ${err.message}.`)];
-        }
-      }
-      if (found.length === 0) {
-        const also = deps.source ? ` (I looked on ${deps.source.name} too)` : '';
-        return [say(`No match for "${raw}"${also}. Try the artist and title, or fewer words.`)];
-      }
-      if (found.length === 1) return play(found[0]!);
-
-      const exact = found.filter((track) => isExact(track, tokens));
-      if (exact.length === 1) return play(exact[0]!);
-
-      return listReplies(
-        'Which one?',
-        found.map((track, i) => ({ line: `${i + 1}. ${describe(track)}`, postback: `play:${track.id}` })),
-        'Reply with a number or 👍 one to choose.',
-        found.map((track, i) => ({ label: chipLabel(i + 1, track.title), postback: `play:${track.id}` })),
-        CHOICE_VALID_MS,
-      );
+      // Not a command: most likely a song's name without "search" in front.
+      return [say(`To look for a song, start with "search":\nsearch ${raw}\n\nText "help" for the other commands.`)];
     },
   };
 }

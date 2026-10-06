@@ -12,7 +12,7 @@ The [Mac setup with the bridge](setup-mac.md) is the recommended route. Two othe
 4. `cp .env.example .env` and set `BEEPER_ACCESS_TOKEN`.
 5. `npm run beeper-chats -- google`, then put the ID of your "message yourself" chat in `.env` as `BEEPER_CHAT_ID`.
 6. Check the path: `npm run beeper-send -- "hello"`, then `npm run beeper-send -- --audio https://host/file.mp3`.
-7. `npm run beeper`, and text a song name in that chat.
+7. `npm run beeper`, and text `search` and a song name in that chat.
 
 Beeper asks for personal use and warns that sending too many messages can get an account suspended. It treats message text as Markdown, so a title with characters like `*` or `_` may be formatted instead of shown literally. Reactions (👍) aren't read on this route.
 

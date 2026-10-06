@@ -115,8 +115,9 @@
   .picture { display: block; width: 260px; max-width: 100%; height: auto; min-height: 60px; border-radius: 18px; background: var(--received); }
   .me .picture, .phone.self .bot .picture { border-top-right-radius: 6px; }
   .bot .picture { border-top-left-radius: 6px; }
-  .choice { display: block; width: 100%; text-align: left; margin: 2px 0; padding: 6px 10px; border: 0; border-radius: 12px; background: rgba(127, 127, 127, .16); cursor: pointer; }
-  .choice:hover { background: rgba(127, 127, 127, .28); }
+  .like { border: 0; background: none; padding: 0 2px; font-size: 13px; line-height: 1; cursor: pointer; opacity: .45; filter: grayscale(1); }
+  .like:hover, .like:focus-visible { opacity: 1; filter: none; }
+  .reaction { margin: -6px 10px 0; padding: 1px 6px; border-radius: 999px; font-size: 13px; background: var(--surface-2); border: 1px solid var(--line); position: relative; }
 
   .audio { display: flex; align-items: center; gap: 12px; min-width: 200px; white-space: normal; }
   .play { flex: none; width: 42px; height: 42px; border: 0; border-radius: 50%; background: var(--surface); color: var(--accent); display: grid; place-items: center; cursor: pointer; }
@@ -201,7 +202,7 @@
     </header>
     <div class="messages" id="messages" role="log" aria-live="polite">
       <div class="empty" id="empty">
-        <strong>Text it a song name</strong>
+        <strong>Text it "search" and a song name</strong>
         This is the real bot, searching the real site. Try one of these, or type your own:
         <div class="tries" id="tries"></div>
       </div>
@@ -238,7 +239,7 @@
   const seconds = (ms) => (ms / 1000).toFixed(2) + ' s';
   const clock = (at) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const megabytes = (bytes) => (bytes > 0 ? (bytes / 1048576).toFixed(1) + ' MB' : 'size unknown');
-  const TRIES = ['yoely weiss shabbos', 'benny friedman', 'play chuppah medley', 'yoely wiess shabbos'];
+  const TRIES = ['search yoely weiss shabbos', 'search benny friedman', 'search chuppah medley', 'search yoely wiess shabbos'];
 
   const messages = $('messages');
   const phone = $('phone');
@@ -258,32 +259,10 @@
     $('empty').style.display = '';
   }
 
-  function renderText(bubble, text, from) {
-    const lines = text.split('\n');
-    // One numbered song of the daily message: tapping it answers with its number.
-    const single = from === 'bot' && lines.length === 1 ? /^🎵 (\d{1,2})\. /.exec(text) : null;
-    if (single) {
-      const button = make('button', 'choice', text);
-      button.type = 'button';
-      button.title = 'Reply with ' + single[1];
-      button.addEventListener('click', () => post(single[1]));
-      bubble.append(button);
-      return;
-    }
-    const numbered = from === 'bot' && lines.filter((l) => /^\d{1,2}\. /.test(l)).length >= 2;
-    if (!numbered) { bubble.textContent = text; return; }
-    const plain = [];
-    for (const line of lines) {
-      const m = /^(\d{1,2})\. /.exec(line);
-      if (!m) { plain.push(line); continue; }
-      if (plain.length) { bubble.append(document.createTextNode(plain.join('\n') + '\n')); plain.length = 0; }
-      const button = make('button', 'choice', line);
-      button.type = 'button';
-      button.title = 'Reply with ' + m[1];
-      button.addEventListener('click', () => post(m[1]));
-      bubble.append(button);
-    }
-    if (plain.length) bubble.append(document.createTextNode(plain.join('\n')));
+  // A 👍 under a message, as on the phone: on a song's message (a list entry, a card) it gets that song.
+  function showReaction(row, key) {
+    if (row.querySelector('.reaction')) return;
+    row.insertBefore(make('div', 'reaction', key), row.querySelector('.time'));
   }
 
   function audioBubble(bubble, message) {
@@ -348,19 +327,30 @@
     const cont = last === message.from;
     last = message.from;
     const row = make('div', 'msg ' + message.from + (cont ? ' cont' : ''));
+    if (message.id !== undefined) row.dataset.id = String(message.id);
+    const time = make('div', 'time', clock(message.at));
+    if (message.from === 'bot' && message.id !== undefined && !message.audio) {
+      const like = make('button', 'like', '👍');
+      like.type = 'button';
+      like.title = 'React with 👍: on a song, that gets it';
+      like.setAttribute('aria-label', 'React with a thumbs up');
+      like.addEventListener('click', () => react(message.id));
+      time.append(' ', like);
+    }
     if (message.image) {
       const picture = make('img', 'picture');
       picture.alt = 'Album art';
       picture.loading = 'lazy';
       picture.referrerPolicy = 'no-referrer';
       picture.src = message.image.url;
-      row.append(picture, make('div', 'time', clock(message.at)));
+      row.append(picture, time);
     } else {
       const bubble = make('div', 'bubble');
       if (message.audio) audioBubble(bubble, message);
-      else renderText(bubble, message.text || '', message.from);
-      row.append(bubble, make('div', 'time', clock(message.at)));
+      else bubble.textContent = message.text || '';
+      row.append(bubble, time);
     }
+    (message.reactions || []).forEach((key) => showReaction(row, key));
     messages.append(row);
     if (typingNode) messages.append(typingNode);
     scrollDown();
@@ -388,7 +378,7 @@
     if (!card) {
       const root = make('article', 'run live');
       const head = make('header');
-      const ask = make('div', 'ask', run.choice ? 'Picked option ' + run.text : '“' + run.text + '”');
+      const ask = make('div', 'ask', run.choice ? (run.text.startsWith('👍') ? run.text : 'Picked option ' + run.text) : '“' + run.text + '”');
       const took = make('div', 'took', 'working…');
       head.append(ask, took);
       const list = make('ol', 'items');
@@ -429,6 +419,15 @@
     }
   }
 
+  async function react(id) {
+    try {
+      const res = await fetch('/api/react', { method: 'POST', headers: { 'content-type': 'application/json', 'x-simulator': '1' }, body: JSON.stringify({ id }) });
+      if (!res.ok) throw new Error((await res.json()).error || 'could not react');
+    } catch (err) {
+      addMessage({ from: 'bot', at: Date.now(), text: 'Could not react: ' + (err.message || err) });
+    }
+  }
+
   const setup = { musicTable: true, full: false };
   function showStatus(catalogTracks) {
     $('state').textContent = [
@@ -458,6 +457,11 @@
     source.addEventListener('snapshot', (e) => applyState(JSON.parse(e.data)));
     source.addEventListener('reset', (e) => applyState(JSON.parse(e.data)));
     source.addEventListener('message', (e) => addMessage(JSON.parse(e.data)));
+    source.addEventListener('reaction', (e) => {
+      const { id, key } = JSON.parse(e.data);
+      const row = messages.querySelector('.msg[data-id="' + id + '"]');
+      if (row) showReaction(row, key);
+    });
     source.addEventListener('typing', (e) => setTyping(JSON.parse(e.data)));
     source.addEventListener('trace-begin', (e) => runCard(JSON.parse(e.data)));
     source.addEventListener('trace-item', (e) => { const d = JSON.parse(e.data); addItem({ id: d.runId }, d.item); });

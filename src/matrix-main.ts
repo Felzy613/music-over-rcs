@@ -74,6 +74,7 @@ try {
     choices: choicesIn(catalog),
     links: linksIn(catalog),
     pollMs: config.pollMs,
+    songGapMs: config.songGapMs,
     log,
     // Half a minute without the homeserver is worth a word; it comes back on its own when it's restarted.
     onPoll: (ok, failures, error) => {
@@ -89,7 +90,7 @@ try {
   watching.unref();
   void bridge.check();
   log(
-    `signed in as ${userId}, watching room ${config.roomID}, ${catalog.count()} tracks in ${config.dbPath}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}. Text a song name in that chat.`,
+    `signed in as ${userId}, watching room ${config.roomID}, ${catalog.count()} tracks in ${config.dbPath}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}. Text "search" and a song name in that chat.`,
   );
 
   const shutdown = async () => {

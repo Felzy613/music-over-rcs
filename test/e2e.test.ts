@@ -109,7 +109,7 @@ describe('Google webhook to bot to RBM API', () => {
   });
 
   test('a text request becomes read receipt, typing, caption and audio file', async () => {
-    const res = await deliver(userText('paper planes', 'm1'));
+    const res = await deliver(userText('search paper planes', 'm1'));
     assert.equal(res.status, 200);
 
     assert.deepEqual(sentEvents(), [{ eventType: 'READ', messageId: 'm1' }, { eventType: 'IS_TYPING' }]);
@@ -121,7 +121,7 @@ describe('Google webhook to bot to RBM API', () => {
   });
 
   test('an ambiguous request offers chips, and tapping one sends the track', async () => {
-    await deliver(userText('night owls', 'm2'));
+    await deliver(userText('search night owls', 'm2'));
     const [question] = sentMessages();
     assert.match(question.text, /^Which one\?/);
     assert.equal(question.suggestions.length, 2);
@@ -141,7 +141,7 @@ describe('Google webhook to bot to RBM API', () => {
   });
 
   test('a link that is not audio is explained, not sent', async () => {
-    await deliver(userText('broken link', 'm4'));
+    await deliver(userText('search broken link', 'm4'));
     const messages = sentMessages();
     assert.equal(messages.length, 1);
     assert.match(messages[0].text, /I can't send "Nobody — Broken Link": it isn't an audio file/);
@@ -154,30 +154,30 @@ describe('Google webhook to bot to RBM API', () => {
 
   test('when Google rejects the file, the user is told', async () => {
     rbm.failNext((r) => r.path.endsWith('/agentMessages') && r.body?.contentMessage?.contentInfo !== undefined, 400);
-    await deliver(userText('paper planes', 'm6'));
+    await deliver(userText('search paper planes', 'm6'));
     const messages = sentMessages();
     assert.equal(messages.length, 3, 'caption, the rejected audio attempt, then the notice');
     assert.match(messages[2].text, /couldn't send it/);
   });
 
   test('senders outside the allow-list are ignored', async () => {
-    await deliver(userText('paper planes', 'm7', '+15559999999'));
+    await deliver(userText('search paper planes', 'm7', '+15559999999'));
     assert.equal(rbm.requests.length, 0);
   });
 
   test('events for other agents are ignored', async () => {
-    await deliver(userText('paper planes', 'm8', ME, 'someone_else@rbm.goog'));
+    await deliver(userText('search paper planes', 'm8', ME, 'someone_else@rbm.goog'));
     assert.equal(rbm.requests.length, 0);
   });
 
   test('a call signed with the wrong token is rejected', async () => {
-    const res = await deliver(userText('paper planes', 'm9'), { token: 'wrong' });
+    const res = await deliver(userText('search paper planes', 'm9'), { token: 'wrong' });
     assert.equal(res.status, 401);
     assert.equal(rbm.requests.length, 0);
   });
 
   test('duplicate deliveries are processed once', async () => {
-    const event = userText('paper planes', 'm10');
+    const event = userText('search paper planes', 'm10');
     await deliver(event);
     await deliver(event);
     assert.equal(sentMessages().length, 2, 'one caption and one audio, not four');

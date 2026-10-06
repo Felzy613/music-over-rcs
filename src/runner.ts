@@ -19,7 +19,9 @@ const REPEAT_WINDOW_MS = 20_000;
 /** Songs downloading at once, ahead of their turn to be sent. */
 const DOWNLOADS_AHEAD = 3;
 const CHOICE_HINT = 'Reply with a number to choose.';
-/** How long a list of options stays pickable by number. The list is still on screen, so a number is still an answer to it. */
+/** What a number gets where a 👍 picks: lists there have no numbers. */
+const LIKE_HINT = 'To get a song from the list, tap 👍 on it.';
+/** How long a list of options stays pickable. The list is still on screen, so a 👍 or a number is still an answer to it. */
 const CHOICE_TTL_MS = 30 * 60_000;
 const ERROR_NOTICE = 'Something went wrong on my side. Please try again in a moment.';
 
@@ -51,8 +53,8 @@ export interface ChatClient {
   /** Sends a picture (album art). Platforms that can't leave it out, and pictures are skipped. */
   sendImage?(chatID: string, image: DownloadedImage): Promise<string | void>;
   /**
-   * True when a 👍 tapped on a message reaches the bot. Then lists go one entry per message, so each can be liked;
-   * otherwise each list is one message.
+   * True when a 👍 tapped on a message reaches the bot. Then lists go one entry per message, without numbers, and a
+   * 👍 picks; otherwise each list is one numbered message, and a number picks.
    */
   readonly reactions?: boolean;
   /** Shows or clears "typing…" in the chat. Platforms that can't do this leave it out. */
@@ -97,6 +99,13 @@ export interface RunnerOptions {
   links?: MessageLinks;
   /** Circuit breaker: stop sending once this many messages went out in the last minute. */
   maxSendsPerMinute?: number;
+  /**
+   * The least time between two songs, so the phone has sent one before the next arrives (three 👍 in a row, "all").
+   * A song's card waits with it. 0, the default, sends them as fast as they're ready.
+   */
+  songGapMs?: number;
+  /** Waits; tests pass one that doesn't. */
+  sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   log?: (line: string) => void;
   /** Told after each poll whether the chat answered, and how many times in a row it hasn't. */
@@ -126,6 +135,7 @@ export function createRunner(options: RunnerOptions): Runner {
   const pollMs = options.pollMs ?? 1500;
   const typingRefreshMs = options.typingRefreshMs ?? 20_000;
   const maxSends = options.maxSendsPerMinute ?? 30;
+  const songGapMs = options.songGapMs ?? 0;
 
   const seen = new Set<string>();
   const sendTimes: number[] = [];
@@ -180,6 +190,32 @@ export function createRunner(options: RunnerOptions): Runner {
   let stopped = true;
   let current: Promise<void> | undefined;
   let failures = 0;
+  /** When the last song went out, so the next one waits its turn. */
+  let lastSongAt: number | undefined;
+  /** Ends a wait for a song's turn early, when the runner is stopping. */
+  let wake: (() => void) | undefined;
+
+  function pause(ms: number): Promise<void> {
+    if (options.sleep) return options.sleep(ms);
+    return new Promise((resolve) => {
+      const done = (): void => {
+        clearTimeout(waiting);
+        wake = undefined;
+        resolve();
+      };
+      const waiting = setTimeout(done, ms);
+      wake = done;
+    });
+  }
+
+  /** Waits until the last song has had songGapMs to go out from the phone. */
+  async function songTurn(): Promise<void> {
+    if (lastSongAt === undefined) return;
+    const wait = lastSongAt + songGapMs - now();
+    if (wait <= 0) return;
+    log(`next song in ${Math.ceil(wait / 1000)} s`);
+    await pause(wait);
+  }
 
   function remember(id: string): void {
     seen.add(id);
@@ -222,12 +258,20 @@ export function createRunner(options: RunnerOptions): Runner {
       }
     };
     startDownloads();
-    for (const reply of replies) {
+    // The messages from the start (or from the song before) up to a song go together: the card waits with its song.
+    const lastSong = replies.findLastIndex((reply) => reply.kind === 'audio');
+    let songNext = true;
+    for (const [i, reply] of replies.entries()) {
+      if (songNext && i <= lastSong) {
+        songNext = false;
+        await songTurn();
+      }
       if (!allowSend()) {
         log(`send limit reached (${maxSends} a minute); dropping the rest of this answer`);
         return;
       }
       if (reply.kind === 'audio') {
+        songNext = true;
         let file: DownloadedAudio | undefined;
         try {
           file = await files.get(reply)!;
@@ -243,6 +287,7 @@ export function createRunner(options: RunnerOptions): Runner {
         if (!file) continue; // one song that can't be sent doesn't stop the others
         try {
           await chat.sendAudio(chatID, file);
+          lastSongAt = now();
           log(`-> audio ${reply.title ?? reply.url}`);
         } catch (err) {
           log(`could not send audio: ${errorText(err)}`);
@@ -269,7 +314,7 @@ export function createRunner(options: RunnerOptions): Runner {
       } else {
         if (reply.chips) setChoices({ chips: reply.chips, at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
         // Options need a word on how to pick one, unless the text already gives it.
-        const hint = reply.chips && !/\breply with a number\b/i.test(reply.text);
+        const hint = !chat.reactions && reply.chips && !/\breply with a number\b/i.test(reply.text);
         rememberLink(await chat.sendText(chatID, markBotText(hint ? `${reply.text}\n\n${CHOICE_HINT}` : reply.text)), reply.postback);
       }
     }
@@ -310,7 +355,8 @@ export function createRunner(options: RunnerOptions): Runner {
     const offered = currentChoices();
     const listed = offered && now() - offered.at < offered.validMs ? offered.chips : [];
     const isNumber = /^\d{1,2}$/.test(text);
-    const choice = isNumber ? listed[Number(text) - 1] : undefined;
+    // Where a 👍 picks, lists have no numbers, so a number picks nothing; it gets how to pick instead.
+    const choice = isNumber && !chat.reactions ? listed[Number(text) - 1] : undefined;
     // "all": every song on the list. Like a number, it keeps the list.
     const all = listed.length > 0 && ALL_WORDS.has(normalize(text).replace(/[^\p{L}\p{N} ]/gu, '')) ? listed : undefined;
     // A number meant for the list stays within it; anything else moves on from it.
@@ -328,7 +374,7 @@ export function createRunner(options: RunnerOptions): Runner {
           : { ...base, text };
       let replies: Reply[];
       if (outOfRange) {
-        replies = [{ kind: 'text', text: `Pick a number from 1 to ${listed.length}, or text me another song name.` }];
+        replies = [{ kind: 'text', text: chat.reactions ? LIKE_HINT : `Pick a number from 1 to ${listed.length}, or "search" for another song.` }];
       } else {
         try {
           replies = await bot.handle(incoming);
@@ -438,6 +484,7 @@ export function createRunner(options: RunnerOptions): Runner {
     async stop() {
       stopped = true;
       clearTimeout(timer);
+      wake?.(); // a song waiting its turn goes now
       await current;
     },
   };

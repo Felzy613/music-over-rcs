@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { checkAudio, megabytes } from '../audio-check.ts';
 import { AudioFetchError, fetchAudio, sanitizeFileName, type DownloadedAudio } from '../audio-fetch.ts';
-import { createBot } from '../bot.ts';
+import { createBot, describe } from '../bot.ts';
 import type { Catalog } from '../catalog.ts';
 import { createPictures, type Picture, type PreparedPicture } from '../library/images.ts';
 import { catalogBrowse } from '../library/browse.ts';
@@ -186,12 +186,22 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     return { data: new Blob([]), fileName: name, mimeType: info.type, bytes: info.bytes };
   }
 
+  /** What a 👍 picked, in words: the song, or the album. */
+  function picked(postback: string): string {
+    const id = /^play:(\d+)$/.exec(postback)?.[1];
+    const track = id === undefined ? undefined : catalog.get(Number(id));
+    if (track) return describe(track);
+    const slug = /^post:(.+)$/.exec(postback)?.[1];
+    return (slug === undefined ? undefined : catalog.sitePost(slug)?.title) ?? postback;
+  }
+
   /** The runner reports what it does in plain lines; they open and annotate each request in the trace. */
   function onRunnerLog(line: string): void {
-    const request = /^<- (?:choice (\d+)|("(?:[^"\\]|\\.)*"))$/.exec(line);
+    const request = /^<- (?:choice (\d+)|👍 (\S+)|("(?:[^"\\]|\\.)*"))$/u.exec(line);
     if (request) {
       if (request[1]) trace.begin(request[1], true);
-      else trace.begin(JSON.parse(request[2]!) as string);
+      else if (request[2]) trace.begin(`👍 ${picked(request[2])}`, true);
+      else trace.begin(JSON.parse(request[3]!) as string);
       return;
     }
     if (line.startsWith('ignoring a repeat')) {
@@ -217,6 +227,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
         });
       }
     });
+    chat.events.on('reaction', (reaction: { id: number; key: string }) => send('reaction', reaction));
     chat.events.on('typing', (typing: boolean) => {
       send('typing', typing);
       if (!typing) trace.end();
@@ -299,6 +310,12 @@ export function createSimulator(options: SimulatorOptions): Simulator {
         const text = typeof (body.value as { text?: unknown }).text === 'string' ? (body.value as { text: string }).text.trim() : '';
         if (!text || text.length > MAX_TEXT_CHARS) return json(res, 400, { error: `type 1 to ${MAX_TEXT_CHARS} characters` });
         json(res, 202, { ok: true, id: chat.say(text).id });
+      } else if (req.method === 'POST' && path === '/api/react') {
+        const body = await readJson(req);
+        if (!body.ok) return json(res, body.status, { error: body.status === 403 ? 'forbidden' : 'bad request' });
+        const id = (body.value as { id?: unknown }).id;
+        if (typeof id !== 'number' || !chat.react(id)) return json(res, 404, { error: 'no such message' });
+        json(res, 202, { ok: true });
       } else if (req.method === 'POST' && path === '/api/digest') {
         const body = await readJson(req);
         if (!body.ok) return json(res, body.status, { error: 'forbidden' });

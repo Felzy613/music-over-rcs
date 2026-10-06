@@ -216,7 +216,7 @@ export class LibraryJobs {
   }
 
   /**
-   * New posts by artists you follow, sent on their own: the song's card and a line (a 👍 or its number gets it).
+   * New posts by artists you follow, sent on their own: the song's card and a line (a 👍 on either gets it).
    * Nothing in the quiet hours; those wait for the next round after them.
    */
   async alertFollowed(): Promise<number> {
@@ -237,13 +237,13 @@ export class LibraryJobs {
       if (song.cover ?? post.cover) {
         replies.push({ kind: 'image', url: (song.cover ?? post.cover)!, caption: { title: album ? post.title : song.title, artist: album ? '' : song.artist }, postback });
       }
-      replies.push({ kind: 'text', text: `🔔 ${posts.length > 1 ? `${n}. ` : ''}New from ${post.artists.join(' & ')}: ${what}`, postback });
+      replies.push({ kind: 'text', text: `🔔 New from ${post.artists.join(' & ')}: ${what}`, postback });
       chips.push({ label: `${n}. ${song.title}`.slice(0, 25), postback });
     });
     if (chips.length === 0) return 0;
     replies.push({
       kind: 'text',
-      text: chips.length === 1 ? 'Reply 1 or 👍 it to get it.' : 'Reply with a number or 👍 one to get it.',
+      text: chips.length === 1 ? 'Tap 👍 on it to get it.' : 'Tap 👍 on one to get it.',
       chips,
       chipsValidMs: 24 * HOUR_MS,
     });

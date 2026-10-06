@@ -77,6 +77,7 @@ describe('loadBeeperConfig', () => {
       prefetchMb: Number.POSITIVE_INFINITY,
       archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
+      songGapMs: 15_000,
     });
   });
 
@@ -131,6 +132,11 @@ describe('loadBeeperConfig', () => {
     assert.equal(parseArchiveDir('~/Music/Kept', '/Users/someone'), '/Users/someone/Music/Kept');
     assert.equal(parseArchiveDir('  '), undefined);
     assert.throws(() => loadBeeperConfig({ ...base, SONGS_ARCHIVE_DIR: 'Music/Kept' }), /SONGS_ARCHIVE_DIR must be a full path/);
+    assert.equal(loadBeeperConfig({ ...base, SONG_GAP_SECONDS: '20' }).songGapMs, 20_000);
+    assert.equal(loadBeeperConfig({ ...base, SONG_GAP_SECONDS: 'off' }).songGapMs, 0);
+    assert.equal(loadBeeperConfig({ ...base, SONG_GAP_SECONDS: '0' }).songGapMs, 0);
+    assert.throws(() => loadBeeperConfig({ ...base, SONG_GAP_SECONDS: 'soon' }), /SONG_GAP_SECONDS must be a number of seconds from 0 to 300/);
+    assert.throws(() => loadBeeperConfig({ ...base, SONG_GAP_SECONDS: '900' }), /SONG_GAP_SECONDS/);
   });
 
   test('the chat is optional for the script that lists chats', () => {
@@ -155,6 +161,7 @@ describe('loadMatrixConfig', () => {
       prefetchMb: Number.POSITIVE_INFINITY,
       archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
+      songGapMs: 15_000,
     });
   });
 

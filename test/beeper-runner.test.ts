@@ -61,7 +61,7 @@ describe('runner over Beeper', () => {
   }
 
   test('never replays history that was in the chat before it started', async () => {
-    beeper.addUserMessage('paper planes');
+    beeper.addUserMessage('search paper planes');
     const { runner } = makeRunner();
     await runner.prime();
     await runner.tick();
@@ -71,7 +71,7 @@ describe('runner over Beeper', () => {
   test('answers a request with a caption and the audio file as an attachment', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    beeper.addUserMessage('paper planes');
+    beeper.addUserMessage('search paper planes');
     await runner.tick();
 
     assert.equal(beeper.sent.length, 2);
@@ -88,7 +88,7 @@ describe('runner over Beeper', () => {
   test('does not answer its own messages, however many times it polls', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    beeper.addUserMessage('paper planes');
+    beeper.addUserMessage('search paper planes');
     await runner.tick();
     const sentAfterFirst = beeper.sent.length;
     for (let i = 0; i < 4; i++) await runner.tick();
@@ -98,7 +98,7 @@ describe('runner over Beeper', () => {
   test('offers a numbered choice and takes the number as the answer', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    beeper.addUserMessage('night owls');
+    beeper.addUserMessage('search night owls');
     await runner.tick();
 
     assert.equal(beeper.sent.length, 1);
@@ -133,7 +133,7 @@ describe('runner over Beeper', () => {
   test('explains a catalog link that is a web page, and sends nothing else', async () => {
     const { runner } = makeRunner();
     await runner.prime();
-    beeper.addUserMessage('broken link');
+    beeper.addUserMessage('search broken link');
     await runner.tick();
     assert.deepEqual(beeper.sent, [
       { text: `🎵 I can't send "Nobody — Broken Link": it isn't an audio file (the server says "text/html").` },
@@ -144,7 +144,7 @@ describe('runner over Beeper', () => {
   test('tells the user when the download fails after the link looked fine', async () => {
     const { runner, logs } = makeRunner();
     await runner.prime();
-    beeper.addUserMessage('flaky file');
+    beeper.addUserMessage('search flaky file');
     await runner.tick();
     assert.deepEqual(beeper.sent, [
       { text: '🎵 Nobody — Flaky File' },
@@ -159,18 +159,18 @@ describe('runner over Beeper', () => {
     const { runner, logs } = makeRunner({ maxSendsPerMinute: 2, now: () => clock });
     await runner.prime();
 
-    beeper.addUserMessage('paper planes');
+    beeper.addUserMessage('search paper planes');
     await runner.tick();
     assert.equal(beeper.sent.length, 2);
 
     // A different request: an identical one this soon would be taken for an echo of the first and ignored.
-    beeper.addUserMessage('paper planes at dawn');
+    beeper.addUserMessage('search paper planes at dawn');
     await runner.tick();
     assert.equal(beeper.sent.length, 2, 'the second answer is dropped');
     assert.ok(logs.some((line) => line.includes('send limit')));
 
     clock += 61_000;
-    beeper.addUserMessage('blue horizon live');
+    beeper.addUserMessage('search blue horizon live');
     await runner.tick();
     assert.equal(beeper.sent.length, 4);
   });
@@ -179,7 +179,7 @@ describe('runner over Beeper', () => {
     const { runner, logs } = makeRunner();
     await runner.prime();
     beeper.failListing = true;
-    beeper.addUserMessage('paper planes');
+    beeper.addUserMessage('search paper planes');
     await runner.tick();
     assert.ok(logs.some((line) => line.includes('poll failed')));
     assert.deepEqual(beeper.sent, []);
@@ -192,7 +192,7 @@ describe('runner over Beeper', () => {
   test('polls on its own after start() and stops cleanly', async () => {
     const { runner } = makeRunner();
     await runner.start();
-    beeper.addUserMessage('paper planes');
+    beeper.addUserMessage('search paper planes');
     await waitFor(() => beeper.sent.length >= 2);
 
     await runner.stop();

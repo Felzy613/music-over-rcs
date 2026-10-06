@@ -453,7 +453,7 @@ describe('looking things up on the site from the bot', () => {
       catalog,
       table,
       source,
-      ask: (text: string) => bot.handle({ from: 'u', messageId: 'm1', text }),
+      ask: (text: string) => bot.handle({ from: 'u', messageId: 'm1', text: `search ${text}` }),
       tap: (postback: string) => bot.handle({ from: 'u', messageId: 'm2', postback }),
     };
   }
@@ -519,12 +519,12 @@ describe('looking things up on the site from the bot', () => {
     assert.deepEqual(site.searches, ['yoely weiss shabbos']);
   });
 
-  test('several finds become numbered choices, and a tap plays the one chosen', async () => {
+  test('several finds become choices, and a tap (or 👍) plays the one chosen', async () => {
     const { ask, tap } = setup();
     const replies = await ask('weiss');
     assert.deepEqual(
       replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : [])),
-      ['1. Yoely Weiss — Shabbos', "2. Yoely Weiss — Purim '26 & More", '3. Mendy Weiss — One', '4. Mendy Weiss — Two'],
+      ['Yoely Weiss — Shabbos', "Yoely Weiss — Purim '26 & More", 'Mendy Weiss — One', 'Mendy Weiss — Two'],
     );
     const asked = textOf(replies.at(-1));
     assert.deepEqual(asked.chips?.map((chip) => chip.postback), ['play:1', 'play:2', 'play:3', 'play:4']);
@@ -855,7 +855,7 @@ describe('music-table.com over Matrix, end to end', () => {
   test('a song typed on the phone is found on the site and arrives as the site’s own MP3', async () => {
     const runner = makeRunner();
     await runner.prime();
-    matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'yoely weiss shabbos' });
+    matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'search yoely weiss shabbos' });
     await runner.tick();
 
     assert.equal(matrix.sent.length, 2);

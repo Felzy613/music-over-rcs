@@ -70,6 +70,7 @@ try {
     choices: choicesIn(catalog),
     links: linksIn(catalog),
     pollMs: config.pollMs,
+    songGapMs: config.songGapMs,
     log,
     onPoll: (ok, failures, error) => {
       if (ok) health.ok('beeper', 'Fixed: the bot can reach Beeper Desktop again.');
@@ -79,7 +80,7 @@ try {
   await runner.start();
   library.start((replies) => runner.announce(replies));
   log(
-    `watching chat ${config.chatID}, ${catalog.count()} tracks in ${config.dbPath}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}. Text a song name in that chat.`,
+    `watching chat ${config.chatID}, ${catalog.count()} tracks in ${config.dbPath}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}. Text "search" and a song name in that chat.`,
   );
 
   const shutdown = async () => {

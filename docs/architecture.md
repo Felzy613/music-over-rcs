@@ -8,7 +8,7 @@ TypeScript on Node 22.18+, run directly (no build step), with **no runtime depen
 phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse room ──> MatrixClient.listMessages()
                                                                                │
                                                                runner (one chat, polls every 1.5 s)
-                                                                               │  text, a number, or a 👍
+                                                                               │  a command, or a 👍
                                                                               bot
                                                     ┌──────────────────────────┼───────────────────────────┐
                                              catalog (SQLite)          music-table.com lookup           lists
@@ -21,15 +21,15 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
                                                      MatrixClient.sendImage / sendText / sendAudio ──> bridge ──> phone
 ```
 
-- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42`, `post:<slug>` or `all:…`) and returns replies: `text` (optionally with numbered options, or standing for one song), `image` (a cover, with the song's name to draw on it), `collage` (numbered covers), `audio`. A list is a heading, one text per entry, and a closing text with the options.
-- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵), handles numbers, `all` and 👍, shows "typing…", prepares pictures and files (songs download ahead, at most three at once) and sends replies in order. Where a 👍 can't reach the bot it folds a list back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
+- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42`, `post:<slug>` or `all:…`) and returns replies: `text` (optionally closing a list, with the list as its options, or standing for one song), `image` (a cover, with the song's name to draw on it), `collage` (covers, each standing for its song), `audio`. A list is a heading, one text per entry (no numbers), and a closing text with the options.
+- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵), handles 👍, `all` and (where a 👍 can't reach the bot) numbers, shows "typing…", prepares pictures and files (songs download ahead, at most three at once) and sends replies in order. Where a 👍 can't reach the bot it numbers a list and folds it back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
 - **Transports** implement `ChatClient` (`listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `setTyping`): `src/matrix/` (the bridge route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`) is a webhook server that uses the bot directly.
 
 ## Code layout
 
 ```text
 src/bot.ts              what to answer: songs, lists, choices, albums, follow / unfollow
-src/runner.ts           watches one chat and answers it; numbers, 👍, typing, announcements, safety limits
+src/runner.ts           watches one chat and answers it; 👍, numbers where 👍 can't reach, songs spaced out, typing, announcements, safety limits
 src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, follows, state
 src/health.ts           Mac notifications when something breaks; the bridge's login status
 src/artists.ts          splits "A, B & C Ft. D" into artists
@@ -38,7 +38,7 @@ src/audio-check.ts      checks a link: reachable, audio, within the size limit
 src/audio-fetch.ts      downloads a direct audio link into memory
 src/image-fetch.ts      downloads album art (with a small memory)
 src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies
-src/library/images.ts   a song's card (cover + name) and the daily collage (numbered covers)
+src/library/images.ts   a song's card (cover + name) and the daily collage (the new covers in a grid)
 src/sources/            music-table.com: the client, the lookup, relevance and spelling
 src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs, and:
   categories.ts         holiday and other category lists (learning the site's category ids)
@@ -66,14 +66,14 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 
 | Table | Holds |
 | --- | --- |
-| `tracks` (+ `tracks_fts`) | Songs: title, artist credit, URL (unique), album art, source post, release date. Full-text search over title and artist. |
+| `tracks` (+ `tracks_fts`) | Songs: title, artist credit, URL (unique), album art, source post, release date. Full-text search over title and artist; when that finds nothing, a looser pass over every song (apostrophes, typos: `rankSongs` in `src/sources/relevance.ts`). |
 | `artists`, `artist_tracks` | Artists split out of credits, and which songs each is on |
 | `site_posts` | music-table.com posts: title, category, the site's category ids, publish date, views, picture, number of MP3s, when first seen, when in a daily message, when in an alert |
 | `plays` | Every song sent, with its time |
 | `follows` | Artists you follow (or unfollowed, so they're never followed for you again), whether by your choice or from your plays, and since when |
 | `audio_cache` | Songs kept on disk: the file (a name in the folder on the Mac, or its full path once moved to `SONGS_ARCHIVE_DIR`), type, size, last used |
 | `message_links` | Messages that stand for one song (for 👍), kept a month |
-| `state` | Small facts: last sync, scan progress, the daily message's date, the current list and its numbers |
+| `state` | Small facts: last sync, scan progress, the daily message's date, the current list |
 
 ## Background jobs
 

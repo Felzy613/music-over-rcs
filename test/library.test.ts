@@ -268,7 +268,7 @@ describe('library: the daily message', () => {
     ...(cover ? { cover } : {}),
   });
 
-  test('a heading, one picture of the covers (numbered), a line per song, then the video-only posts and how to pick', () => {
+  test('a heading, one picture of the covers, a line per song (no numbers), then the video-only posts and how to pick', () => {
     const replies = buildDigest(
       [
         { post: sitePost('ana-elech', 'Singles'), song: song(7, 'Ana Elech', 'Oizer Oberlander', 'https://img.test/1.jpg') },
@@ -279,14 +279,14 @@ describe('library: the daily message', () => {
     );
     assert.deepEqual(
       replies.map((reply) =>
-        reply.kind === 'text' ? reply.text : reply.kind === 'collage' ? `[collage] ${reply.images.map((tile) => `${tile.number} ${tile.label} ${tile.url}`).join(' | ')}` : `[${reply.kind}]`,
+        reply.kind === 'text' ? reply.text : reply.kind === 'collage' ? `[collage] ${reply.images.map((tile) => `${tile.label} ${tile.url} ${tile.number ?? '-'}`).join(' | ')}` : `[${reply.kind}]`,
       ),
       [
         'New music · Monday, Oct 5\n2 new songs on music-table.com',
-        '[collage] 1 Oizer Oberlander — Ana Elech https://img.test/1.jpg | 2 Hershey Eisenbach — Makdim Shalom https://img.test/3.jpg',
-        '1. Oizer Oberlander — Ana Elech · single',
-        '2. Hershey Eisenbach — Makdim Shalom · music video',
-        'Also new, video only:\n• Some Band - The Clip\n\nReply with a number or 👍 a song to get it, or text me any name.',
+        '[collage] Oizer Oberlander — Ana Elech https://img.test/1.jpg - | Hershey Eisenbach — Makdim Shalom https://img.test/3.jpg -',
+        'Oizer Oberlander — Ana Elech · single',
+        'Hershey Eisenbach — Makdim Shalom · music video',
+        'Also new, video only:\n• Some Band - The Clip\n\nTap 👍 on a song to get it, or "search" for anything else.',
       ],
     );
     // Each song's line stands for it, so a 👍 on it gets the song.
@@ -297,16 +297,25 @@ describe('library: the daily message', () => {
     const last = replies.at(-1)!;
     assert.ok(last.kind === 'text' && last.chips);
     assert.deepEqual(last.chips.map((chip) => chip.postback), ['play:7', 'play:9']);
-    assert.equal(last.chipsValidMs, 24 * 60 * 60_000, 'the numbers work all day');
+    assert.equal(last.chipsValidMs, 24 * 60 * 60_000, 'the songs can be picked all day');
   });
 
-  test('the picture holds up to the limit of covers; every song still gets its numbered line', () => {
+  test('the picture holds up to the limit of covers; every song still gets its line', () => {
     const items = [1, 2, 3].map((n) => ({ post: sitePost(`p${n}`, 'Singles', 1, `https://img.test/${n}.jpg`), song: song(n, `Song ${n}`, 'Band') }));
     const replies = buildDigest(items, { date: at(5, 9), maxPictures: 2 });
     const collage = replies.find((reply) => reply.kind === 'collage');
     assert.ok(collage && collage.kind === 'collage');
-    assert.deepEqual(collage.images.map((tile) => tile.number), [1, 2]);
-    assert.deepEqual(texts(replies).filter((line) => /^\d\. /.test(line)), ['1. Band — Song 1 · single', '2. Band — Song 2 · single', '3. Band — Song 3 · single']);
+    assert.deepEqual(collage.images.map((tile) => tile.postback), ['play:1', 'play:2']);
+    assert.deepEqual(texts(replies).filter((line) => line.startsWith('Band')), ['Band — Song 1 · single', 'Band — Song 2 · single', 'Band — Song 3 · single']);
+  });
+
+  test('where a 👍 can\'t reach the bot, the lines and the covers are numbered and a number picks', () => {
+    const items = [1, 2, 3].map((n) => ({ post: sitePost(`p${n}`, 'Singles', 1, n === 2 ? undefined : `https://img.test/${n}.jpg`), song: song(n, `Song ${n}`, 'Band') }));
+    const replies = joinLists(buildDigest(items, { date: at(5, 9) }));
+    const collage = replies.find((reply) => reply.kind === 'collage');
+    assert.ok(collage && collage.kind === 'collage');
+    assert.deepEqual(collage.images.map((tile) => tile.number), [1, 3], 'a song without a cover keeps its number free');
+    assert.deepEqual(texts(replies).slice(1), ['1. Band — Song 1 · single\n2. Band — Song 2 · single\n3. Band — Song 3 · single\n\nReply with a number to get it, or "search" for anything else.']);
   });
 
   test('a day with nothing new sends nothing', () => {
@@ -918,11 +927,17 @@ describe('library: artists, trending and new', () => {
       return first;
     };
 
-    test('"trending" and "new" list ten at a time; "more" goes on, and the numbers keep counting', async () => {
+    test('"trending" and "new" list ten at a time; "more" goes on, and where numbers pick they keep counting', async () => {
       for (let day = 1; day <= 12; day += 1) song(`s${day}`, `Song ${day}`, 'Band', Math.min(day, 6), day * 100);
-      const first = text(await ask('trending'));
+      const split = await ask('trending');
+      // As a 👍 chat gets it: a message per song, no numbers.
+      assert.equal(split.length, 12);
+      assert.ok(split.slice(1, 11).every((reply) => reply.kind === 'text' && reply.postback && reply.text.startsWith('Band — Song ')));
+      const closing = split.at(-1);
+      assert.equal(closing?.kind === 'text' && closing.text, 'Tap 👍 on one to get it, or text "more" for the next ones.');
+      const first = text(split);
       assert.match(first.text, /^🔥 Trending on music-table\.com\n1\. Band — Song /);
-      assert.match(first.text, /\n\nReply with a number to get it, or "more" for the next ones\.$/);
+      assert.match(first.text, /\n\nReply with a number to get it, or text "more" for the next ones\.$/);
       assert.equal(first.chips?.length, 10);
       const more = text(await ask('more'));
       assert.match(more.text, /^🔥 Trending on music-table\.com \(continued\)\n11\. /);
@@ -930,14 +945,14 @@ describe('library: artists, trending and new', () => {
       assert.doesNotMatch(more.text, /"more"/, 'nothing after these');
       assert.equal(more.chips?.length, 12, 'every number shown so far still works');
       assert.equal(more.chipsValidMs, 2 * 60 * 60_000);
-      assert.match(text(await ask('more')).text, /^Text me "trending", "new" or an artist first/);
+      assert.match(text(await ask('more')).text, /^Text "trending", "new" or "search" and an artist first/);
       assert.match(text(await ask('new')).text, /^🆕 New on music-table\.com\n1\. Band — Song (6|7|8|9|10|11|12) · Oct 6/);
     });
 
     test("an artist's name lists their songs, newest first, with dates", async () => {
       song('a', 'Shabbos', 'Yoely Weiss', 1, 10);
       song('b', 'Purim', 'Yoely Weiss', 4, 10);
-      const list = text(await ask('yoely weiss'));
+      const list = text(await ask('search yoely weiss'));
       assert.equal(list.text, '🎤 Yoely Weiss · 2 releases, newest first\n1. Purim · Oct 4\n2. Shabbos · Oct 1\n\nReply with a number to get it.');
       assert.deepEqual(list.chips?.map((chip) => chip.postback), [`play:${catalog.findArtist(['yoely', 'weiss'])!.id && catalog.search('purim')[0]!.id}`, `play:${catalog.search('shabbos')[0]!.id}`]);
     });
@@ -953,7 +968,7 @@ describe('library: artists, trending and new', () => {
       assert.equal(list.chips?.[0]?.postback, 'post:tyh');
       const album = await bot().handle({ from: 'me', messageId: 'm', postback: 'post:tyh' });
       assert.equal(text(album).text, 'TYH Nation · 3 songs\n1. 01 Intro\n2. 02 Yiddishkeit\n3. 10 Finale\n\nReply with a number to get it.', 'track 10 after track 1, not before 2');
-      assert.match(text(await ask('tyh nation')).text, /\n1\. Bardichevers \(Full Album\) · album, 3 songs · Oct 5$/m);
+      assert.match(text(await ask('search tyh nation')).text, /\n1\. Bardichevers \(Full Album\) · album, 3 songs · Oct 5$/m);
     });
 
     test('"all" on a list with an album sends the album\'s songs too, at most twenty, and says what it could not send', async () => {
@@ -973,7 +988,7 @@ describe('library: artists, trending and new', () => {
 
     test('a song name still plays the song, and help mentions the lists', async () => {
       song('a', 'Shabbos', 'Yoely Weiss', 1, 10);
-      assert.equal((await ask('yoely weiss shabbos'))[1]?.kind, 'audio');
+      assert.equal((await ask('search yoely weiss shabbos'))[1]?.kind, 'audio');
       assert.match(text(await ask('help')).text, /"trending", "new", "chanukah", "purim", "wedding" or "vocal"/);
     });
 

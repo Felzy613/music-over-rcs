@@ -9,7 +9,7 @@ npm install
 npm run simulate:web -- --open
 ```
 
-A chat that looks like Google Messages, connected to the real bot: the same runner, catalog and music-table.com lookup the phone setup uses. Text it a song or an artist, `trending`, `new`, or a number from a list, and watch it "type" and answer with album art and the audio file. Tap a numbered option to send its number.
+A chat that looks like Google Messages, connected to the real bot: the same runner, catalog and music-table.com lookup the phone setup uses. Text it `search` and a song or an artist, `trending` or `new`, and watch it "type" and answer with album art and the audio file. Under each of the bot's messages is a 👍: tap it on a song in a list to get that song, as on the phone.
 
 Beside the chat, **Behind the scenes** shows every step of each request: the catalog search, each call to the site (and whether it was answered from memory), the lookup's decisions such as spelling fixes, the file check, and how long each took.
 

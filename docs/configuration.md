@@ -35,6 +35,7 @@ Settings come from environment variables, or from a `.env` file in the project f
 | `PREFETCH_MB` | `unlimited` | Disk space for songs kept ready on this Mac, in MB. No limit by default: every song stays. A number sets a limit (the songs used least recently go first); `0` keeps none. |
 | `SONGS_ARCHIVE_DIR` | none | A folder, on an external drive say, that kept songs move into whenever it's there, sorted into artist and album folders (they always download to the Mac first). A full path; put it in quotes if it has spaces. The folder it goes in must exist. See [The library](library.md#moving-them-to-an-external-drive). |
 | `QUIET_HOURS` | `22:00-07:00` | No new-song alerts in these hours, 24-hour, in this Mac's time (it may cross midnight). `off` sends them any time. The daily message keeps its own time. |
+| `SONG_GAP_SECONDS` | `15` | The least time between two songs, in seconds (up to 300), so the phone has sent one before the next arrives: several 👍 at once, `all`, numbers picked quickly. A song's card waits with it. `0` or `off` sends them as fast as they're ready. |
 
 ## RCS for Business
 
