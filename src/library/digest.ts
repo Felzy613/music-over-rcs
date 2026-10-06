@@ -15,6 +15,10 @@ export interface DigestOptions {
   maxPictures?: number;
   /** How long the numbers stay pickable. */
   chipsValidMs?: number;
+  /** A line under the heading for the time of year (Chanukah, Sefirah…). */
+  seasonHint?: string | undefined;
+  /** In Sefirah and the Three Weeks: which songs are vocal, to put them first and say so. */
+  vocal?: ((item: DigestItem) => boolean) | undefined;
 }
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -35,13 +39,17 @@ function chip(n: number, title: string): Chip['label'] {
  * song; the message itself sends none. Returns nothing when there is nothing new.
  */
 export function buildDigest(items: DigestItem[], options: DigestOptions): Reply[] {
-  const songs = items.filter((item): item is DigestItem & { song: Track } => item.song !== undefined);
-  const videos = items.filter((item) => item.song === undefined);
+  const vocal = options.vocal;
+  // Vocal songs first when that's what the season calls for; otherwise the order they came in.
+  const ordered = vocal ? [...items.filter((item) => vocal(item)), ...items.filter((item) => !vocal(item))] : items;
+  const songs = ordered.filter((item): item is DigestItem & { song: Track } => item.song !== undefined);
+  const videos = ordered.filter((item) => item.song === undefined);
   if (songs.length === 0 && videos.length === 0) return [];
 
   const day = options.date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
   const count = songs.length === 1 ? '1 new song' : `${songs.length} new songs`;
-  const replies: Reply[] = [{ kind: 'text', text: `New music · ${day}${songs.length > 0 ? `\n${count} on music-table.com` : ''}` }];
+  const heading = [`New music · ${day}`, ...(songs.length > 0 ? [`${count} on music-table.com`] : []), ...(options.seasonHint ? [options.seasonHint] : [])];
+  const replies: Reply[] = [{ kind: 'text', text: heading.join('\n') }];
 
   const maxPictures = options.maxPictures ?? 9;
   const isAlbum = (item: DigestItem): boolean => item.post.audioFiles > 1;
@@ -51,7 +59,7 @@ export function buildDigest(items: DigestItem[], options: DigestOptions): Reply[
       const name = parts.artist ? `${parts.artist} — ${parts.title}` : item.post.title;
       return `${n}. ${name} · album, ${item.post.audioFiles} songs`;
     }
-    const kind = item.post.category ? ` · ${categoryLabel(item.post.category)}` : '';
+    const kind = vocal?.(item) ? ' · vocal' : item.post.category ? ` · ${categoryLabel(item.post.category)}` : '';
     return `${n}. ${describe(item.song)}${kind}`;
   };
   // Picking an album lists its songs; picking a song sends it.

@@ -584,6 +584,13 @@ describe('library: songs kept ready', () => {
     assert.equal((await readdir(dir)).length, 3, 'its file is gone too');
   });
 
+  test('with no limits set (the default) every song stays', async () => {
+    const kept = new AudioCache({ dir, index: catalog, now: () => clock });
+    for (let n = 1; n <= 60; n++) await kept.put(`https://x.test/${n}`, song(n, 50_000));
+    assert.deepEqual(kept.stats(), { files: 60, bytes: 3_000_000 });
+    assert.equal((await kept.trim()).length, 0);
+  });
+
   test('the size limit counts bytes; a song bigger than the whole limit is not kept at all', async () => {
     const kept = cache(2500);
     await kept.put('https://x.test/1', song(1));
@@ -716,6 +723,11 @@ describe('library: artists, trending and new', () => {
     assert.equal(catalog.findArtist(['yoely', 'weiss', 'shabbos']), undefined, 'that is a song, not an artist');
     assert.deepEqual(catalog.artistSongs(catalog.findArtist(['yoely', 'weiss'])!.id, 10).map((t) => t.title), ['One', 'Purim', 'Shabbos'], 'newest first');
     assert.equal(catalog.artistCount(), 4, 'Yoely Weiss, Yaakov Shwekey, Mendy Weiss and the one-song "Shwekey"');
+
+    song('i', 'Aderaba', 'Avraham Fried', 10, 10);
+    assert.equal(catalog.findArtist(['avrohom', 'fried'])?.name, 'Avraham Fried', 'a whole name spelled the way it is said');
+    assert.equal(catalog.findArtist(['avrohom', 'friedman']), undefined, 'a longer name is another artist, not a typo');
+    assert.equal(catalog.findArtist(['mendy', 'wiess'])?.name, 'Mendy Weiss', 'still the plain typo rule first');
   });
 
   test("trending is views for a song's age; new is newest first; one song per post, only posts with music", () => {
@@ -806,7 +818,7 @@ describe('library: artists, trending and new', () => {
     test('a song name still plays the song, and help mentions the lists', async () => {
       song('a', 'Shabbos', 'Yoely Weiss', 1, 10);
       assert.equal((await ask('yoely weiss shabbos'))[1]?.kind, 'audio');
-      assert.match(text(await ask('help')).text, /"trending" or "new"/);
+      assert.match(text(await ask('help')).text, /"trending", "new", "chanukah", "purim", "wedding" or "vocal"/);
     });
 
     test('lists say so when the catalog has nothing yet', async () => {

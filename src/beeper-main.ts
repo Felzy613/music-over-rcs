@@ -4,7 +4,7 @@ import { fetchAudio } from './audio-fetch.ts';
 import { BeeperClient, describeBeeperError } from './beeper/client.ts';
 import { createBot } from './bot.ts';
 import { Catalog, choicesIn, linksIn } from './catalog.ts';
-import { catalogBrowse } from './library/browse.ts';
+import { Health } from './health.ts';
 import { loadBeeperConfig } from './config.ts';
 import { setUpLibrary } from './library/setup.ts';
 import { createRunner } from './runner.ts';
@@ -35,6 +35,10 @@ try {
     },
     { maxBytes },
   );
+  // What's wrong, shown on the Mac: the chat can't carry news of its own breakdown.
+  const health = new Health({ log, save: (problems) => catalog.setState('health.problems', JSON.stringify(problems)) });
+  catalog.setState('health.problems', '[]');
+
   // Songs kept on disk (the most played, the newest, the most viewed), album art, and the daily new-music message.
   const library = setUpLibrary({
     catalog,
@@ -43,13 +47,16 @@ try {
     dbPath: config.dbPath,
     digestAt: config.digestAt,
     prefetchMb: config.prefetchMb,
+    quiet: config.quiet,
+    onSite: (ok, problem) => (ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.problem('site', problem ?? "music-table.com isn't answering.")),
     log,
   });
   const bot = createBot({
     catalog,
     checkAudio: library.checkAudio,
     onPlay: library.onPlay,
-    browse: catalogBrowse(catalog),
+    browse: library.browse,
+    follows: library.follows,
     ...(musicTable ? { source: createMusicTableSource({ musicTable, catalog }) } : {}),
   });
   const runner = createRunner({
@@ -62,6 +69,10 @@ try {
     links: linksIn(catalog),
     pollMs: config.pollMs,
     log,
+    onPoll: (ok, failures, error) => {
+      if (ok) health.ok('beeper', 'Fixed: the bot can reach Beeper Desktop again.');
+      else if (failures >= 20) health.problem('beeper', `The bot can't reach Beeper Desktop (${error ?? 'no answer'}). Is it running?`);
+    },
   });
   await runner.start();
   library.start((replies) => runner.announce(replies));

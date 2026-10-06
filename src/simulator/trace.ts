@@ -34,6 +34,7 @@ const SITE_LABELS: Record<SiteEvent['kind'], string> = {
   link: 'download link',
   list: 'newest posts',
   feed: 'site feed',
+  category: 'category page',
 };
 
 /** Records what happens while the bot works on each request, so the simulator can show it and the time each step took. */

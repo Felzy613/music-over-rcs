@@ -13,10 +13,10 @@ export interface AudioCacheOptions {
   dir: string;
   /** Where the list of kept files lives (the catalog database). */
   index: CacheIndex;
-  /** The most the folder may hold, in bytes. */
-  maxBytes: number;
-  /** The most files it may hold. */
-  maxFiles?: number;
+  /** The most the folder may hold, in bytes. No limit when left out. */
+  maxBytes?: number | undefined;
+  /** The most files it may hold. No limit when left out. */
+  maxFiles?: number | undefined;
   now?: () => Date;
 }
 
@@ -24,7 +24,8 @@ const EXTENSION: Record<string, string> = { 'audio/mpeg': 'mp3', 'audio/mp4': 'm
 
 /**
  * Song files kept on this Mac, so a song that's asked for often (or is likely to be) is sent without downloading
- * it first. It holds at most `maxBytes` and `maxFiles`; when full, the files used least recently go first.
+ * it first. Every song stays, unless limits are set (`maxBytes`, `maxFiles`); then, when full, the files used least
+ * recently go first.
  */
 export class AudioCache {
   readonly dir: string;
@@ -35,8 +36,8 @@ export class AudioCache {
 
   constructor(options: AudioCacheOptions) {
     this.dir = options.dir;
-    this.maxBytes = options.maxBytes;
-    this.maxFiles = options.maxFiles ?? 50;
+    this.maxBytes = options.maxBytes ?? Number.POSITIVE_INFINITY;
+    this.maxFiles = options.maxFiles ?? Number.POSITIVE_INFINITY;
     this.#index = options.index;
     this.#now = options.now ?? (() => new Date());
   }

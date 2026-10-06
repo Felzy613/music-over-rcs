@@ -1,5 +1,5 @@
 import type { Catalog } from '../catalog.ts';
-import { tracksOf, type MusicTable, type Post } from '../sources/music-table.ts';
+import { tracksOf, type FeedItem, type MusicTable, type Post } from '../sources/music-table.ts';
 
 export interface SyncResult {
   /** Posts this machine had never seen before. */
@@ -20,6 +20,8 @@ export const PAGE_SIZE = 50;
  */
 export async function syncSite(deps: {
   musicTable: Pick<MusicTable, 'listPosts' | 'feed' | 'trackUrl'>;
+  /** Only the posts in this category (an id). */
+  categoryId?: string;
   catalog: Pick<Catalog, 'savePost' | 'add'>;
   /** How many pages of 50 to read. One covers about a month of posts. */
   pages?: number;
@@ -27,13 +29,15 @@ export async function syncSite(deps: {
   offset?: number;
   /** Category names are only in the feed, which lists the newest posts; a scan of older pages skips it. */
   feed?: boolean;
+  /** The feed, when it was just read anyway. */
+  feedItems?: FeedItem[];
   now?: () => Date;
 }): Promise<SyncResult & { more: boolean }> {
   const now = deps.now ?? (() => new Date());
   const categories = new Map<string, string>();
   if (deps.feed !== false) {
     try {
-      for (const item of await deps.musicTable.feed()) categories.set(item.slug, item.category);
+      for (const item of deps.feedItems ?? (await deps.musicTable.feed())) categories.set(item.slug, item.category);
     } catch {
       // Without the feed the posts still sync; they only miss their category's name.
     }
@@ -44,7 +48,7 @@ export async function syncSite(deps: {
   let songs = 0;
   let more = true;
   for (let page = 0; page < Math.max(1, deps.pages ?? 1) && more; page += 1) {
-    const posts = await deps.musicTable.listPosts((deps.offset ?? 0) + page * PAGE_SIZE, PAGE_SIZE);
+    const posts = await deps.musicTable.listPosts((deps.offset ?? 0) + page * PAGE_SIZE, PAGE_SIZE, deps.categoryId);
     for (const post of posts) {
       seen += 1;
       const { isNew } = deps.catalog.savePost(
@@ -56,6 +60,7 @@ export async function syncSite(deps: {
           views: post.views ?? 0,
           cover: post.cover,
           audioFiles: post.files.length,
+          categoryIds: post.categoryIds,
         },
         now(),
       );

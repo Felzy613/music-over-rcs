@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { artistKey, splitArtists } from './artists.ts';
 import { parseQuery } from './query.ts';
-import { allowedEdits, editDistance } from './sources/relevance.ts';
+import { allowedEdits, correctableEdits, editDistance } from './sources/relevance.ts';
 import type { ChoiceStore, MessageLinks, PendingChoices } from './runner.ts';
 import type { Track } from './types.ts';
 
@@ -52,6 +52,10 @@ export interface SitePost {
   firstSeenAt: string;
   /** ISO time it went out in a daily message, if it did. */
   announcedAt?: string | undefined;
+  /** The site's categories it's in (ids). */
+  categoryIds?: string[] | undefined;
+  /** ISO time a "new from an artist you follow" alert went out for it, if one did. */
+  alertedAt?: string | undefined;
 }
 
 /** A song file kept on disk so it can be sent without downloading it first. */
@@ -130,6 +134,12 @@ const SCHEMA = `
     PRIMARY KEY (artist_id, track_id)
   );
   CREATE INDEX IF NOT EXISTS artist_tracks_by_track ON artist_tracks (track_id);
+  CREATE TABLE IF NOT EXISTS follows (
+    artist_id INTEGER PRIMARY KEY REFERENCES artists (id) ON DELETE CASCADE,
+    following INTEGER NOT NULL,
+    auto      INTEGER NOT NULL DEFAULT 0,
+    since     TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS message_links (
     message_id TEXT PRIMARY KEY,
     postback   TEXT NOT NULL,
@@ -158,6 +168,8 @@ const toSitePost = (row: Record<string, unknown>): SitePost => ({
   audioFiles: Number(row.audio_files) || 0,
   firstSeenAt: String(row.first_seen_at),
   ...(typeof row.announced_at === 'string' ? { announcedAt: row.announced_at } : {}),
+  ...(typeof row.category_ids === 'string' && row.category_ids ? { categoryIds: row.category_ids.split(',') } : {}),
+  ...(typeof row.alerted_at === 'string' ? { alertedAt: row.alerted_at } : {}),
 });
 
 const toCachedAudio = (row: Record<string, unknown>): CachedAudio => ({
@@ -188,6 +200,9 @@ export class Catalog {
     if (!columns.includes('post')) this.#db.exec('ALTER TABLE tracks ADD COLUMN post TEXT');
     if (!columns.includes('released_at')) this.#db.exec('ALTER TABLE tracks ADD COLUMN released_at TEXT');
     this.#db.exec('CREATE INDEX IF NOT EXISTS tracks_by_post ON tracks (post)');
+    const postColumns = this.#db.prepare('PRAGMA table_info(site_posts)').all().map((column) => String(column.name));
+    if (!postColumns.includes('category_ids')) this.#db.exec('ALTER TABLE site_posts ADD COLUMN category_ids TEXT');
+    if (!postColumns.includes('alerted_at')) this.#db.exec('ALTER TABLE site_posts ADD COLUMN alerted_at TEXT');
     // Songs that came before artists were kept get theirs now.
     const linked = Number(this.#db.prepare('SELECT count(*) AS n FROM artist_tracks').get()?.n);
     if (linked === 0) {
@@ -303,21 +318,32 @@ export class Catalog {
   // --- site posts: what music-table.com has published, kept up to date by the sync ---
 
   /** Records a post, or refreshes what may change (title, views, picture, files). Says whether it was new here. */
-  savePost(post: Omit<SitePost, 'firstSeenAt' | 'announcedAt'>, now: Date = new Date()): { isNew: boolean } {
+  savePost(post: Omit<SitePost, 'firstSeenAt' | 'announcedAt' | 'alertedAt'>, now: Date = new Date()): { isNew: boolean } {
     const known = this.#db.prepare('SELECT 1 FROM site_posts WHERE slug = ?').get(post.slug) !== undefined;
     this.#db
       .prepare(
-        `INSERT INTO site_posts (slug, title, category, published_at, views, cover, audio_files, first_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO site_posts (slug, title, category, published_at, views, cover, audio_files, first_seen_at, category_ids)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (slug) DO UPDATE SET
            title = excluded.title,
            category = CASE WHEN excluded.category = '' THEN category ELSE excluded.category END,
            published_at = excluded.published_at,
            views = max(views, excluded.views),
            cover = coalesce(excluded.cover, cover),
-           audio_files = excluded.audio_files`,
+           audio_files = excluded.audio_files,
+           category_ids = coalesce(excluded.category_ids, category_ids)`,
       )
-      .run(post.slug, post.title, post.category, post.publishedAt, post.views, post.cover ?? null, post.audioFiles, now.toISOString());
+      .run(
+        post.slug,
+        post.title,
+        post.category,
+        post.publishedAt,
+        post.views,
+        post.cover ?? null,
+        post.audioFiles,
+        now.toISOString(),
+        post.categoryIds?.length ? post.categoryIds.join(',') : null,
+      );
     return { isNew: !known };
   }
 
@@ -391,7 +417,22 @@ export class Catalog {
     // An artist on clearly more songs than any other match wins (a one-song credit "Shwekey" loses to Yaakov
     // Shwekey); otherwise the exact name, if there is one; otherwise it's too ambiguous to guess.
     if (first && (!second || first.songs >= second.songs * 2) && (!exact || first.songs >= exact.songs * 2)) return first;
-    return exact;
+    if (exact || tokens.length < 2) return exact;
+
+    // A whole name spelled the way it's said rather than the way the site writes it ("avrohom fried" for Avraham
+    // Fried): each word a couple of letters off at most (never a word inside another), when one artist clearly fits.
+    const near = (token: string, word: string): boolean =>
+      token === word || (!word.includes(token) && !token.includes(word) && editDistance(token, word) <= correctableEdits(token.length));
+    const loose: Artist[] = [];
+    for (const row of rows) {
+      const words = String(row.key).split(' ');
+      if (words.length === tokens.length && tokens.every((token, i) => near(token, words[i]!))) {
+        loose.push({ id: Number(row.id), name: String(row.name), songs: Number(row.songs) });
+      }
+    }
+    loose.sort((a, b) => b.songs - a.songs);
+    const [best, next] = loose;
+    return best && (!next || best.songs >= next.songs * 2) ? best : undefined;
   }
 
   /** An artist's releases, newest first: each single song, and each album as one entry. */
@@ -465,6 +506,96 @@ export class Catalog {
       )
       .all(...params, limit, offset)
       .map((row) => this.#listed(row, row.published_at));
+  }
+
+  /** A category's releases (one per post, albums as one entry), the most viewed first. */
+  categorySongs(categoryId: string, limit: number, offset = 0): ListedTrack[] {
+    return this.#postSongs(`(',' || coalesce(p.category_ids, '') || ',') LIKE ? ORDER BY p.views DESC, p.published_at DESC`, [`%,${categoryId},%`], limit, offset);
+  }
+
+  /** How many posts are known to be in a category, with MP3s or not. */
+  categoryPosts(categoryId: string): number {
+    return Number(this.#db.prepare("SELECT count(*) AS n FROM site_posts WHERE (',' || coalesce(category_ids, '') || ',') LIKE ?").get(`%,${categoryId},%`)?.n);
+  }
+
+  // --- artists you follow: new songs by them are sent as soon as they're out ---
+
+  /** Follows an artist. A follow you set yourself replaces one made from your plays, and undoes an unfollow. */
+  follow(artistId: number, auto = false, now: Date = new Date()): void {
+    this.#db
+      .prepare(
+        `INSERT INTO follows (artist_id, following, auto, since) VALUES (?, 1, ?, ?)
+         ON CONFLICT (artist_id) DO UPDATE SET following = 1, auto = excluded.auto, since = excluded.since`,
+      )
+      .run(artistId, auto ? 1 : 0, now.toISOString());
+  }
+
+  /** Stops following, and remembers it, so your plays won't follow the artist again. */
+  unfollow(artistId: number, now: Date = new Date()): void {
+    this.#db
+      .prepare('INSERT INTO follows (artist_id, following, auto, since) VALUES (?, 0, 0, ?) ON CONFLICT (artist_id) DO UPDATE SET following = 0, auto = 0, since = excluded.since')
+      .run(artistId, now.toISOString());
+  }
+
+  /** 'on', 'off' (you unfollowed), or nothing yet. */
+  followState(artistId: number): 'on' | 'off' | undefined {
+    const row = this.#db.prepare('SELECT following FROM follows WHERE artist_id = ?').get(artistId);
+    return row ? (Number(row.following) ? 'on' : 'off') : undefined;
+  }
+
+  /** The artists you follow, and which of them came from your plays. */
+  followed(): Array<Artist & { auto: boolean }> {
+    return this.#db
+      .prepare(
+        `SELECT a.id, a.name, f.auto, (SELECT count(*) FROM artist_tracks at WHERE at.artist_id = a.id) AS songs
+           FROM follows f JOIN artists a ON a.id = f.artist_id WHERE f.following = 1 ORDER BY a.name`,
+      )
+      .all()
+      .map((row) => ({ id: Number(row.id), name: String(row.name), songs: Number(row.songs), auto: Boolean(Number(row.auto)) }));
+  }
+
+  /** How many different songs by an artist you've had. */
+  playedSongsBy(artistId: number): number {
+    return Number(
+      this.#db.prepare('SELECT count(DISTINCT p.track_id) AS n FROM plays p JOIN artist_tracks at ON at.track_id = p.track_id WHERE at.artist_id = ?').get(artistId)?.n,
+    );
+  }
+
+  /** The artists credited on a song. */
+  trackArtists(trackId: number): Artist[] {
+    return this.#db
+      .prepare(
+        `SELECT a.id, a.name, (SELECT count(*) FROM artist_tracks x WHERE x.artist_id = a.id) AS songs
+           FROM artist_tracks at JOIN artists a ON a.id = at.artist_id WHERE at.track_id = ?`,
+      )
+      .all(trackId)
+      .map((row) => ({ id: Number(row.id), name: String(row.name), songs: Number(row.songs) }));
+  }
+
+  /**
+   * Posts with music, published and first seen since `since`, not alerted yet, by an artist you follow and seen after
+   * you started following them, none of whose songs you've had already; newest first.
+   */
+  postsToAlert(since: Date): Array<SitePost & { artists: string[] }> {
+    return this.#db
+      .prepare(
+        `SELECT p.*, json_group_array(DISTINCT a.name) AS artist_names
+           FROM site_posts p
+           JOIN tracks t ON t.post = p.slug
+           JOIN artist_tracks at ON at.track_id = t.id
+           JOIN follows f ON f.artist_id = at.artist_id AND f.following = 1 AND p.first_seen_at >= f.since
+           JOIN artists a ON a.id = at.artist_id
+          WHERE p.audio_files > 0 AND p.alerted_at IS NULL AND p.first_seen_at >= ? AND p.published_at >= ?
+            AND NOT EXISTS (SELECT 1 FROM plays pl JOIN tracks played ON played.id = pl.track_id WHERE played.post = p.slug)
+          GROUP BY p.slug ORDER BY p.published_at DESC`,
+      )
+      .all(since.toISOString(), since.toISOString())
+      .map((row) => ({ ...toSitePost(row), artists: (JSON.parse(String(row.artist_names ?? '[]')) as unknown[]).map(String) }));
+  }
+
+  markAlerted(slugs: string[], at: Date = new Date()): void {
+    const mark = this.#db.prepare('UPDATE site_posts SET alerted_at = ? WHERE slug = ?');
+    for (const slug of slugs) mark.run(at.toISOString(), slug);
   }
 
   artistName(artistId: number): string | undefined {

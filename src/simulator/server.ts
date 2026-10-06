@@ -8,6 +8,8 @@ import { createBot } from '../bot.ts';
 import type { Catalog } from '../catalog.ts';
 import { createPictures, type Picture, type PreparedPicture } from '../library/images.ts';
 import { catalogBrowse } from '../library/browse.ts';
+import { Categories } from '../library/categories.ts';
+import { catalogFollows } from '../library/follows.ts';
 import { LibraryJobs } from '../library/jobs.ts';
 import { createRunner, type Runner } from '../runner.ts';
 import { createMusicTableSource, resolvingAudio, type MusicTable } from '../sources/music-table.ts';
@@ -128,7 +130,8 @@ export function createSimulator(options: SimulatorOptions): Simulator {
       return result;
     },
     onPlay: (track) => catalog.recordPlay(track.id),
-    browse: catalogBrowse(catalog),
+    browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined),
+    follows: catalogFollows(catalog),
     ...(musicTable
       ? { source: createMusicTableSource({ musicTable, catalog, onNote: (note) => trace.add({ label: 'lookup', detail: note, tone: 'note' }) }) }
       : {}),

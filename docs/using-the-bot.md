@@ -81,6 +81,52 @@ Text just an artist's name to see their releases, newest first:
 
 Numbers keep counting across pages (`more` shows 11 to 20, and 3 still means the third song).
 
+## Holiday and other lists
+
+| Text | List |
+| --- | --- |
+| `chanukah` (or `hanukkah`, `chanuka`) | 🕎 Chanukah songs |
+| `purim` | 🎭 Purim songs |
+| `wedding` (or `weddings`, `chasuna`, `simcha`, `dance`) | 💍 Weddings & events: live wedding sets and dance music |
+| `vocal` (or `a cappella`, `acapella`, `sefirah`, `three weeks`) | 🎤 Vocal (a cappella) songs |
+
+They're music-table.com's own categories, most popular first (by views), with the same numbers, 👍, `more` and `all` as any list:
+
+```text
+🎵 🕎 Chanukah · most popular first
+🎵 1. Miami Boys Choir — Chanukah Nights! · Dec 7, 2025
+🎵 2. Meilech Braunstein — Miracles · Dec 24, 2024
+🎵 3. Mordechai Shapiro — Fire · Dec 14, 2025
+…
+```
+
+The first time you ask for one it reads the whole category from the site (a few seconds); after that the list comes from your Mac, refreshed at most once a day.
+
+**In season, the bot points you to them.** From 15 Kislev to 3 Tevet `trending`, `new` and the daily message carry a line like `🕎 Chanukah is here: text "chanukah" for Chanukah songs.`; the same for Purim (1 to 15 Adar). During Sefirah (16 Nisan to 5 Sivan) and the Three Weeks (17 Tamuz to 9 Av) the line points to `vocal`, and the daily message lists the new a cappella songs first, each marked "vocal". The dates come from the Jewish calendar built into your Mac.
+
+## Following artists
+
+| Text | What happens |
+| --- | --- |
+| `follow shwekey` (any way you'd text the name: `follow avrohom fried` works) | 🔔 Following Yaakov Shwekey. Their new songs come to you as soon as they're out. |
+| `following` (or `who do i follow`, `my artists`) | The artists you follow |
+| `unfollow shwekey` (or `stop following shwekey`) | Stops |
+
+When a new post by an artist you follow goes up on music-table.com, the bot sends it on its own, usually within 15 minutes: its card, then a line, then how to get it.
+
+```text
+[the cover, with "Brand New · Yoely Weiss" drawn under it]
+🎵 🔔 New from Yoely Weiss: Yoely Weiss — Brand New
+🎵 Reply 1 or 👍 it to get it.
+```
+
+Like the daily message, it's the name and the picture, not the song: reply with the number (good for a day) or 👍 the card or the line. Several at once are numbered.
+
+- **Quiet hours.** Nothing comes between 22:00 and 07:00 (see `QUIET_HOURS` in [Configuration](configuration.md)); what came out overnight is sent at 07:00, if it's under two days old.
+- **Only what you don't have.** A song you already got (you texted for it first, or picked it from a list) isn't announced, and neither is anything that was out before you followed the artist.
+- **The bot follows for you.** After you've had three different songs by an artist, it follows them and says so once, under the song: `🔔 You've had a few songs by Yoely Weiss, so I'll send you their new ones as soon as they're out. (Text "unfollow yoely weiss" to stop.)` After an unfollow it never does that for the same artist again. `following` marks these "(from your plays)".
+- While you follow anyone, the bot looks at the site's RSS feed every 15 minutes (one small request) instead of only syncing every three hours. Following no one, it doesn't.
+
 ## The daily new-music message
 
 At 09:00 each day (see `DIGEST_TIME` in [Configuration](configuration.md)) the bot sends what came out on music-table.com since the last one:
@@ -106,11 +152,19 @@ To see today's message now: `npm run library -- digest` (shows it, sends nothing
 
 ## 👍 to get a song
 
-A thumbs up (any skin tone) on a message that stands for one song gets you that song: any option in a list, and any song's line in the daily message. Other reactions, and a 👍 on anything else (like a song you just received, or a heading), are just reactions; the bot ignores them.
+A thumbs up (any skin tone) on a message that stands for one song gets you that song: any option in a list, any song's line in the daily message, and a new-song alert's card or line. Other reactions, and a 👍 on anything else (like a song you just received, or a heading), are just reactions; the bot ignores them.
 
 ## Small things worth knowing
 
-- `help`, `hi` or a single character gets the help text.
+- `help`, `hi` or a single character gets the help text:
+
+  ```text
+  🎵 Text me a song or an artist and I'll send you the music.
+  Also: "trending", "new", "chanukah", "purim", "wedding" or "vocal" for lists, "more" for the next ones, and "all" for every song on a list.
+  "follow <artist>" sends their new songs as soon as they're out.
+  Reply with a number or 👍 a song to pick it.
+  ```
+
 - The same request repeated word for word within 20 seconds is answered once. In a chat with yourself a phone can show a text twice, and this keeps the bot from answering both. (So `all` twice in a row sends the songs once.)
 - As a safety net the bot stops after 30 messages in a minute.
 - While it works it shows "typing…" in the chat. (The bridge passes it to Google Messages; whether a phone shows it in a chat with yourself depends on the phone.)

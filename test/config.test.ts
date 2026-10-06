@@ -74,7 +74,8 @@ describe('loadBeeperConfig', () => {
       dbPath: 'data/catalog.db',
       maxDownloadMb: 100,
       digestAt: { hour: 9, minute: 0 },
-      prefetchMb: 400,
+      prefetchMb: Number.POSITIVE_INFINITY,
+      quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
     });
   });
 
@@ -116,9 +117,15 @@ describe('loadBeeperConfig', () => {
     assert.deepEqual(loadBeeperConfig({ ...base, DIGEST_TIME: '7:30' }).digestAt, { hour: 7, minute: 30 });
     assert.equal(loadBeeperConfig({ ...base, DIGEST_TIME: 'off' }).digestAt, undefined);
     assert.equal(loadBeeperConfig({ ...base, PREFETCH_MB: '0' }).prefetchMb, 0);
+    assert.equal(loadBeeperConfig({ ...base, PREFETCH_MB: 'off' }).prefetchMb, 0);
+    assert.equal(loadBeeperConfig({ ...base, PREFETCH_MB: 'unlimited' }).prefetchMb, Number.POSITIVE_INFINITY);
+    assert.equal(loadBeeperConfig({ ...base, PREFETCH_MB: '30000' }).prefetchMb, 30_000, 'a limit, if you want one');
     assert.throws(() => loadBeeperConfig({ ...base, DIGEST_TIME: '25:00' }), /DIGEST_TIME must look like 09:00/);
     assert.throws(() => loadBeeperConfig({ ...base, DIGEST_TIME: 'morning' }), /DIGEST_TIME/);
-    assert.throws(() => loadBeeperConfig({ ...base, PREFETCH_MB: '-5' }), /PREFETCH_MB must be a number from 0/);
+    assert.throws(() => loadBeeperConfig({ ...base, PREFETCH_MB: '-5' }), /PREFETCH_MB must be "unlimited" \(the default\), a number of MB, or 0 for none/);
+    assert.deepEqual(loadBeeperConfig({ ...base, QUIET_HOURS: '23:30-6:15' }).quiet, { from: { hour: 23, minute: 30 }, to: { hour: 6, minute: 15 } });
+    assert.equal(loadBeeperConfig({ ...base, QUIET_HOURS: 'off' }).quiet, undefined);
+    assert.throws(() => loadBeeperConfig({ ...base, QUIET_HOURS: 'nights' }), /QUIET_HOURS must look like 22:00-07:00/);
   });
 
   test('the chat is optional for the script that lists chats', () => {
@@ -135,11 +142,13 @@ describe('loadMatrixConfig', () => {
       homeserver: 'http://127.0.0.1:8008',
       token: 'token',
       roomID: '!room:localhost',
+      bridgeUrl: 'http://127.0.0.1:29336',
       pollMs: 1500,
       dbPath: 'data/catalog.db',
       maxDownloadMb: 100,
       digestAt: { hour: 9, minute: 0 },
-      prefetchMb: 400,
+      prefetchMb: Number.POSITIVE_INFINITY,
+      quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
     });
   });
 

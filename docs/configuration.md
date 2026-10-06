@@ -12,6 +12,7 @@ Settings come from environment variables, or from a `.env` file in the project f
 | `MATRIX_ACCESS_TOKEN` | yes | Saved by `npm run matrix-login`. |
 | `MATRIX_ROOM_ID` | yes | The room to watch: your chat with your own number. `npm run matrix-rooms -- --phone <number>` finds it. |
 | `MATRIX_POLL_MS` | no (`1500`) | How often to check the room, in milliseconds, 500 to 30000. |
+| `BRIDGE_URL` | no (`http://127.0.0.1:29336`) | Where the bridge listens, for the health check of your Google Messages login. |
 
 ## Beeper
 
@@ -31,7 +32,8 @@ Settings come from environment variables, or from a `.env` file in the project f
 | `MUSIC_TABLE` | on | `off` stops all use of music-table.com: lookups, sync, daily message. |
 | `MUSIC_TABLE_URL` | `https://www.music-table.com` | Where the site lookups go; only the tests change it. |
 | `DIGEST_TIME` | `09:00` | When the daily new-music message goes out, 24-hour, in this Mac's time. `off` for none. |
-| `PREFETCH_MB` | `400` | Disk space for songs kept ready. `0` keeps none. |
+| `PREFETCH_MB` | `unlimited` | Disk space for songs kept ready, in MB. No limit by default: every song stays. A number sets a limit (the songs used least recently go first); `0` keeps none. |
+| `QUIET_HOURS` | `22:00-07:00` | No new-song alerts in these hours, 24-hour, in this Mac's time (it may cross midnight). `off` sends them any time. The daily message keeps its own time. |
 
 ## RCS for Business
 

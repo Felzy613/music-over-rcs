@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { checkAudio } from '../src/audio-check.ts';
 import { fetchAudio } from '../src/audio-fetch.ts';
 import { Catalog, choicesIn, linksIn } from '../src/catalog.ts';
-import { loadMatrixConfig } from '../src/config.ts';
+import { loadMatrixConfig, parsePrefetchMb } from '../src/config.ts';
 import { createPictures } from '../src/library/images.ts';
 import { AudioCache } from '../src/library/audio-cache.ts';
 import { LibraryJobs, localDay, parseDailyTime, STATE } from '../src/library/jobs.ts';
@@ -46,9 +46,16 @@ const audio = resolvingAudio(
   { maxBytes },
 );
 const digestAt = parseDailyTime(env.DIGEST_TIME);
-const prefetchMb = Number(env.PREFETCH_MB?.trim() || 400);
+const prefetchMb = parsePrefetchMb(env.PREFETCH_MB);
+if (prefetchMb instanceof Error) {
+  console.error(prefetchMb.message);
+  process.exit(1);
+}
+const limited = Number.isFinite(prefetchMb);
 const cache =
-  prefetchMb > 0 ? new AudioCache({ dir: join(dirname(resolve(dbPath)), 'audio-cache'), index: catalog, maxBytes: prefetchMb * 1024 * 1024 }) : undefined;
+  prefetchMb > 0
+    ? new AudioCache({ dir: join(dirname(resolve(dbPath)), 'audio-cache'), index: catalog, maxBytes: limited ? prefetchMb * 1024 * 1024 : undefined })
+    : undefined;
 
 let announce: (replies: Reply[]) => Promise<void> = async () => {
   throw new Error('nothing to send through');
@@ -73,11 +80,20 @@ try {
     console.log(`whole site:     ${catalog.getState(STATE.scanDone) ? `read ${when(catalog.getState(STATE.scanDone))}` : `${catalog.getState(STATE.scanOffset) ?? 0} posts read so far (the bot reads the rest in the background; npm run library -- scan does it now)`}`);
     console.log(`newest post:    ${newest ? `${newest.title} (${new Date(newest.publishedAt).toLocaleDateString()})` : 'none yet; run: npm run library -- sync'}`);
     console.log(`last sync:      ${when(catalog.getState(STATE.lastSync))}`);
-    console.log(`kept ready:     ${cache ? `${kept!.files} songs, ${(kept!.bytes / 1048576).toFixed(0)} of ${prefetchMb} MB, in ${cache.dir}` : 'off (PREFETCH_MB=0)'}`);
+    console.log(`kept ready:     ${cache ? `${kept!.files} songs, ${(kept!.bytes / 1048576).toFixed(0)} MB ${limited ? `of ${prefetchMb} MB` : '(no size limit)'}, in ${cache.dir}` : 'off (PREFETCH_MB=0)'}`);
     const time = digestAt instanceof Error ? `invalid DIGEST_TIME: ${digestAt.message}` : digestAt ? `${String(digestAt.hour).padStart(2, '0')}:${String(digestAt.minute).padStart(2, '0')} every day` : 'off';
     console.log(`daily message:  ${time}; last sent ${when(catalog.getState(STATE.digestSentAt))}${catalog.getState(STATE.digestDate) === localDay(new Date()) ? ' (done for today)' : ''}`);
     const top = catalog.mostPlayed(5);
     if (top.length > 0) console.log(`most played:    ${top.map((track) => `${track.title} ×${track.plays}`).join(', ')}`);
+    const followed = catalog.followed();
+    console.log(`following:      ${followed.length > 0 ? followed.map((artist) => `${artist.name}${artist.auto ? ' (from plays)' : ''}`).join(', ') : 'nobody yet (text "follow <artist>")'}`);
+    let problems: Array<{ message: string; since: string }> = [];
+    try {
+      problems = JSON.parse(catalog.getState('health.problems') || '[]');
+    } catch {
+      // nothing saved yet
+    }
+    console.log(`health:         ${problems.length === 0 ? 'nothing wrong that the bot knows of' : problems.map((p) => `${p.message} (since ${new Date(p.since).toLocaleString()})`).join('\n                ')}`);
   } else if (command === 'sync') {
     await jobs.sync();
   } else if (command === 'scan') {

@@ -1,6 +1,9 @@
 import type { AudioCheck } from './audio-check.ts';
 import type { ListedTrack } from './catalog.ts';
 import type { Browse, ListPage } from './library/browse.ts';
+import { categoryFor } from './library/category-list.ts';
+import type { Follows } from './library/follows.ts';
+import { seasonOn } from './library/seasons.ts';
 import { parseQuery, tokenize } from './query.ts';
 import { splitTitle } from './sources/titles.ts';
 import type { Chip, Incoming, Reply, Track } from './types.ts';
@@ -33,8 +36,10 @@ export interface BotDeps {
   source?: TrackSource;
   /** Hears about every song about to be sent, so the most played ones can be kept ready. */
   onPlay?: (track: Track) => void;
-  /** Lists to browse: "trending", "new", an artist's songs, and "more". */
+  /** Lists to browse: "trending", "new", an artist's songs, holidays, and "more". */
   browse?: Browse;
+  /** Artists you follow ("follow …", "unfollow …", "following"), and following for you after several plays. */
+  follows?: Follows;
   now?: () => Date;
 }
 
@@ -53,7 +58,8 @@ export const HELP_TEXT =
 /** The help when the lists are there too. */
 export const BROWSE_HELP_TEXT = [
   "Text me a song or an artist and I'll send you the music.",
-  'Also: "trending" or "new" for lists, "more" for the next ones, and "all" for every song on a list.',
+  'Also: "trending", "new", "chanukah", "purim", "wedding" or "vocal" for lists, "more" for the next ones, and "all" for every song on a list.',
+  '"follow <artist>" sends their new songs as soon as they\'re out.',
   'Reply with a number or 👍 a song to pick it.',
 ].join('\n');
 
@@ -159,15 +165,23 @@ export function createBot(deps: BotDeps): Bot {
   const now = deps.now ?? (() => new Date());
 
   /** One page of a list: the heading, ten numbered songs, and how to go on. Numbers run on across pages. */
-  function showList(page: ListPage, heading: string, empty: string): Reply[] {
+  async function showList(page: ListPage, heading: string, empty: string): Promise<Reply[]> {
     const browse = deps.browse!;
-    const fetch = (limit: number, offset: number): ListedTrack[] =>
+    const fetch = async (limit: number, offset: number): Promise<ListedTrack[]> =>
       page.kind === 'trending'
         ? browse.trending(limit, offset)
         : page.kind === 'new'
           ? browse.newest(limit, offset)
-          : browse.artistSongs(page.artistId ?? -1, limit, offset);
-    const got = fetch(LIST_SIZE + 1, page.shown);
+          : page.kind === 'category'
+            ? ((await browse.category?.(page.category ?? '', limit, offset)) ?? [])
+            : browse.artistSongs(page.artistId ?? -1, limit, offset);
+    let got: ListedTrack[];
+    try {
+      got = await fetch(LIST_SIZE + 1, page.shown);
+    } catch (err) {
+      if (err instanceof SourceError) return [say(`I couldn't get that list from music-table.com: ${err.message}.`)];
+      throw err;
+    }
     if (got.length === 0) {
       browse.setPage(undefined);
       return [say(page.shown === 0 ? empty : "That's all of them.")];
@@ -189,7 +203,7 @@ export function createBot(deps: BotDeps): Bot {
       }
       return `${n}. ${name}${when ? ` · ${when}` : ''}`;
     };
-    const shownSoFar = [...fetch(page.shown, 0), ...songs];
+    const shownSoFar = [...(page.shown > 0 ? await fetch(page.shown, 0) : []), ...songs];
     // Picking an album lists its songs; picking a song sends it.
     const pick = (track: ListedTrack): string => (track.album && track.post ? `post:${track.post}` : `play:${track.id}`);
     return listReplies(
@@ -243,13 +257,24 @@ export function createBot(deps: BotDeps): Bot {
     ];
   }
 
-  /** "trending", "new", "more" or an artist's name, when the lists are there. */
-  function browseFor(tokens: string[]): Reply[] | undefined {
+  /** "trending", "new", a holiday, "more" or an artist's name, when the lists are there. */
+  async function browseFor(tokens: string[]): Promise<Reply[] | undefined> {
     const browse = deps.browse;
     if (!browse) return undefined;
     const phrase = tokens.join(' ');
-    if (TRENDING.has(phrase)) return showList({ kind: 'trending', shown: 0 }, '🔥 Trending on music-table.com', 'Nothing is trending yet: the catalog is still being filled. Try again in a few minutes.');
-    if (NEWEST.has(phrase)) return showList({ kind: 'new', shown: 0 }, '🆕 New on music-table.com', 'No new songs yet: the catalog is still being filled. Try again in a few minutes.');
+    // In a season with its own music, the general lists point to it.
+    const season = seasonOn(now());
+    const withSeason = (heading: string) => (season ? `${heading}\n${season.hint}` : heading);
+    if (TRENDING.has(phrase)) return showList({ kind: 'trending', shown: 0 }, withSeason('🔥 Trending on music-table.com'), 'Nothing is trending yet: the catalog is still being filled. Try again in a few minutes.');
+    if (NEWEST.has(phrase)) return showList({ kind: 'new', shown: 0 }, withSeason('🆕 New on music-table.com'), 'No new songs yet: the catalog is still being filled. Try again in a few minutes.');
+    const category = browse.category ? categoryFor(phrase) : undefined;
+    if (category) {
+      return showList(
+        { kind: 'category', category: category.slug, shown: 0 },
+        `${category.emoji} ${category.name} · most popular first`,
+        `I couldn't find ${category.name} songs on music-table.com right now.`,
+      );
+    }
     if (MORE.has(phrase)) {
       const page = browse.page();
       if (!page) return [say('Text me "trending", "new" or an artist first; then "more" shows the next ones.')];
@@ -258,8 +283,36 @@ export function createBot(deps: BotDeps): Bot {
     return undefined;
   }
 
+  /** "follow …", "unfollow …" and "following". */
+  function followFor(tokens: string[]): Reply[] | undefined {
+    const follows = deps.follows;
+    if (!follows) return undefined;
+    const [first, second] = tokens;
+    const unfollowing = first === 'unfollow' || (first === 'stop' && second === 'following');
+    if (first === 'follow' || unfollowing) {
+      const who = tokens.slice(unfollowing && first === 'stop' ? 2 : 1);
+      if (who.length === 0) return [say(`Text "${unfollowing ? 'unfollow' : 'follow'}" and an artist's name, like "${unfollowing ? 'unfollow' : 'follow'} yoely weiss".`)];
+      if (unfollowing) {
+        const result = follows.unfollow(who);
+        if (!result) return [say(`I don't know an artist called "${who.join(' ')}".`)];
+        return [say(result.was ? `Stopped following ${result.artist.name}.` : `You weren't following ${result.artist.name}; I won't start on my own.`)];
+      }
+      const artist = follows.follow(who);
+      if (!artist) return [say(`I don't know an artist called "${who.join(' ')}". Try their full name as the site writes it.`)];
+      return [say(`🔔 Following ${artist.name}. Their new songs will come to you as soon as they're out.`)];
+    }
+    const phrase = tokens.join(' ');
+    if (['following', 'who do i follow', 'my artists', 'followed', 'follows'].includes(phrase)) {
+      const list = follows.list();
+      if (list.length === 0) return [say('You don\'t follow anyone yet. Text "follow" and an artist\'s name, like "follow yoely weiss".')];
+      const names = list.map((artist) => `${artist.name}${artist.auto ? ' (from your plays)' : ''}`);
+      return [say(`🔔 You follow: ${names.join(', ')}.\nText "unfollow" and a name to stop.`)];
+    }
+    return undefined;
+  }
+
   /** An artist's songs, when the words are just an artist's name. */
-  function artistList(tokens: string[]): Reply[] | undefined {
+  function artistList(tokens: string[]): Promise<Reply[]> | undefined {
     const artist = deps.browse?.artist(tokens);
     if (!artist) return undefined;
     const releases = deps.browse!.artistReleases(artist.id);
@@ -276,10 +329,21 @@ export function createBot(deps: BotDeps): Bot {
       // counting plays must never stop a song
     }
     // Two messages: the cover with the song's name on it, then the song. Without a cover, the name as text.
-    return [
+    const replies: Reply[] = [
       track.cover ? { kind: 'image', url: track.cover, caption: { title: track.title, artist: track.artist } } : say(`🎵 ${describe(track)}`),
       { kind: 'audio', url: track.url, title: describe(track) },
     ];
+    let followed: string[] = [];
+    try {
+      followed = deps.follows?.afterPlay(track) ?? [];
+    } catch {
+      // following is a nicety; the song still goes
+    }
+    if (followed.length > 0) {
+      const names = followed.join(' and ');
+      replies.push(say(`🔔 You've had a few songs by ${names}, so I'll send you their new ones as soon as they're out. (Text "unfollow ${followed[0]!.toLowerCase()}" to stop.)`));
+    }
+    return replies;
   }
 
   return {
@@ -318,7 +382,9 @@ export function createBot(deps: BotDeps): Bot {
       if (ALL_WORDS.has(tokens.join(' '))) {
         return [say(`Text me ${deps.browse ? '"trending", "new", an artist or ' : ''}a song first; then "all" sends every song on the list.`)];
       }
-      const listed = browseFor(tokens);
+      const following = followFor(tokens);
+      if (following) return following;
+      const listed = await browseFor(tokens);
       if (listed) return listed;
 
       const local = deps.catalog.search(raw, MAX_CHOICES);

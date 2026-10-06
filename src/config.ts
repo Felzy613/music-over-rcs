@@ -93,8 +93,10 @@ interface ChatSettings {
   maxDownloadMb: number;
   /** When the daily new-music message goes out (this Mac's time). Undefined when DIGEST_TIME=off. */
   digestAt: DailyTime | undefined;
-  /** How much disk the songs kept ready may use, in MB. 0 turns keeping songs ready off. */
+  /** How much disk the songs kept ready may use, in MB: Infinity (the default) for no limit, 0 for none kept. */
   prefetchMb: number;
+  /** No alerts for new songs by artists you follow in these hours. Undefined when QUIET_HOURS=off. */
+  quiet: { from: DailyTime; to: DailyTime } | undefined;
 }
 
 function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: string[]): ChatSettings {
@@ -108,17 +110,44 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   }
   const digestAt = parseDailyTime(env.DIGEST_TIME);
   if (digestAt instanceof Error) problems.push(digestAt.message);
-  const prefetchMb = Number(env.PREFETCH_MB?.trim() || 400);
-  if (!(Number.isFinite(prefetchMb) && prefetchMb >= 0 && prefetchMb <= 20_000)) {
-    problems.push(`PREFETCH_MB must be a number from 0 (off) to 20000 (got "${env.PREFETCH_MB}")`);
-  }
+  const prefetchMb = parsePrefetchMb(env.PREFETCH_MB);
+  if (prefetchMb instanceof Error) problems.push(prefetchMb.message);
+  const quiet = parseQuietHours(env.QUIET_HOURS);
+  if (quiet instanceof Error) problems.push(quiet.message);
   return {
     pollMs,
     maxDownloadMb,
     dbPath: env.CATALOG_DB?.trim() || 'data/catalog.db',
     digestAt: digestAt instanceof Error ? undefined : digestAt,
-    prefetchMb,
+    prefetchMb: prefetchMb instanceof Error ? 0 : prefetchMb,
+    quiet: quiet instanceof Error ? undefined : quiet,
   };
+}
+
+/**
+ * Disk space for songs kept ready, in MB. No limit unless one is set (every song you get stays); "unlimited" says
+ * the same. 0 or "off" keeps none.
+ */
+export function parsePrefetchMb(raw: string | undefined): number | Error {
+  const text = raw?.trim().toLowerCase() || 'unlimited';
+  if (text === 'unlimited') return Number.POSITIVE_INFINITY;
+  if (text === 'off') return 0;
+  const mb = Number(text);
+  if (!(Number.isFinite(mb) && mb >= 0)) return new Error(`PREFETCH_MB must be "unlimited" (the default), a number of MB, or 0 for none (got "${raw}")`);
+  return mb;
+}
+
+/** Reads "22:00-07:00" (24-hour, may cross midnight); "off" for none. */
+export function parseQuietHours(raw: string | undefined, fallback = '22:00-07:00'): { from: DailyTime; to: DailyTime } | undefined | Error {
+  const text = (raw?.trim() || fallback).toLowerCase();
+  if (/^(off|false|no|0|none)$/.test(text)) return undefined;
+  const [from, to] = text.split(/\s*-\s*/);
+  const start = parseDailyTime(from, 'x');
+  const end = parseDailyTime(to, 'x');
+  if (!from || !to || start instanceof Error || end instanceof Error || !start || !end) {
+    return new Error(`QUIET_HOURS must look like 22:00-07:00 or be "off" (got "${raw}")`);
+  }
+  return { from: start, to: end };
 }
 
 export interface BeeperConfig extends ChatSettings {
@@ -145,6 +174,8 @@ export function loadBeeperConfig(env: NodeJS.ProcessEnv = process.env, options: 
 }
 
 export interface MatrixConfig extends ChatSettings {
+  /** The bridge's own address, for checking that Google Messages is still logged in. */
+  bridgeUrl: string;
   homeserver: string;
   token: string;
   /** Empty when loaded with `room: false` (scripts that don't watch one room). */
@@ -163,7 +194,9 @@ export function loadMatrixConfig(env: NodeJS.ProcessEnv = process.env, options: 
   const homeserver = (env.MATRIX_HOMESERVER?.trim() || DEFAULT_HOMESERVER).replace(/\/+$/, '');
   checkUrl('MATRIX_HOMESERVER', homeserver, problems);
   const settings = readChatSettings(env, 'MATRIX_POLL_MS', problems);
+  const bridgeUrl = (env.BRIDGE_URL?.trim() || 'http://127.0.0.1:29336').replace(/\/+$/, '');
+  checkUrl('BRIDGE_URL', bridgeUrl, problems);
 
   throwIfAny(problems);
-  return { homeserver, token, roomID, ...settings };
+  return { homeserver, token, roomID, bridgeUrl, ...settings };
 }

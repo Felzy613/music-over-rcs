@@ -8,7 +8,7 @@ Everything runs locally and listens on `127.0.0.1` only: the homeserver, the bri
 | --- | --- | --- |
 | `~/Library/Application Support/music-over-rcs/gmessages/` | The bridge's config, its database and your **Google Messages session**, and every bridged conversation's metadata | **High**: the session is as good as a login |
 | `.../synapse/` | The homeserver's database: **copies of the messages in every bridged chat**, your account, signing key | **High** |
-| `.../catalog.db` | Songs, artists, site posts, your plays, the bot's state | Low (your listening history) |
+| `.../catalog.db` | Songs, artists, site posts, your plays, the artists you follow, the bot's state | Low (your listening history) |
 | `.../audio-cache/` | Downloaded songs | Low |
 | `.../logs/` | Service logs | Medium (room ids, and the text of your requests) |
 | `.env` (project folder) | Your Matrix access token, room id, settings | **High**; readable only by you |
@@ -18,8 +18,8 @@ Keep the services folder private, and don't expose the homeserver's port to the 
 ## What leaves your Mac
 
 - **To Google, through the bridge:** your Google Messages session, and the bot's replies, which go out over RCS as messages from you to yourself.
-- **To music-table.com:** your search words, the posts it reads, and download requests, from your IP address with a User-Agent naming this project. It never sends anything about you beyond that.
-- **Nothing else.** No analytics, no third-party services.
+- **To music-table.com:** your search words, the posts and category pages it reads, the RSS feed, and download requests, from your IP address with a User-Agent naming this project. It never sends anything about you beyond that, and who you follow stays on your Mac.
+- **Nothing else.** No analytics, no third-party services. The health check of your Google Messages login asks the bridge on your Mac (`127.0.0.1`) with your Matrix token, and the notifications are shown by macOS on your Mac.
 
 ## Secrets and this repository
 

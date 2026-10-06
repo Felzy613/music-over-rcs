@@ -99,6 +99,8 @@ export interface RunnerOptions {
   maxSendsPerMinute?: number;
   now?: () => number;
   log?: (line: string) => void;
+  /** Told after each poll whether the chat answered, and how many times in a row it hasn't. */
+  onPoll?: (ok: boolean, failuresInARow: number, error?: string) => void;
 }
 
 export interface Runner {
@@ -385,6 +387,7 @@ export function createRunner(options: RunnerOptions): Runner {
       try {
         const messages = await chat.listMessages(chatID);
         failures = 0;
+        options.onPoll?.(true, 0);
         for (const message of messages) {
           if (seen.has(message.id)) continue;
           remember(message.id);
@@ -402,6 +405,7 @@ export function createRunner(options: RunnerOptions): Runner {
       } catch (err) {
         failures++;
         log(`poll failed (${failures} in a row): ${errorText(err)}`);
+        options.onPoll?.(false, failures, errorText(err));
       } finally {
         current = undefined;
       }

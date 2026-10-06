@@ -25,6 +25,10 @@ export interface MockPost {
   category?: string;
   /** The id of its picture on the image host. */
   coverId?: string;
+  /** The site's category ids it's in (24 hex digits each); "cat1" style ids are left out of the API. */
+  categoryIds?: string[];
+  /** The category pages that list it, by slug ("chanukah"). */
+  categoryPages?: string[];
 }
 
 export interface MockMusicTable extends Listening {
@@ -117,7 +121,7 @@ export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicT
       id: idOf(post),
       title: post.title,
       slug: post.slug,
-      categoryIds: ['cat1'],
+      categoryIds: post.categoryIds ?? ['cat1'],
       ...(post.views !== undefined ? { viewCount: post.views } : {}),
       ...(post.publishedAt ? { firstPublishedDate: post.publishedAt } : {}),
       ...(post.coverId ? { coverImage: { src: { id: post.coverId, width: 1280, height: 720 } } } : {}),
@@ -224,7 +228,19 @@ export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicT
       const offset = Number(url.searchParams.get('offset') ?? 0);
       const size = Number(url.searchParams.get('size') ?? 20);
       const content = url.searchParams.get('fieldsets') === 'content';
-      json(200, posts.filter((post) => !post.gone).slice(offset, offset + size).map((post) => postJson(post, content)));
+      const only = url.searchParams.get('categoryIds');
+      const listed = posts.filter((post) => !post.gone && (!only || (post.categoryIds ?? []).includes(only)));
+      json(200, listed.slice(offset, offset + size).map((post) => postJson(post, content)));
+    } else if (url.pathname.startsWith('/new-music/categories/')) {
+      const slug = url.pathname.split('/').pop() ?? '';
+      const inIt = posts.filter((post) => post.categoryPages?.includes(slug));
+      if (inIt.length === 0) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<html><body>${inIt.map((post) => `<a href="${base}/post/${post.slug}">${esc(post.title)}</a>`).join('')}</body></html>`);
     } else if (mine('/blog-feed.xml')) {
       state.feedReads += 1;
       const items = posts

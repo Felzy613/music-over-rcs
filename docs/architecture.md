@@ -28,9 +28,10 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
 ## Code layout
 
 ```text
-src/bot.ts              what to answer: songs, lists, choices, albums
+src/bot.ts              what to answer: songs, lists, choices, albums, follow / unfollow
 src/runner.ts           watches one chat and answers it; numbers, 👍, typing, announcements, safety limits
-src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, state
+src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, follows, state
+src/health.ts           Mac notifications when something breaks; the bridge's login status
 src/artists.ts          splits "A, B & C Ft. D" into artists
 src/query.ts            words of a request ("play", "send me", "by" dropped)
 src/audio-check.ts      checks a link: reachable, audio, within the size limit
@@ -39,7 +40,11 @@ src/image-fetch.ts      downloads album art (with a small memory)
 src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies
 src/library/images.ts   a song's card (cover + name) and the daily collage (numbered covers)
 src/sources/            music-table.com: the client, the lookup, relevance and spelling
-src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs
+src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs, and:
+  categories.ts         holiday and other category lists (learning the site's category ids)
+  category-list.ts      which categories, and the words that ask for them
+  follows.ts            following artists, and following them for you after three of their songs
+  seasons.ts            Chanukah, Purim, Sefirah and the Three Weeks, from the Jewish calendar
 src/matrix/             Matrix client, and joining a pasted multi-line command for the console
 src/beeper/             Beeper Desktop API client
 src/rbm/                RCS for Business client, auth and webhook verification
@@ -61,15 +66,18 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 | --- | --- |
 | `tracks` (+ `tracks_fts`) | Songs: title, artist credit, URL (unique), album art, source post, release date. Full-text search over title and artist. |
 | `artists`, `artist_tracks` | Artists split out of credits, and which songs each is on |
-| `site_posts` | music-table.com posts: title, category, publish date, views, picture, number of MP3s, when first seen, when announced |
+| `site_posts` | music-table.com posts: title, category, the site's category ids, publish date, views, picture, number of MP3s, when first seen, when in a daily message, when in an alert |
 | `plays` | Every song sent, with its time |
+| `follows` | Artists you follow (or unfollowed, so they're never followed for you again), whether by your choice or from your plays, and since when |
 | `audio_cache` | Songs kept on disk: file, type, size, last used |
 | `message_links` | Messages that stand for one song (for 👍), kept a month |
 | `state` | Small facts: last sync, scan progress, the daily message's date, the current list and its numbers |
 
 ## Background jobs
 
-`LibraryJobs` runs inside the bot, checking once a minute, one thing at a time: the sync every three hours, songs kept ready (after each sync and when the bot starts), the daily message when it's due, and the one-time scan of the whole site, a few pages per round. Its state lives in the catalog, so a restart picks up where it was.
+`LibraryJobs` runs inside the bot, checking once a minute, one thing at a time: the sync every three hours, songs kept ready (after each sync and when the bot starts), a look at the RSS feed every 15 minutes while you follow anyone (a sync when it shows something new), the daily message when it's due, alerts for new songs by artists you follow (outside the quiet hours), and the one-time scan of the whole site, a few pages per round. Its state lives in the catalog, so a restart picks up where it was.
+
+`Health` collects problems and shows them as Mac notifications (`osascript`), once when they start, every six hours while they last, and when they're fixed. It's told about them by the runner (the homeserver, or Beeper, not answering), the jobs (the site failing twice in a row) and `BridgeWatch`, which asks the bridge's provisioning API every five minutes how the Google Messages login is doing.
 
 ## Safety rails
 
@@ -86,7 +94,7 @@ npm test
 npm run typecheck
 ```
 
-`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list, feed, files, download links), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a Mac asleep at 09:00, retries).
+`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list by category, category pages, feed, files, download links), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a Mac asleep at 09:00, retries, quiet hours), and the seasons are checked against real dates.
 
 ## Extending
 

@@ -1,10 +1,12 @@
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import { describe } from '../bot.ts';
 import type { Catalog } from '../catalog.ts';
-import type { MusicTable } from '../sources/music-table.ts';
+import type { FeedItem, MusicTable } from '../sources/music-table.ts';
 import type { Reply } from '../types.ts';
 import { prefetch, songsToKeep, type AudioCache } from './audio-cache.ts';
+import type { Categories } from './categories.ts';
 import { buildDigest, type DigestItem } from './digest.ts';
+import { seasonOn } from './seasons.ts';
 import { syncSite, type SyncResult } from './sync.ts';
 
 export interface DailyTime {
@@ -31,6 +33,14 @@ export interface LibraryJobsOptions {
   /** Pause between two songs being got ready. */
   prefetchPauseMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Category ids (for marking vocal songs in the daily message during Sefirah and the Three Weeks). */
+  categories?: Categories | undefined;
+  /** No "new from an artist you follow" alerts in these hours (they wait for the morning). */
+  quiet?: { from: DailyTime; to: DailyTime } | undefined;
+  /** How often to look for new posts while you follow anyone: the RSS feed, one small request. */
+  watchEveryMs?: number;
+  /** Told whether the site answers, so a lasting problem can be shown on the Mac. */
+  onSite?: (ok: boolean, problem?: string) => void;
 }
 
 const HOUR_MS = 60 * 60_000;
@@ -72,6 +82,8 @@ export class LibraryJobs {
   #stopped = false;
   /** Whether this run of the bot has filled the kept-ready folder yet (it does on its first round, sync due or not). */
   #keptReady = false;
+  #lastWatch = 0;
+  #siteFailures = 0;
 
   constructor(options: LibraryJobsOptions) {
     this.#o = options;
@@ -111,7 +123,9 @@ export class LibraryJobs {
     try {
       if (this.#syncDue()) await this.refresh();
       else if (!this.#keptReady && this.#o.cache) await this.keepReady();
+      else await this.#watch();
       if (this.#digestDue()) await this.sendDigest();
+      await this.alertFollowed();
       if (!this.#o.catalog.getState(STATE.scanDone)) await this.scanStep();
     } catch (err) {
       this.#log(`background work failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -124,19 +138,94 @@ export class LibraryJobs {
     if (result && this.#o.cache) await this.keepReady();
   }
 
-  async sync(): Promise<SyncResult | undefined> {
+  async sync(feedItems?: FeedItem[]): Promise<SyncResult | undefined> {
     const { catalog, musicTable } = this.#o;
     try {
-      const result = await syncSite({ musicTable, catalog, now: this.#now });
+      const result = await syncSite({ musicTable, catalog, now: this.#now, ...(feedItems ? { feedItems } : {}) });
       catalog.setState(STATE.lastSync, this.#now().toISOString());
       this.#log(`synced with music-table.com: ${result.seen} recent posts, ${result.fresh.length} new, ${result.songs} songs in the catalog from them`);
+      this.#siteFailures = 0;
+      this.#o.onSite?.(true);
       return result;
     } catch (err) {
       // Try again in an hour rather than at the next check.
       catalog.setState(STATE.lastSync, new Date(this.#now().getTime() - (this.#o.syncEveryMs ?? 3 * HOUR_MS) + HOUR_MS).toISOString());
-      this.#log(`could not sync with music-table.com: ${err instanceof Error ? err.message : String(err)}`);
+      const why = err instanceof Error ? err.message : String(err);
+      this.#log(`could not sync with music-table.com: ${why}`);
+      // Once can be a blip; twice in a row is worth saying.
+      this.#siteFailures += 1;
+      if (this.#siteFailures >= 2) this.#o.onSite?.(false, `music-table.com isn't answering the bot (${why}). Songs it already has still work.`);
       return undefined;
     }
+  }
+
+  /**
+   * While you follow anyone: a look at the site's RSS feed every few minutes (one small request), and a sync when it
+   * shows a post the catalog doesn't have, so new songs by the artists you follow come quickly.
+   */
+  async #watch(): Promise<void> {
+    if (this.#o.catalog.followed().length === 0) return;
+    const now = this.#now().getTime();
+    if (now - this.#lastWatch < (this.#o.watchEveryMs ?? 15 * 60_000)) return;
+    this.#lastWatch = now;
+    try {
+      const feed = await this.#o.musicTable.feed();
+      if (feed.some((item) => !this.#o.catalog.sitePost(item.slug))) await this.sync(feed);
+    } catch {
+      // the regular sync will catch up
+    }
+  }
+
+  /**
+   * New posts by artists you follow, sent on their own: the song's card and a line (a 👍 or its number gets it).
+   * Nothing in the quiet hours; those wait for the next round after them.
+   */
+  async alertFollowed(): Promise<number> {
+    const { catalog } = this.#o;
+    const now = this.#now();
+    if (this.#inQuietHours(now)) return 0;
+    const posts = catalog.postsToAlert(new Date(now.getTime() - 2 * 24 * HOUR_MS));
+    if (posts.length === 0) return 0;
+    const replies: Reply[] = [];
+    const chips: Array<{ label: string; postback: string }> = [];
+    posts.forEach((post, i) => {
+      const song = catalog.postTracks(post.slug)[0];
+      if (!song) return;
+      const album = post.audioFiles > 1;
+      const postback = album ? `post:${post.slug}` : `play:${song.id}`;
+      const n = chips.length + 1;
+      const what = album ? `${post.title} · album, ${post.audioFiles} songs` : describe(song);
+      if (song.cover ?? post.cover) {
+        replies.push({ kind: 'image', url: (song.cover ?? post.cover)!, caption: { title: album ? post.title : song.title, artist: album ? '' : song.artist }, postback });
+      }
+      replies.push({ kind: 'text', text: `🔔 ${posts.length > 1 ? `${n}. ` : ''}New from ${post.artists.join(' & ')}: ${what}`, postback });
+      chips.push({ label: `${n}. ${song.title}`.slice(0, 25), postback });
+    });
+    if (chips.length === 0) return 0;
+    replies.push({
+      kind: 'text',
+      text: chips.length === 1 ? 'Reply 1 or 👍 it to get it.' : 'Reply with a number or 👍 one to get it.',
+      chips,
+      chipsValidMs: 24 * HOUR_MS,
+    });
+    try {
+      await this.#o.announce(replies);
+    } catch (err) {
+      this.#log(`could not send the new-song alert: ${err instanceof Error ? err.message : String(err)}`);
+      return 0;
+    }
+    catalog.markAlerted(posts.map((post) => post.slug), now);
+    this.#log(`alerted ${posts.length} new post${posts.length === 1 ? '' : 's'} by artists you follow`);
+    return posts.length;
+  }
+
+  #inQuietHours(now: Date): boolean {
+    const quiet = this.#o.quiet;
+    if (!quiet) return false;
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    const from = quiet.from.hour * 60 + quiet.from.minute;
+    const to = quiet.to.hour * 60 + quiet.to.minute;
+    return from <= to ? minutes >= from && minutes < to : minutes >= from || minutes < to;
   }
 
   /**
@@ -249,7 +338,11 @@ export class LibraryJobs {
       const song = catalog.byUrl(musicTable.trackUrl(post, 0));
       if (song) items.push({ post, song });
     }
-    return { replies: buildDigest(items, { date: now }), slugs: items.map((item) => item.post.slug) };
+    // The time of year: a pointer to its list, and (in Sefirah and the Three Weeks) vocal songs first.
+    const season = seasonOn(now);
+    const vocalId = season?.category === 'vocal' ? this.#o.categories?.knownId('vocal') : undefined;
+    const vocal = vocalId ? (item: DigestItem) => item.post.categoryIds?.includes(vocalId) ?? false : undefined;
+    return { replies: buildDigest(items, { date: now, seasonHint: season?.hint, vocal }), slugs: items.map((item) => item.post.slug) };
   }
 
   #syncDue(): boolean {

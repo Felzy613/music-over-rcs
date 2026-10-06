@@ -78,6 +78,8 @@ export interface Post {
   views?: number | undefined;
   /** ISO time it was first published. */
   publishedAt?: string | undefined;
+  /** The site's categories it's in (ids; names come from the feed and the category pages). */
+  categoryIds?: string[] | undefined;
 }
 
 /** One entry of the site's RSS feed: the newest posts, with the category names the API doesn't give. */
@@ -90,7 +92,7 @@ export interface FeedItem {
 
 /** One thing the client did (or skipped, because it already knew), for the simulator's "behind the scenes" view. */
 export interface SiteEvent {
-  kind: 'token' | 'search' | 'post' | 'link' | 'list' | 'feed';
+  kind: 'token' | 'search' | 'post' | 'link' | 'list' | 'feed' | 'category';
   /** What it was about: the words searched for, or the post. */
   detail: string;
   ms: number;
@@ -191,6 +193,7 @@ function parsePost(body: unknown, slug: string, origin: string): Post {
     coverImage?: { src?: { id?: unknown } | null };
     viewCount?: unknown;
     firstPublishedDate?: unknown;
+    categoryIds?: unknown;
   };
   if (typeof raw.id !== 'string' || !raw.id) throw new MusicTableError("music-table.com sent a post I couldn't read");
   const files: AudioFile[] = [];
@@ -223,6 +226,7 @@ function parsePost(body: unknown, slug: string, origin: string): Post {
     ...(cover ? { cover } : {}),
     ...(Number.isFinite(views) && views >= 0 ? { views } : {}),
     ...(published && !Number.isNaN(published.getTime()) ? { publishedAt: published.toISOString() } : {}),
+    ...(Array.isArray(raw.categoryIds) ? { categoryIds: raw.categoryIds.filter((id): id is string => typeof id === 'string' && /^[0-9a-f]{24}$/.test(id)) } : {}),
   };
 }
 
@@ -572,9 +576,10 @@ export class MusicTable {
    * The newest posts, `size` at a time from `offset`, each read in full (files, picture, views) in the same request.
    * This is how the catalog is kept up to date. Posts read this way are remembered like any other.
    */
-  async listPosts(offset = 0, size = 20): Promise<Post[]> {
+  async listPosts(offset = 0, size = 20, categoryId?: string): Promise<Post[]> {
     const started = this.#now();
-    const res = await this.#api(`${LIST_PATH}?offset=${Math.max(0, Math.floor(offset))}&size=${Math.min(50, Math.max(1, Math.floor(size)))}&fieldsets=content`);
+    const only = categoryId && /^[0-9a-f]{24}$/.test(categoryId) ? `&categoryIds=${categoryId}` : '';
+    const res = await this.#api(`${LIST_PATH}?offset=${Math.max(0, Math.floor(offset))}&size=${Math.min(50, Math.max(1, Math.floor(size)))}&fieldsets=content${only}`);
     if (!res.ok) {
       await res.body?.cancel().catch(() => {});
       throw new MusicTableError(`music-table.com's post list answered HTTP ${res.status}`);
@@ -601,6 +606,25 @@ export class MusicTable {
     const withMusic = posts.filter((post) => post.files.length > 0).length;
     this.#emit({ kind: 'list', detail: `${posts.length} posts`, ms: this.#now() - started, cached: false, status: res.status, note: `${withMusic} with MP3s` });
     return posts;
+  }
+
+  /**
+   * The posts a category's page shows (its newest two dozen), by their addresses. Only used to learn which id the
+   * site gives a category, once; the post list does the rest.
+   */
+  async categoryPageSlugs(slug: string): Promise<string[]> {
+    if (!/^[a-z0-9-]+$/.test(slug)) throw new MusicTableError("that isn't a category on music-table.com");
+    const started = this.#now();
+    const res = await this.#send(`${this.baseUrl}/new-music/categories/${slug}`, { headers: { accept: 'text/html' } });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      // No such category on the site (now): an empty list, not trouble.
+      if (res.status === 404) return [];
+      throw new MusicTableError(`music-table.com's ${slug} page answered HTTP ${res.status}`);
+    }
+    const slugs = [...new Set((await res.text()).match(/\/post\/[a-z0-9-]+/g) ?? [])].map((path) => path.slice('/post/'.length));
+    this.#emit({ kind: 'category', detail: slug, ms: this.#now() - started, cached: false, status: res.status, note: `${slugs.length} posts` });
+    return slugs;
   }
 
   /** The site's RSS feed: its newest posts, with category names ("Singles", "Videos"…). */
