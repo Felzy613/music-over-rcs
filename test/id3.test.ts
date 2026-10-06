@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { Catalog } from '../src/catalog.ts';
 import { AudioCache } from '../src/library/audio-cache.ts';
-import { hasCover, isMp3, readTextTags, writeTags, type SongTags } from '../src/library/id3.ts';
-import { nameSong, songTags } from '../src/library/naming.ts';
+import { audioTypeOf, hasCover, isMp3, readTextTags, writeTags, type SongTags } from '../src/library/id3.ts';
+import { extensionOf, nameSong, songTags } from '../src/library/naming.ts';
 
 const bytes = (text: string) => Uint8Array.from(text, (char) => char.charCodeAt(0));
 const concat = (...parts: Uint8Array[]) => {
@@ -34,6 +34,8 @@ const pictureFrame = (major: number) => frame('APIC', concat(Uint8Array.of(major
 /** A few MPEG audio frames' worth of bytes: what must come through untouched. */
 const AUDIO = concat(Uint8Array.of(0xff, 0xfb, 0x90, 0x64), Uint8Array.from({ length: 400 }, (_, i) => i % 251));
 const ID3V1 = concat(bytes('TAG'), new Uint8Array(125).fill(0x41));
+/** The start of an M4A (an MP4 "ftyp" box): what the site sometimes serves as an MP3. */
+const M4A = concat(Uint8Array.of(0, 0, 0, 0x1c), bytes('ftypM4A \0\0\0\0M4A isommp42'), new Uint8Array(64));
 
 const TAGS: SongTags = { title: 'Derech (feat. Zusha)', artist: 'Ishay Ribo', albumArtist: 'Ishay Ribo', album: 'Derech (feat. Zusha) - Single', track: '1/1', year: '2026' };
 const endsWith = (data: Uint8Array, tail: Uint8Array) => Buffer.from(data.subarray(data.length - tail.length)).equals(Buffer.from(tail));
@@ -77,6 +79,15 @@ describe('id3: the tags inside an MP3', () => {
     assert.equal(writeTags(concat(Uint8Array.of(0, 0, 0, 0x20), bytes('ftypM4A ')), TAGS), undefined);
     assert.equal(writeTags(Uint8Array.of(0xff, 0xf1, 0x50, 0x80, 0, 0), TAGS), undefined, 'AAC shares the sync bits');
     assert.equal(writeTags(bytes('<!doctype html>'), TAGS), undefined);
+  });
+
+  test("a song file's real type is told from its first bytes", () => {
+    assert.equal(audioTypeOf(concat(tag(3, textFrame('TIT2', 'x')), AUDIO)), 'audio/mpeg');
+    assert.equal(audioTypeOf(M4A), 'audio/mp4');
+    assert.equal(audioTypeOf(bytes('OggS\0\u0002')), 'audio/ogg');
+    assert.equal(audioTypeOf(bytes('fLaC\0\0')), 'audio/flac');
+    assert.equal(audioTypeOf(bytes('RIFF\0\0\0\0WAVEfmt ')), 'audio/wav');
+    assert.equal(audioTypeOf(bytes('<!doctype html>')), undefined);
   });
 
   test('the tags match the folders: a single is its own album, an album song carries its number', () => {
@@ -150,5 +161,31 @@ describe('id3: kept songs are tagged', () => {
     assert.equal((await kept.organize()).tagged, 1);
     assert.equal(readTextTags(new Uint8Array(await readFile(join(dir, 'One.mp3')))).TIT2, 'Derech');
     assert.deepEqual(covers.length, 1, 'its cover was already there');
+  });
+
+  test('a song the site calls an MP3 that is really an M4A is kept, named and sent as an M4A, untouched', async () => {
+    const placeOf = (_url: string, audio: { fileName: string; mimeType: string }) => `Shulem Lemmer/Singles/Mama Rachel Medley${extensionOf(audio)}`;
+    const kept = new AudioCache({ dir, index: catalog, placeOf, tagsOf: () => TAGS });
+    const sent = await kept.put('https://x.test/1', { ...mp3(M4A), fileName: 'Shulem Lemmer — Mama Rachel Medley.mp3' });
+    assert.equal(sent.mimeType, 'audio/mp4');
+    assert.equal(sent.fileName, 'Shulem Lemmer — Mama Rachel Medley.m4a');
+    assert.deepEqual(await readdir(join(dir, 'Shulem Lemmer', 'Singles')), ['Mama Rachel Medley.m4a']);
+    assert.deepEqual(new Uint8Array(await readFile(join(dir, 'Shulem Lemmer', 'Singles', 'Mama Rachel Medley.m4a'))), M4A, 'not a byte changed');
+    assert.equal(catalog.cachedAudio('https://x.test/1')?.mimeType, 'audio/mp4');
+  });
+
+  test('one kept before as an MP3 is renamed to what it is', async () => {
+    const placeOf = (_url: string, audio: { fileName: string; mimeType: string }) => `Shulem Lemmer/Singles/Mama Rachel Medley${extensionOf(audio)}`;
+    await mkdir(join(dir, 'Shulem Lemmer', 'Singles'), { recursive: true });
+    await writeFile(join(dir, 'Shulem Lemmer', 'Singles', 'Mama Rachel Medley.mp3'), M4A);
+    const at = new Date().toISOString();
+    catalog.saveCachedAudio({ url: 'https://x.test/1', file: 'Shulem Lemmer/Singles/Mama Rachel Medley.mp3', fileName: 'Mama Rachel Medley.mp3', mimeType: 'audio/mpeg', bytes: M4A.length, fetchedAt: at, usedAt: at });
+    const kept = new AudioCache({ dir, index: catalog, placeOf, tagsOf: () => TAGS });
+    assert.deepEqual(await kept.organize(), { state: undefined, moved: 0, sorted: 1, tagged: 0, failed: 0 });
+    assert.deepEqual(await readdir(join(dir, 'Shulem Lemmer', 'Singles')), ['Mama Rachel Medley.m4a']);
+    const back = await kept.get('https://x.test/1');
+    assert.equal(back?.mimeType, 'audio/mp4');
+    assert.equal(back?.fileName, 'Mama Rachel Medley.m4a');
+    assert.deepEqual(await kept.organize(), { state: undefined, moved: 0, sorted: 0, tagged: 0, failed: 0 }, 'settled');
   });
 });

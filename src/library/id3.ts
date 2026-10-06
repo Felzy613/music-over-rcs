@@ -134,6 +134,20 @@ export function isMp3(data: Uint8Array): boolean {
   return false;
 }
 
+/**
+ * What a song file really is, from its first bytes: the site sometimes calls an M4A an MP3. Nothing when it can't be
+ * told.
+ */
+export function audioTypeOf(data: Uint8Array): string | undefined {
+  if (isMp3(data)) return 'audio/mpeg';
+  const head = latin1(data, 0, Math.min(12, data.length));
+  if (head.slice(4, 8) === 'ftyp') return 'audio/mp4';
+  if (head.startsWith('OggS')) return 'audio/ogg';
+  if (head.startsWith('fLaC')) return 'audio/flac';
+  if (head.startsWith('RIFF') && head.slice(8, 12) === 'WAVE') return 'audio/wav';
+  return undefined;
+}
+
 /** Whether the file's tag has a picture. */
 export function hasCover(data: Uint8Array): boolean {
   return readTags(data).kept.some((frame) => frame.id === 'APIC');

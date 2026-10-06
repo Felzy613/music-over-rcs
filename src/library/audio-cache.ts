@@ -6,7 +6,7 @@ import type { AudioCheck } from '../audio-check.ts';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { CachedAudio, Catalog, SitePost } from '../catalog.ts';
 import type { Track } from '../types.ts';
-import { hasCover, writeTags, type CoverPicture, type SongTags } from './id3.ts';
+import { audioTypeOf, hasCover, writeTags, type CoverPicture, type SongTags } from './id3.ts';
 import { cleanName, extensionOf } from './naming.ts';
 
 type CacheIndex = Pick<Catalog, 'cachedAudio' | 'saveCachedAudio' | 'touchCachedAudio' | 'listCachedAudio' | 'forgetCachedAudio'>;
@@ -191,11 +191,17 @@ export class AudioCache {
    * The song with its tags written, and the record of them. The record is left out when a cover is still to be added
    * (that needs a download, so `organize` does it, not the request waiting for the song).
    */
-  async #tagged(url: string, audio: DownloadedAudio): Promise<{ audio: DownloadedAudio; tags?: string }> {
-    const tags = MP3.test(audio.mimeType) ? this.#tagsOf?.(url, audio) : undefined;
+  async #tagged(url: string, downloaded: DownloadedAudio): Promise<{ audio: DownloadedAudio; tags?: string }> {
+    if (!MP3.test(downloaded.mimeType)) return { audio: downloaded };
+    const data = new Uint8Array(await downloaded.data.arrayBuffer());
+    const retyped = asItIs(downloaded, data);
+    // Not an MP3 after all (an M4A, say): kept and sent as what it is, with no ID3 tags to write.
+    if (retyped !== downloaded) return { audio: { ...retyped, data: new Blob([data], { type: retyped.mimeType }) } };
+    const audio = downloaded;
+    const tags = this.#tagsOf?.(url, audio);
     if (!tags) return { audio };
-    const written = writeTags(new Uint8Array(await audio.data.arrayBuffer()), tags);
-    if (!written) return { audio, tags: JSON.stringify(tags) }; // not an MP3 after all: nothing to write, now or later
+    const written = writeTags(data, tags);
+    if (!written) return { audio, tags: JSON.stringify(tags) }; // not a song file we can tell: nothing to write, now or later
     return {
       audio: { ...audio, data: new Blob([written], { type: audio.mimeType }), bytes: written.byteLength },
       ...(tags.cover && !hasCover(written) ? {} : { tags: JSON.stringify(tags) }),
@@ -257,7 +263,8 @@ export class AudioCache {
     const now = this.#index.cachedAudio(entry.url);
     if (!now || now.file !== entry.file) return false; // moved or forgotten meanwhile: next time
     if (!written) {
-      this.#index.saveCachedAudio({ ...now, tags: record });
+      // Not an MP3 after all (an M4A the site called one, say): it's typed as what it is, so it's renamed to match.
+      this.#index.saveCachedAudio({ ...asItIs(now, data), tags: record });
       return false;
     }
     // Written beside it, then renamed over it: a reader sees the old file or the new one, never half of one.
@@ -401,6 +408,13 @@ export class AudioCache {
   #rootOf(path: string): string {
     return this.archiveDir && isInside(this.archiveDir, path) ? this.archiveDir : dirname(path);
   }
+}
+
+/** A song called an MP3 that's really something else (an M4A, say), typed and named as what it is. */
+function asItIs<T extends { fileName: string; mimeType: string }>(audio: T, data: Uint8Array): T {
+  const actual = audioTypeOf(data);
+  if (!actual || MP3.test(actual) || !MP3.test(audio.mimeType)) return audio;
+  return { ...audio, mimeType: actual, fileName: `${audio.fileName.replace(/\.[a-z0-9]{2,5}$/i, '')}${extensionOf({ fileName: '', mimeType: actual })}` };
 }
 
 /** Which kept song each path belongs to. */

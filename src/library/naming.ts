@@ -205,10 +205,10 @@ const EXTENSIONS: Record<string, string> = {
   'audio/3gpp': '3gp',
 };
 
-/** A song file's extension, with its dot: from its name, or else from its type. */
+/** A song file's extension, with its dot: from its type, or else from its name. */
 export function extensionOf(audio: { fileName: string; mimeType: string }): string {
   const fromName = /\.([a-z0-9]{2,5})$/i.exec(audio.fileName)?.[1];
-  return `.${(fromName ?? EXTENSIONS[audio.mimeType] ?? 'audio').toLowerCase()}`;
+  return `.${(EXTENSIONS[audio.mimeType] ?? fromName ?? 'audio').toLowerCase()}`;
 }
 
 type AudioName = { fileName: string; mimeType: string };
