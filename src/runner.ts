@@ -9,6 +9,9 @@ import type { Chip, Incoming, Reply } from './types.ts';
  * messages, so this marker is how it tells them apart and never answers itself.
  */
 export const BOT_MARK = '🎵';
+/** What an add-on passes on from elsewhere (see extensions.ts) starts with this instead; the bot never answers those either. */
+export const RELAY_MARK = '🤖';
+const isBotText = (text: string): boolean => text.startsWith(BOT_MARK) || text.startsWith(RELAY_MARK);
 
 const SEEN_LIMIT = 2000;
 /**
@@ -25,7 +28,7 @@ const LIKE_HINT = 'To get a song from the list, tap 👍 on it.';
 const CHOICE_TTL_MS = 30 * 60_000;
 const ERROR_NOTICE = 'Something went wrong on my side. Please try again in a moment.';
 
-export const markBotText = (text: string): string => (text.startsWith(BOT_MARK) ? text : `${BOT_MARK} ${text}`);
+export const markBotText = (text: string): string => (isBotText(text) ? text : `${BOT_MARK} ${text}`);
 
 /** A thumbs up, in any skin tone. */
 export const isLike = (key: string): boolean => /^👍[\u{1F3FB}-\u{1F3FF}]?\uFE0F?$/u.test(key.trim());
@@ -39,8 +42,29 @@ export interface ChatMessage {
   type?: string | undefined;
   hasAttachments: boolean;
   isDeleted: boolean;
+  /** A delivery failure notice emitted by the mautrix Google Messages bot. */
+  bridgeSendFailure?: boolean | undefined;
   /** A reaction (👍…) to another message, rather than a message of its own. */
   reaction?: { to: string; key: string } | undefined;
+  /** A picture sent from the phone (not one the bot sent), when the platform passes those on. */
+  picture?: IncomingPicture | undefined;
+}
+
+/** A picture sent from the phone: where to download it, and the text sent with it. */
+export interface IncomingPicture {
+  /** Where the platform keeps it (an mxc:// address on Matrix). */
+  url: string;
+  mimeType: string;
+  name: string;
+  /** The text sent with the picture, if any. */
+  caption?: string;
+  /** The message it belongs to. A picture can arrive more than once (a preview, then the full picture), all with this. */
+  of: string;
+  bytes?: number;
+  /** When it was sent from the phone (Unix ms), which can be long before it arrives. */
+  sentAt?: number;
+  /** False when this is only a preview and the full picture is still on its way. */
+  complete?: boolean;
 }
 
 /** What the runner needs from a chat platform: read what's new in one chat, and write to it. */
@@ -59,6 +83,8 @@ export interface ChatClient {
   readonly reactions?: boolean;
   /** Shows or clears "typing…" in the chat. Platforms that can't do this leave it out. */
   setTyping?(chatID: string, typing: boolean): Promise<void>;
+  /** What a message in the chat says, by its id (undefined when it's gone or has no text). Platforms that can't leave it out. */
+  messageText?(chatID: string, messageId: string): Promise<string | undefined>;
 }
 
 /** The numbered options on offer: what "2" means right now, since when, and for how long. */
@@ -110,6 +136,10 @@ export interface RunnerOptions {
   log?: (line: string) => void;
   /** Told after each poll whether the chat answered, and how many times in a row it hasn't. */
   onPoll?: (ok: boolean, failuresInARow: number, error?: string) => void;
+  /** Gets each picture sent from the phone (they're not requests; an add-on can take them). Without it they're ignored. */
+  onPicture?: (picture: IncomingPicture) => void;
+  /** Restarts the Google Messages bridge after it reports that a message could not be delivered. */
+  onBridgeSendFailure?: () => void | Promise<void>;
 }
 
 export interface Runner {
@@ -154,6 +184,35 @@ export function createRunner(options: RunnerOptions): Runner {
       }
     } catch (err) {
       log(`could not remember which song a message stands for: ${errorText(err)}`);
+    }
+  }
+
+  /**
+   * When the phone is slow to confirm a send, the bridge calls it undelivered and then shows the phone's own copy of
+   * it as a new message with another id, and that copy is what a 👍 lands on. A song's text is kept as a link too,
+   * so such a copy still answers.
+   */
+  const textKey = (text: string): string => `text:${text.trim().replace(/\s+/g, ' ')}`;
+
+  /** Sends a text that may stand for a song, and remembers which. */
+  async function sendLinkedText(text: string, postback: string | undefined): Promise<void> {
+    const id = await chat.sendText(chatID, text);
+    rememberLink(id, postback);
+    rememberLink(textKey(text), postback);
+  }
+
+  /** The song a 👍 on this message asks for: the message itself, or else a copy of one that stood for a song. */
+  async function postbackFor(messageId: string): Promise<string | undefined> {
+    const direct = linkedTo(messageId);
+    if (direct || !chat.messageText) return direct;
+    try {
+      const text = await chat.messageText(chatID, messageId);
+      const copied = text ? linkedTo(textKey(text)) : undefined;
+      if (copied) log(`a 👍 on a copy of a message (the phone's, with another id) was matched by what it says`);
+      return copied;
+    } catch (err) {
+      log(`could not read the message a 👍 is on: ${errorText(err)}`);
+      return undefined;
     }
   }
 
@@ -234,7 +293,7 @@ export function createRunner(options: RunnerOptions): Runner {
     if (message.isDeleted || message.hasAttachments) return false;
     if (message.type !== undefined && message.type !== 'TEXT') return false;
     const text = message.text?.trim();
-    return Boolean(text) && !text!.startsWith(BOT_MARK);
+    return Boolean(text) && !isBotText(text!);
   }
 
   function isRepeat(message: ChatMessage): boolean {
@@ -297,7 +356,7 @@ export function createRunner(options: RunnerOptions): Runner {
         // A picture is a nicety: when it can't be shown, the answer goes on without it, and a song's name goes as text.
         const caption = reply.kind === 'image' && reply.caption ? markBotText(`${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}`) : undefined;
         const sendCaption = async () => {
-          if (caption && allowSend()) rememberLink(await chat.sendText(chatID, caption), reply.kind === 'image' ? reply.postback : undefined);
+          if (caption && allowSend()) await sendLinkedText(caption, reply.kind === 'image' ? reply.postback : undefined);
         };
         if (!chat.sendImage || !options.prepareImage) {
           await sendCaption();
@@ -315,7 +374,7 @@ export function createRunner(options: RunnerOptions): Runner {
         if (reply.chips) setChoices({ chips: reply.chips, at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
         // Options need a word on how to pick one, unless the text already gives it.
         const hint = !chat.reactions && reply.chips && !/\breply with a number\b/i.test(reply.text);
-        rememberLink(await chat.sendText(chatID, markBotText(hint ? `${reply.text}\n\n${CHOICE_HINT}` : reply.text)), reply.postback);
+        await sendLinkedText(markBotText(hint ? `${reply.text}\n\n${CHOICE_HINT}` : reply.text), reply.postback);
       }
     }
   }
@@ -391,8 +450,11 @@ export function createRunner(options: RunnerOptions): Runner {
 
   /** A 👍 on a message that stands for a song gets that song. Any other reaction is just a reaction. */
   async function handleReaction(message: ChatMessage): Promise<void> {
-    const postback = linkedTo(message.reaction!.to);
-    if (!postback) return;
+    const postback = await postbackFor(message.reaction!.to);
+    if (!postback) {
+      log('ignoring a 👍 on a message that does not stand for a song');
+      return;
+    }
     log(`<- 👍 ${postback}`);
     const stopTyping = startTyping();
     try {
@@ -437,8 +499,21 @@ export function createRunner(options: RunnerOptions): Runner {
         for (const message of messages) {
           if (seen.has(message.id)) continue;
           remember(message.id);
+          if (message.bridgeSendFailure) {
+            log('the Google Messages bridge reported a message delivery failure');
+            await options.onBridgeSendFailure?.();
+            continue;
+          }
           if (message.reaction) {
             if (isLike(message.reaction.key)) await handleReaction(message);
+            continue;
+          }
+          if (message.picture) {
+            try {
+              options.onPicture?.(message.picture);
+            } catch (err) {
+              log(`could not take a picture from the phone: ${errorText(err)}`);
+            }
             continue;
           }
           if (!shouldHandle(message)) continue;

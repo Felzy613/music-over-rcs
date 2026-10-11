@@ -58,6 +58,11 @@ export interface MockMatrix extends Listening {
   addMessage(sender: string, content: Record<string, unknown>, room?: string): string;
   /** A reaction (as the bridge passes on a 👍 tapped in Google Messages) to an event in the watched room. */
   addReaction(sender: string, eventId: string, key: string): string;
+  /** A file the homeserver holds (a picture sent from the phone), for the media download API; returns its mxc:// address. */
+  addMedia(bytes: Buffer, contentType: string): string;
+  /** Reactions the client put on messages (send/m.reaction), and events it redacted. */
+  reactionsSent: { eventId: string; to: string; key: string }[];
+  redactions: string[];
   reset(): void;
 }
 
@@ -83,6 +88,9 @@ export async function startMockMatrix(): Promise<MockMatrix> {
   const typing: MockMatrix['typing'] = [];
   const joinedViaApi: string[] = [];
   const created: Record<string, any>[] = [];
+  const reactionsSent: MockMatrix['reactionsSent'] = [];
+  const redactions: string[] = [];
+  const media = new Map<string, { bytes: Buffer; contentType: string }>();
   const rooms: MockRoom[] = [
     { id: roomId, name: 'Me', members: 2, heroes: [ghost] },
     { id: botRoomId, name: '', members: 2, heroes: [botUser] },
@@ -197,6 +205,36 @@ export async function startMockMatrix(): Promise<MockMatrix> {
       return json(200, { event_id: event.event_id });
     }
 
+    const lookup = /^\/_matrix\/client\/v3\/rooms\/([^/]+)\/event\/([^/]+)$/.exec(url.pathname);
+    if (req.method === 'GET' && lookup) {
+      const event = timelines.get(decodeURIComponent(lookup[1]!))?.find((e) => e.event_id === decodeURIComponent(lookup[2]!));
+      return event ? json(200, event) : json(404, { errcode: 'M_NOT_FOUND', error: 'Event not found.' });
+    }
+
+    const reaction = /^\/_matrix\/client\/v3\/rooms\/([^/]+)\/send\/m\.reaction\/[^/]+$/.exec(url.pathname);
+    if (req.method === 'PUT' && reaction) {
+      const target = timelines.get(decodeURIComponent(reaction[1]!));
+      if (!target) return json(403, { errcode: 'M_FORBIDDEN', error: 'You are not in that room' });
+      const content = JSON.parse(body.toString('utf8')) as Record<string, any>;
+      const event = push(userId, content, target, 'm.reaction');
+      reactionsSent.push({ eventId: event.event_id, to: content['m.relates_to']?.event_id, key: content['m.relates_to']?.key });
+      return json(200, { event_id: event.event_id });
+    }
+
+    const redact = /^\/_matrix\/client\/v3\/rooms\/([^/]+)\/redact\/([^/]+)\/[^/]+$/.exec(url.pathname);
+    if (req.method === 'PUT' && redact) {
+      redactions.push(decodeURIComponent(redact[2]!));
+      return json(200, { event_id: `$redaction${redactions.length}:localhost` });
+    }
+
+    const download = /^\/_matrix\/client\/v1\/media\/download\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+    if (req.method === 'GET' && download) {
+      const file = media.get(`mxc://${decodeURIComponent(download[1]!)}/${decodeURIComponent(download[2]!)}`);
+      if (!file) return json(404, { errcode: 'M_NOT_FOUND', error: 'Not found' });
+      res.writeHead(200, { 'content-type': file.contentType, 'content-length': String(file.bytes.length) });
+      return res.end(file.bytes);
+    }
+
     const typingCall = /^\/_matrix\/client\/v3\/rooms\/([^/]+)\/typing\/([^/]+)$/.exec(url.pathname);
     if (req.method === 'PUT' && typingCall) {
       if (state.failTyping) return json(500, { errcode: 'M_UNKNOWN', error: 'typing is broken' });
@@ -287,7 +325,17 @@ export async function startMockMatrix(): Promise<MockMatrix> {
     },
     addMessage: (sender, content, room = roomId) => push(sender, content, timelines.get(room) ?? events).event_id,
     addReaction: (sender, eventId, key) => push(sender, { 'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key } }, events, 'm.reaction').event_id,
+    addMedia(bytes, contentType) {
+      const mxc = `mxc://localhost/phone${media.size + 1}`;
+      media.set(mxc, { bytes, contentType });
+      return mxc;
+    },
+    reactionsSent,
+    redactions,
     reset() {
+      reactionsSent.length = 0;
+      redactions.length = 0;
+      media.clear();
       events.length = 0;
       botEvents.length = 0;
       sent.length = 0;

@@ -191,6 +191,13 @@ describe('MatrixClient', () => {
     });
   });
 
+  test('reads back what a message says, and fails for one the homeserver does not have', async () => {
+    const matrix = client();
+    const id = await matrix.sendText(mock.roomId, '🎵 Aleph Beis · Apr 4, 2025');
+    assert.equal(await matrix.messageText(mock.roomId, id!), '🎵 Aleph Beis · Apr 4, 2025');
+    await assert.rejects(matrix.messageText(mock.roomId, '$nothing:localhost'));
+  });
+
   test('retries once when the homeserver says slow down', async () => {
     mock.rateLimit(1);
     await client().sendText(mock.roomId, 'patient');

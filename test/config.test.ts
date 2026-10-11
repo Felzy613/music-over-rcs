@@ -77,7 +77,7 @@ describe('loadBeeperConfig', () => {
       prefetchMb: Number.POSITIVE_INFINITY,
       archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
-      songGapMs: 15_000,
+      songGapMs: 5_000,
     });
   });
 
@@ -161,7 +161,7 @@ describe('loadMatrixConfig', () => {
       prefetchMb: Number.POSITIVE_INFINITY,
       archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
-      songGapMs: 15_000,
+      songGapMs: 5_000,
     });
   });
 

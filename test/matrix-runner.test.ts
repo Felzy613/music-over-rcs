@@ -458,6 +458,41 @@ describe('runner over Matrix (the bridge case)', () => {
       assert.ok(logs.some((line) => line === `<- 👍 play:${live.id}`));
     });
 
+    test("a 👍 on the phone's own copy of a song's message (another id, after a slow send) still sends that song", async () => {
+      const live = catalog.search('blue horizon live')[0]!;
+      const bot = createBot({ catalog, checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true }) });
+      const logs: string[] = [];
+      const runner = createRunner({
+        chat: new MatrixClient({ token: mock.token, homeserver: mock.url }),
+        bot,
+        chatID: mock.roomId,
+        fetchAudio: (url, title) => fetchAudio(url, title),
+        pollMs: 20,
+        log: (line) => logs.push(line),
+      });
+      await runner.prime();
+      await runner.announce([
+        { kind: 'text', text: 'New music today' },
+        { kind: 'text', text: 'The Night Owls — Blue Horizon (Live)', postback: `play:${live.id}` },
+      ]);
+      const [heading, item] = mock.sent;
+      // The bridge called the send undelivered, so the phone's copy of each message shows up as new events.
+      const headingCopy = mock.addMessage(mock.ghost, { msgtype: 'm.text', body: heading!.content.body });
+      const itemCopy = mock.addMessage(mock.ghost, { msgtype: 'm.text', body: item!.content.body });
+      await runner.tick();
+      mock.addReaction(mock.ghost, headingCopy, '👍');
+      await runner.tick();
+      assert.equal(mock.sent.length, 2, 'a copy of the heading is still not a song');
+      assert.ok(logs.includes('ignoring a 👍 on a message that does not stand for a song'));
+      mock.addReaction(mock.ghost, itemCopy, '👍');
+      await runner.tick();
+      assert.equal(mock.sent.at(-1)?.content.filename, 'The Night Owls — Blue Horizon (Live).mp3');
+      assert.ok(logs.includes(`<- 👍 play:${live.id}`));
+      mock.addReaction(mock.ghost, '$gone:localhost', '👍');
+      await runner.tick();
+      assert.ok(logs.some((line) => line.startsWith('could not read the message a 👍 is on')), 'an unreadable message is logged, not fatal');
+    });
+
     test('songs picked one after another (three 👍 in a row) go out songGapMs apart, each with its name', async () => {
       const songs = ['blue horizon', 'blue horizon live', 'paper planes'].map((words) => catalog.search(words)[0]!);
       const bot = createBot({ catalog, checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true }) });

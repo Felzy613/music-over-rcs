@@ -132,6 +132,7 @@ export async function online(doFetch: typeof fetch = fetch): Promise<boolean> {
 }
 
 const OFFLINE_GRACE_MS = 10 * 60_000;
+const BRIDGE_RESTART_GRACE_MS = 2 * 60_000;
 const TROUBLE_GRACE_MS = 15 * 60_000;
 
 /**
@@ -143,14 +144,28 @@ export class BridgeWatch {
   #health: Health;
   #status: () => Promise<BridgeStatus>;
   #online: (() => Promise<boolean>) | undefined;
+  #restart: (() => Promise<void>) | undefined;
+  #log: (line: string) => void;
   #now: () => Date;
   #troubleSince: number | undefined;
   #offlineSince: number | undefined;
+  #networkRecovery = false;
+  #restartAttempted = false;
+  #lastSendFailureRestartAt: number | undefined;
 
-  constructor(options: { health: Health; status: () => Promise<BridgeStatus>; online?: () => Promise<boolean>; now?: () => Date }) {
+  constructor(options: {
+    health: Health;
+    status: () => Promise<BridgeStatus>;
+    online?: () => Promise<boolean>;
+    restart?: () => Promise<void>;
+    log?: (line: string) => void;
+    now?: () => Date;
+  }) {
     this.#health = options.health;
     this.#status = options.status;
     this.#online = options.online;
+    this.#restart = options.restart;
+    this.#log = options.log ?? (() => {});
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -165,35 +180,90 @@ export class BridgeWatch {
     const now = this.#now().getTime();
     const loggedOut = !status.state || status.state === 'BAD_CREDENTIALS' || status.state === 'LOGGED_OUT';
     const connected = status.state === 'CONNECTED' || status.state === 'BACKFILLING';
-    if (!loggedOut && !connected && this.#online && !(await this.#online())) {
-      this.#offlineSince ??= now;
-      if (now - this.#offlineSince >= OFFLINE_GRACE_MS) {
-        this.#health.problem('internet', "This Mac has no internet (it may still show Wi-Fi as connected). Texts you send meanwhile are answered when it's back.");
+    if (!loggedOut && this.#online) {
+      if (!(await this.#online())) {
+        this.#offlineSince ??= now;
+        this.#troubleSince = undefined;
+        this.#networkRecovery = true;
+        this.#restartAttempted = false;
+        if (now - this.#offlineSince >= OFFLINE_GRACE_MS) {
+          this.#health.problem('internet', "This Mac has no internet (it may still show Wi-Fi as connected). Texts you send meanwhile are answered when it's back.");
+        }
+        return;
       }
-      return;
     }
     if (this.#offlineSince !== undefined) {
+      const outageMs = now - this.#offlineSince;
       this.#offlineSince = undefined;
       this.#health.ok('internet', 'Fixed: this Mac is back online.');
-      // The bridge gets a fresh while to reconnect before it's anything's fault.
-      if (this.#troubleSince !== undefined) this.#troubleSince = now;
+      // Give the bridge a short chance to reconnect before restarting its stale Google session.
+      this.#troubleSince = now;
+      this.#networkRecovery = outageMs >= BRIDGE_RESTART_GRACE_MS || !connected;
+      this.#restartAttempted = false;
     }
     const why = status.message || status.error;
     if (loggedOut) {
       this.#troubleSince = undefined;
+      this.#networkRecovery = false;
+      this.#restartAttempted = false;
+      this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
       this.#health.problem('bridge', `Google Messages is logged out of the bridge${why ? ` (${why})` : ''}. Log in again: npm run matrix-console, then "login google".`);
     } else if (connected) {
-      this.#troubleSince = undefined;
+      if (this.#networkRecovery && this.#restart && !this.#restartAttempted && this.#troubleSince !== undefined && now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
+        await this.#restartBridge('Google Messages still reports connected after a network outage; restarting its bridge service to refresh the session.', now);
+        return;
+      }
+      if (!this.#networkRecovery || !this.#restart) {
+        this.#troubleSince = undefined;
+        this.#networkRecovery = false;
+        this.#restartAttempted = false;
+      }
       this.#health.ok('bridge', 'Fixed: the bridge is connected to Google Messages again.');
+      this.#health.ok('bridge-restart', 'Fixed: the bridge recovered after its automatic restart.');
     } else {
       // Brief disconnects happen; only one that lasts is worth a word.
       this.#troubleSince ??= now;
-      if (now - this.#troubleSince >= TROUBLE_GRACE_MS) {
+      const troubleFor = now - this.#troubleSince;
+      const restartAfter = this.#networkRecovery ? BRIDGE_RESTART_GRACE_MS : TROUBLE_GRACE_MS;
+      if (this.#restart && !this.#restartAttempted && troubleFor >= restartAfter) {
+        await this.#restartBridge('Google Messages is still disconnected with the internet up; restarting its bridge service.', now);
+      } else if (troubleFor >= TROUBLE_GRACE_MS) {
         const hint = /phone/i.test(why ?? '') ? 'Is your phone on and online?' : 'It keeps trying; if this lasts, restart it: npm run stack -- restart';
         this.#health.problem('bridge', `The bridge can't reach Google Messages${why ? ` (${why})` : ''}. ${hint}`);
       }
     }
     if (status.rcsEnabled === false) this.#health.problem('rcs', "RCS chats are off on your phone, so songs can't be sent. Turn them on: Messages → Settings → RCS chats.");
     else if (status.rcsEnabled === true) this.#health.ok('rcs', 'Fixed: RCS chats are on again.');
+  }
+
+  /** A terminal bridge notice means its retries already failed, even if the status API still says CONNECTED. */
+  async sendFailed(): Promise<void> {
+    const now = this.#now().getTime();
+    if (!this.#restart) {
+      this.#health.problem('bridge-restart', 'Google Messages reported an undelivered message. Restart the bridge: npm run stack -- restart');
+      return;
+    }
+    if (this.#lastSendFailureRestartAt !== undefined && now - this.#lastSendFailureRestartAt < 10 * 60_000) {
+      this.#log('Google Messages reported another undelivered message; the bridge was restarted recently, so skipping another restart.');
+      return;
+    }
+    this.#lastSendFailureRestartAt = now;
+    await this.#restartBridge('Google Messages reported an undelivered message; restarting its bridge service.', now);
+  }
+
+  async #restartBridge(reason: string, now: number): Promise<void> {
+    if (!this.#restart) return;
+    this.#restartAttempted = true;
+    this.#networkRecovery = false;
+    this.#log(reason);
+    try {
+      await this.#restart();
+      this.#troubleSince = now;
+      this.#log('restarted the Google Messages bridge; waiting for it to reconnect');
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.#log(`could not restart the Google Messages bridge automatically: ${detail}`);
+      this.#health.problem('bridge-restart', `The bridge couldn't restart automatically (${detail}). Restart it manually: npm run stack -- restart`);
+    }
   }
 }

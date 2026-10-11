@@ -37,6 +37,8 @@ sync_bot() { # the background bot cannot read ~/Documents, so it runs from a cop
   installed
   mkdir -p "$BOT_DIR"
   rsync -a --delete "$ROOT/src/" "$BOT_DIR/src/"
+  # add-ons kept outside the repository (extensions/, see src/extensions.ts), without their own git folders
+  if [ -d "$ROOT/extensions" ]; then rsync -a --delete --exclude .git "$ROOT/extensions/" "$BOT_DIR/extensions/"; else rm -rf "$BOT_DIR/extensions"; fi
   cp "$ROOT/package.json" "$BOT_DIR/package.json"
   if [ -f "$ROOT/.env" ]; then cp "$ROOT/.env" "$BOT_DIR/.env"; chmod 600 "$BOT_DIR/.env"; else rm -f "$BOT_DIR/.env"; fi
   chmod 700 "$BOT_DIR"

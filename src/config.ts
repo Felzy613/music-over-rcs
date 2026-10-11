@@ -136,9 +136,9 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   };
 }
 
-/** Seconds between two songs (SONG_GAP_SECONDS), in ms: 15 unless set, 0 or "off" for none, at most 300. */
+/** Seconds between two songs (SONG_GAP_SECONDS), in ms: 5 unless set, 0 or "off" for none, at most 300. */
 export function parseSongGap(raw: string | undefined): number | Error {
-  const text = raw?.trim().toLowerCase() || '15';
+  const text = raw?.trim().toLowerCase() || '5';
   const seconds = text === 'off' ? 0 : Number(text);
   if (!(Number.isFinite(seconds) && seconds >= 0 && seconds <= 300)) {
     return new Error(`SONG_GAP_SECONDS must be a number of seconds from 0 to 300, or "off" (got "${raw}")`);

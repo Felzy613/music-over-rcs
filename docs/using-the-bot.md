@@ -42,7 +42,7 @@ Then any of:
 | Reply | What happens |
 | --- | --- |
 | 👍 on an option | That song. The list stays open, so you can 👍 another next. |
-| `all` (or `send all`, `everything`) | Every song on the list, 15 seconds apart: files only, no cards, up to 20 |
+| `all` (or `send all`, `everything`) | Every song on the list, with 5 seconds between files: files only, no cards, up to 20 |
 | `more` | The next ten, when there are more |
 | `search` and a new name | A new search; the old list closes |
 
@@ -157,7 +157,7 @@ To see today's message now: `npm run library -- digest` (shows it, sends nothing
 
 A thumbs up (any skin tone) on a message that stands for one song gets you that song: any option in a list, any song's line in the daily message, and a new-song alert's card or line. Other reactions, and a 👍 on anything else (like a song you just received, or a heading), are just reactions; the bot ignores them.
 
-👍 as many as you like at once. The songs come **15 seconds apart**, each card with its song, so the phone has sent one before the next arrives ("typing…" shows while the next one waits). `SONG_GAP_SECONDS` in [Configuration](configuration.md) changes the gap; it applies to `all` too.
+👍 as many as you like at once. Text lists are sent together; the audio files come **5 seconds apart**, each card with its song, so the phone has sent one before the next arrives ("typing…" shows while the next one waits). `SONG_GAP_SECONDS` in [Configuration](configuration.md) changes the gap; it applies to `all` too.
 
 ## Small things worth knowing
 

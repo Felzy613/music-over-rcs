@@ -13,6 +13,7 @@ Settings come from environment variables, or from a `.env` file in the project f
 | `MATRIX_ROOM_ID` | yes | The room to watch: your chat with your own number. `npm run matrix-rooms -- --phone <number>` finds it. |
 | `MATRIX_POLL_MS` | no (`1500`) | How often to check the room, in milliseconds, 500 to 30000. |
 | `BRIDGE_URL` | no (`http://127.0.0.1:29336`) | Where the bridge listens, for the health check of your Google Messages login. |
+| `BRIDGE_AUTO_RESTART` | no (on) | Automatically restart the managed bridge after a network outage if it stays disconnected for two minutes, after a two-minute outage even if its status still says connected, or when it reports that a message couldn't be delivered (at most once per ten minutes; not when the phone is only slow to confirm one). Other connection failures restart after fifteen minutes. Set to `off` to disable. |
 
 ## Beeper
 
@@ -35,7 +36,7 @@ Settings come from environment variables, or from a `.env` file in the project f
 | `PREFETCH_MB` | `unlimited` | Disk space for songs kept ready on this Mac, in MB. No limit by default: every song stays. A number sets a limit (the songs used least recently go first); `0` keeps none. |
 | `SONGS_ARCHIVE_DIR` | none | A folder, on an external drive say, that kept songs move into whenever it's there, sorted into artist and album folders (they always download to the Mac first). A full path; put it in quotes if it has spaces. The folder it goes in must exist. See [The library](library.md#moving-them-to-an-external-drive). |
 | `QUIET_HOURS` | `22:00-07:00` | No new-song alerts in these hours, 24-hour, in this Mac's time (it may cross midnight). `off` sends them any time. The daily message keeps its own time. |
-| `SONG_GAP_SECONDS` | `15` | The least time between two songs, in seconds (up to 300), so the phone has sent one before the next arrives: several 👍 at once, `all`, numbers picked quickly. A song's card waits with it. `0` or `off` sends them as fast as they're ready. |
+| `SONG_GAP_SECONDS` | `5` | The least time between audio files, in seconds (up to 300), so the phone has sent one before the next arrives: several 👍 at once, `all`, numbers picked quickly. Text lists are sent together. A song's card waits with its file. `0` or `off` sends files as fast as they're ready. |
 
 ## RCS for Business
 

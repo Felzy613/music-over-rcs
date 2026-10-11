@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { DownloadedImage } from '../image-fetch.ts';
-import type { ChatMessage } from '../runner.ts';
+import type { ChatMessage, IncomingPicture } from '../runner.ts';
 
 export const DEFAULT_HOMESERVER = 'http://127.0.0.1:8008';
 const REQUEST_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 180_000;
 const SENT_LIMIT = 500;
 const MAX_RATE_LIMIT_WAIT_MS = 10_000;
+/** The largest file from the phone that is downloaded (a picture for an add-on, say). */
+const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
 const MEDIA_TYPES = new Set(['m.image', 'm.video', 'm.audio', 'm.file', 'm.sticker']);
 
 export class MatrixError extends Error {
@@ -91,8 +93,101 @@ function eventsAt(value: unknown, ...keys: string[]): MatrixEvent[] {
     .filter((event): event is MatrixEvent => event !== undefined);
 }
 
-/** A room message event as a ChatMessage; edits are not new messages, so they are skipped. */
-function toChatMessage(event: MatrixEvent): ChatMessage | undefined {
+/** One level of a protobuf message: each field's number and its value (a number, or bytes). Undefined if it isn't one. */
+function protoFields(buf: Uint8Array): Array<{ field: number; value: bigint | Uint8Array }> | undefined {
+  const out: Array<{ field: number; value: bigint | Uint8Array }> = [];
+  let i = 0;
+  const varint = (): bigint => {
+    let value = 0n;
+    for (let shift = 0n; ; shift += 7n) {
+      const byte = buf[i++];
+      if (byte === undefined || shift > 63n) throw new RangeError('truncated');
+      value |= BigInt(byte & 0x7f) << shift;
+      if (!(byte & 0x80)) return value;
+    }
+  };
+  try {
+    while (i < buf.length) {
+      const key = Number(varint());
+      const field = key >> 3;
+      const type = key & 7;
+      if (field === 0) return undefined;
+      if (type === 0) out.push({ field, value: varint() });
+      else if (type === 2) {
+        const length = Number(varint());
+        if (i + length > buf.length) return undefined;
+        out.push({ field, value: buf.subarray(i, i + length) });
+        i += length;
+      } else if (type === 1 || type === 5) i += type === 1 ? 8 : 4;
+      else return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return out;
+}
+
+const protoMessage = (fields: ReturnType<typeof protoFields>, field: number) => {
+  const value = fields?.find((entry) => entry.field === field)?.value;
+  return value instanceof Uint8Array ? protoFields(value) : undefined;
+};
+
+/**
+ * What the Google Messages bridge's copy of the original message (its raw_debug_data) says about a picture: whether
+ * this is the full picture (its media has an id at Google) or only the preview posted while the phone was still
+ * sending, and when it was sent (microseconds, in the message itself). Empty when the data isn't there or changes shape.
+ */
+export function gmessagesPictureFacts(raw: unknown): { complete?: boolean; sentAt?: number } {
+  if (typeof raw !== 'string' || !raw) return {};
+  const message = protoMessage(protoMessage(protoFields(Buffer.from(raw, 'base64')), 3), 2);
+  if (!message) return {};
+  const facts: { complete?: boolean; sentAt?: number } = {};
+  const sent = message.find((entry) => entry.field === 5)?.value;
+  if (typeof sent === 'bigint') {
+    const ms = Number(sent / 1000n);
+    if (ms > Date.UTC(2020, 0, 1) && ms < Date.now() + 86_400_000) facts.sentAt = ms;
+  }
+  for (const part of message.filter((entry) => entry.field === 10 && entry.value instanceof Uint8Array)) {
+    const media = protoMessage(protoFields(part.value as Uint8Array), 3);
+    if (!media?.some((entry) => entry.field === 14 || entry.field === 4)) continue;
+    const id = media.find((entry) => entry.field === 2)?.value;
+    facts.complete = id instanceof Uint8Array && id.length > 0;
+  }
+  return facts;
+}
+
+/**
+ * A picture someone else posted (sent from the phone, through the bridge). The bridge posts a placeholder first and
+ * then the picture as edits of it, a small preview and then the full one, so an edit carries the picture too; `of` is
+ * the message they all belong to. Google Messages sends a picture's text with it: the caption is the body when the
+ * file has its own name.
+ */
+function pictureIn(event: MatrixEvent, self: string | undefined): IncomingPicture | undefined {
+  if (event.sender === self) return undefined;
+  const relation = asRecord(event.content['m.relates_to']);
+  const edit = relation?.rel_type === 'm.replace';
+  const content = edit ? asRecord(event.content['m.new_content']) : event.content;
+  const url = asString(content?.url);
+  if (!content || content.msgtype !== 'm.image' || !url?.startsWith('mxc://')) return undefined;
+  const body = asString(content.body) ?? '';
+  const filename = asString(content.filename);
+  const caption = filename && body && body !== filename ? body : undefined;
+  const bytes = Number(dig(content, 'info', 'size')) || undefined;
+  const facts = gmessagesPictureFacts(content['fi.mau.gmessages.raw_debug_data'] ?? event.content['fi.mau.gmessages.raw_debug_data']);
+  return {
+    url,
+    mimeType: asString(dig(content, 'info', 'mimetype')) ?? 'image/jpeg',
+    name: filename ?? (body || 'picture.jpg'),
+    of: edit ? (asString(relation.event_id) ?? event.eventId) : event.eventId,
+    sentAt: facts.sentAt ?? event.timestamp,
+    ...(caption ? { caption } : {}),
+    ...(bytes ? { bytes } : {}),
+    ...(facts.complete === false ? { complete: false } : {}),
+  };
+}
+
+/** A room message event as a ChatMessage; edits are not new messages, so they are skipped (unless they bring a picture). */
+function toChatMessage(event: MatrixEvent, self?: string): ChatMessage | undefined {
   if (event.type === 'm.reaction' && event.eventId) {
     // A reaction tapped in Google Messages arrives from the bridge as an annotation on the message it's on.
     const relation = asRecord(event.content['m.relates_to']);
@@ -109,16 +204,24 @@ function toChatMessage(event: MatrixEvent): ChatMessage | undefined {
     };
   }
   if (event.type !== 'm.room.message' || !event.eventId) return undefined;
-  if (asRecord(event.content['m.relates_to'])?.rel_type === 'm.replace') return undefined;
+  const picture = pictureIn(event, self);
+  if (asRecord(event.content['m.relates_to'])?.rel_type === 'm.replace' && !picture) return undefined;
   const msgtype = asString(event.content.msgtype) ?? '';
   const media = MEDIA_TYPES.has(msgtype) || event.content.url !== undefined || event.content.file !== undefined;
+  const body = asString(event.content.body);
+  // "Phone has not confirmed message delivery" only means the phone is slow: the message usually arrives (its copy
+  // shows up a moment later), so that notice is no reason to restart the bridge. Other reasons are.
+  const notice = event.sender.startsWith('@gmessagesbot:') ? (body ?? '') : '';
+  const bridgeSendFailure = /your message may not have been bridged:/i.test(notice) && !/phone has not confirmed message delivery/i.test(notice);
   return {
     id: event.eventId,
     timestamp: new Date(event.timestamp).toISOString(),
-    text: asString(event.content.body),
+    text: body,
     type: msgtype === 'm.text' ? 'TEXT' : msgtype.toUpperCase() || undefined,
-    hasAttachments: media,
+    hasAttachments: media || picture !== undefined,
     isDeleted: false,
+    ...(bridgeSendFailure ? { bridgeSendFailure: true } : {}),
+    ...(picture ? { picture } : {}),
   };
 }
 
@@ -212,7 +315,9 @@ export class MatrixClient {
 
   async whoami(): Promise<{ userId: string }> {
     const json = await this.#request('GET', '/_matrix/client/v3/account/whoami');
-    return { userId: asString(json.user_id) ?? '' };
+    const userId = asString(json.user_id) ?? '';
+    if (userId) this.#userId = userId;
+    return { userId };
   }
 
   /** Joins a room; this also accepts a pending invite (the bridge invites you to each chat it creates). */
@@ -253,10 +358,45 @@ export class MatrixClient {
 
   /** New messages in a room since the last call (the first call returns recent history), oldest first. */
   async listMessages(roomID: string): Promise<ChatMessage[]> {
+    // Knowing who this is tells the phone's pictures from the bot's own.
+    if (!this.#userId) await this.whoami();
     return (await this.#newEvents(roomID)).flatMap((event) => {
-      const message = toChatMessage(event);
+      const message = toChatMessage(event, this.#userId);
       return message ? [message] : [];
     });
+  }
+
+  /** Downloads a file posted in a room (an mxc:// address), up to 25 MB. */
+  async downloadMedia(mxc: string): Promise<Uint8Array> {
+    const match = /^mxc:\/\/([^/]+)\/([^/?#]+)$/.exec(mxc);
+    if (!match) throw new MatrixError(`Not a Matrix media address: ${mxc}`, 0, '', '');
+    const res = await this.#fetch(`${this.#base}/_matrix/client/v1/media/download/${encodeURIComponent(match[1]!)}/${encodeURIComponent(match[2]!)}`, {
+      headers: { authorization: `Bearer ${this.#token}` },
+      signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw errorFrom(res.status, parseJson(text), text);
+    }
+    const size = Number(res.headers.get('content-length')) || 0;
+    if (size > MAX_MEDIA_BYTES) throw new MatrixError(`The file is too big (${Math.round(size / 1048576)} MB)`, 0, '', '');
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength > MAX_MEDIA_BYTES) throw new MatrixError(`The file is too big (${Math.round(bytes.byteLength / 1048576)} MB)`, 0, '', '');
+    return bytes;
+  }
+
+  /** Puts a reaction (👍, ❤️ …) on a message; returns the reaction's id, which removes it again (redact). */
+  async sendReaction(roomID: string, eventId: string, key: string): Promise<string | undefined> {
+    const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomID)}/send/m.reaction/${randomUUID()}`;
+    const json = await this.#request('PUT', path, { body: { 'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key } } });
+    const id = asString(json.event_id);
+    if (id) this.#remember(id);
+    return id;
+  }
+
+  /** Takes back one of this account's events (a reaction, say). */
+  async redact(roomID: string, eventId: string): Promise<void> {
+    await this.#request('PUT', `/_matrix/client/v3/rooms/${encodeURIComponent(roomID)}/redact/${encodeURIComponent(eventId)}/${randomUUID()}`, { body: {} });
   }
 
   /** Like listMessages, but as the setup console wants them: who said what, notices included. */
@@ -269,6 +409,12 @@ export class MatrixClient {
         msgtype: asString(event.content.msgtype) ?? '',
         body: asString(event.content.body) ?? '',
       }));
+  }
+
+  /** What a message in a room says (its body), or undefined when it has none. Throws when the homeserver doesn't have it. */
+  async messageText(roomID: string, eventId: string): Promise<string | undefined> {
+    const json = await this.#request('GET', `/_matrix/client/v3/rooms/${encodeURIComponent(roomID)}/event/${encodeURIComponent(eventId)}`);
+    return asString(dig(json, 'content', 'body'));
   }
 
   /** Posts a text; returns the new event's id. */
@@ -332,11 +478,14 @@ export class MatrixClient {
     const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomID)}/send/m.room.message/${randomUUID()}`;
     const json = await this.#request('PUT', path, { body: content });
     const eventId = asString(json.event_id);
-    if (eventId) {
-      this.#sent.add(eventId);
-      if (this.#sent.size > SENT_LIMIT) this.#sent.delete(this.#sent.values().next().value!);
-    }
+    if (eventId) this.#remember(eventId);
     return eventId;
+  }
+
+  /** An event this client sent, so it isn't read back as a new message. */
+  #remember(eventId: string): void {
+    this.#sent.add(eventId);
+    if (this.#sent.size > SENT_LIMIT) this.#sent.delete(this.#sent.values().next().value!);
   }
 
   async #request(method: string, path: string, options: RequestOptions = {}): Promise<Json> {

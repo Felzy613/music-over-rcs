@@ -31,7 +31,9 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
 src/bot.ts              what to answer: songs, lists, choices, albums, follow / unfollow
 src/runner.ts           watches one chat and answers it; 👍, numbers where 👍 can't reach, songs spaced out, typing, announcements, safety limits
 src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, follows, state
-src/health.ts           Mac notifications when something breaks; the bridge's login status
+src/health.ts           Mac notifications when something breaks; the bridge's login status, and when to restart it
+src/bridge-restart.ts   restarts the bridge's launchd service when its Google Messages session goes stale
+src/extensions.ts       add-ons kept outside this repository (extensions/): loading, starting and stopping them
 src/artists.ts          splits "A, B & C Ft. D" into artists
 src/query.ts            words of a request ("play", "send me", "by" dropped)
 src/audio-check.ts      checks a link: reachable, audio, within the size limit
@@ -102,4 +104,5 @@ npm run typecheck
 ## Extending
 
 - **Another chat platform:** implement `ChatClient` beside `src/matrix/` and `src/beeper/`, then start a runner with it.
+- **An add-on kept elsewhere:** a folder in `extensions/` (git ignores it, so it can be a repository of its own) whose `index.ts` default-exports an `ExtensionSetup` (see `src/extensions.ts`). It can take messages that start with its own word, get the pictures sent from the phone, send into the chat and put reactions on messages. The bridge route loads it at start; `npm run stack -- sync-bot` copies it with the bot, and `npm test` and `npm run typecheck` include it.
 - **Another place to find music:** implement `TrackSource` (`name`, `lookup(query, limit)`) beside `src/sources/music-table.ts`. Its tracks go into the catalog like any others.

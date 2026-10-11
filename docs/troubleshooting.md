@@ -27,6 +27,7 @@ A problem that lasts is repeated every six hours. **No notifications at all?** m
 - **"The homeserver rejected the access token":** `npm run matrix-login` again.
 - **The bot ignores code or `.env` changes:** it runs from a copy. `npm run stack -- restart`.
 - **Can't find your chat:** `npm run matrix-rooms -- --phone <your number>`. If it finds none, text yourself once on the phone, wait a few seconds, try again. `npm run matrix-console` then `help` lists the bridge's commands.
+- **"Your message may not have been bridged":** the bot restarts the bridge after this terminal delivery error. Retry the request; the failed reply itself isn't replayed.
 - **Replies show up in Matrix but not on the phone:** the bridge only relays messages from users listed in `bridge.permissions` in `gmessages/config.yaml`; your Matrix ID must be there. Also check that the phone is online.
 - **The bridge was logged out** (the bridge bot says so in `npm run matrix-console`): `login google` again.
 - **Two answers to every message:** two bots are running. `npm run stack -- disable-bot` and stop any `npm run matrix` in a terminal, then enable one.

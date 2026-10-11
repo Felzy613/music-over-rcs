@@ -22,8 +22,8 @@ Every message starts with a command, so a song's name is never taken for one.
 | `new` | The newest releases |
 | `chanukah`, `purim`, `wedding` or `vocal` | That list, most popular first |
 | `more` | The next ten of the last list |
-| 👍 on a song in a list or the daily message | That song. Lists have no numbers; 👍 several and they come 15 seconds apart, so the phone keeps up. |
-| `all` | Every song on the last list (up to 20), 15 seconds apart |
+| 👍 on a song in a list or the daily message | That song. Lists have no numbers; 👍 several and their audio files come 5 seconds apart, so the phone keeps up. |
+| `all` | Every song on the last list (up to 20), with 5 seconds between audio files |
 | `follow shwekey` | New songs by that artist as soon as they're out (`following` lists them, `unfollow shwekey` stops) |
 | `help` | A reminder of all this |
 

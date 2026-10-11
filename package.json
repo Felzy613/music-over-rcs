@@ -30,7 +30,7 @@
     "stack": "bash deploy/mac/stack",
     "homeserver": "bash deploy/mac/stack run synapse",
     "gmessages-bridge": "bash deploy/mac/stack run bridge",
-    "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec \"test/**/*.test.ts\" \"extensions/*/test/**/*.test.ts\"",
     "typecheck": "tsc"
   },
   "devDependencies": {

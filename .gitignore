@@ -11,6 +11,9 @@ data/
 my-songs.csv
 audio-cache/
 
+# add-ons kept in repositories of their own (see src/extensions.ts)
+extensions/
+
 # local runtime and tools
 bridge/
 *.log

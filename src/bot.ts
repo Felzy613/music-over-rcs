@@ -41,7 +41,22 @@ export interface BotDeps {
   browse?: Browse;
   /** Artists you follow ("follow …", "unfollow …", "following"), and following for you after several plays. */
   follows?: Follows;
+  /** An assistant elsewhere (an add-on, see extensions.ts) that messages starting with its word go to. */
+  assistant?: Assistant;
   now?: () => Date;
+}
+
+/** An AI assistant elsewhere that a message starting with its word is passed on to; its answers come back on their own. */
+export interface Assistant {
+  /** The first word that passes a message on, lowercase ("jarvis"). */
+  word: string;
+  /** Its name in the chat ("Jarvis"). */
+  name: string;
+  /**
+   * Passes the message on (with any pictures sent just before it), `origin` being the chat message it came from.
+   * Resolves to a word for the chat, if one is needed; rejects with a reason fit to show.
+   */
+  forward(text: string, origin?: string): Promise<string | undefined>;
 }
 
 export interface Bot {
@@ -59,6 +74,12 @@ const GREETINGS = new Set(['help', 'hi', 'hello', 'hey', 'start', 'menu', 'comma
  */
 const FIRST_WORD = /^\s*(\p{L}+)[\s:,-]*/u;
 const isSearch = (word: string): boolean => editDistance(word.toLowerCase(), 'search') <= 1;
+
+/** What follows a message's first word when that word is `word` ("Jarvis, look at this" → "look at this"), else undefined. */
+export function afterWord(text: string, word: string): string | undefined {
+  const first = FIRST_WORD.exec(text);
+  return first && first[1]!.toLowerCase() === word ? text.slice(first[0].length).trim() : undefined;
+}
 
 export const HELP_TEXT =
   'Text "search" and a song name (artist and title work best), and I\'ll send you the audio file.\nExample: search blue horizon night owls';
@@ -406,6 +427,24 @@ export function createBot(deps: BotDeps): Bot {
     );
   }
 
+  /** "jarvis …": the rest of the message, whole, goes to the assistant. Nothing is said when it's on its way. */
+  async function ask(text: string, origin: string): Promise<Reply[]> {
+    const { word, name } = deps.assistant!;
+    if (!text) return [say(`Text "${word}" and your message, like "${word} what's on my calendar tomorrow?"`)];
+    try {
+      const note = await deps.assistant!.forward(text, origin);
+      return note ? [say(note)] : [];
+    } catch (err) {
+      return [say(`I couldn't send that to ${name}: ${err instanceof Error ? err.message : String(err)}.`)];
+    }
+  }
+
+  const helpText = (): string => {
+    const help = deps.browse ? BROWSE_HELP_TEXT : HELP_TEXT;
+    const word = deps.assistant?.word;
+    return word ? `${help}\n"${word}" and a message to ask ${deps.assistant!.name}; the answer comes back here.` : help;
+  };
+
   return {
     async handle(msg) {
       if (msg.postback !== undefined) {
@@ -432,11 +471,15 @@ export function createBot(deps: BotDeps): Bot {
         return track ? play(track) : [say('That track is no longer in the catalog.')];
       }
 
-      const raw = (msg.text ?? '').trim().slice(0, MAX_QUERY_CHARS);
+      const whole = (msg.text ?? '').trim();
+      // "jarvis …" goes on whole, however long; it's for the assistant, not a search.
+      const forAssistant = deps.assistant ? afterWord(whole, deps.assistant.word) : undefined;
+      if (forAssistant !== undefined) return ask(forAssistant, msg.messageId);
+      const raw = whole.slice(0, MAX_QUERY_CHARS);
       const words = tokenize(raw);
       // Nothing to answer: no words, a greeting or "help", or only single characters (a stray "a", or a "2" with no list to pick from).
       if (words.every((word) => word.length < 2) || GREETINGS.has(words[0]!)) {
-        return [say(deps.browse ? BROWSE_HELP_TEXT : HELP_TEXT)];
+        return [say(helpText())];
       }
       const first = FIRST_WORD.exec(raw);
       if (first && isSearch(first[1]!)) return search(raw.slice(first[0].length).trim());
