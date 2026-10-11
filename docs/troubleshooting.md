@@ -9,6 +9,7 @@ The bot shows a notification titled **Music over RCS** when something it depends
 | Notification | What to do |
 | --- | --- |
 | Google Messages is logged out of the bridge | The bridge has no Google login at all (the phone unlinked it, or its data was lost), so nothing can reconnect by itself: `npm run matrix-console`, then `login google`, and follow the bridge's steps (the same as the first time). Said two minutes after the bridge starts without one. |
+| Google Messages unlinked the bridge | Google (or the phone) ended the link: "Unpaired from Google Messages, please re-link". Restarting can't undo that, so the bot doesn't try; it can't fix this itself. Link it again: `npm run matrix-console`, then `login google`, and follow the bridge's steps (the same as the first time: a copied request from Google Messages for web, then the emoji on the phone; there is no QR code). Said at once, and again every six hours while it lasts. |
 | The bridge is signed out of Google Messages | Usually Google turned the bridge away for a while (a web filter or network block on `instantmessaging-pa.clients6.google.com` does this). The bot restarts the bridge every few minutes and it reconnects on its own once Google lets it through; there is nothing to do unless it lasts for hours, and then `login google` as above. (Said after fifteen minutes.) |
 | This Mac has no internet | The Mac can't reach the internet, even if Wi-Fi shows connected: usually the router's or the provider's connection is down, so restarting the modem and router is the fix. Texts you send meanwhile aren't lost: the bridge picks them up within a minute of the internet coming back, and the bot answers them. (Said after ten minutes, and only once.) |
 | The bridge can't reach Google Messages | The internet works but the bridge can't get through to Google. The bot restarts the bridge every few minutes (after the first, five minutes later, then every ten) for as long as it lasts, so it comes back by itself within about ten minutes of whatever was in the way (a web filter's downtime, say) going away. With "phone" in the reason, open Google Messages on the phone. (Short drops are normal and aren't reported; this one has lasted 15 minutes.) |
@@ -46,7 +47,8 @@ A problem that lasts is repeated every six hours. **No notifications at all?** m
 - **`chanukah`, `purim`, `wedding` or `vocal` is slow the first time:** it reads the whole category from the site once (a few seconds); after that it's instant.
 - **`follow <name>` says it doesn't know the artist:** it only knows artists with songs in the catalog. Text the name alone first to see whether it's found, or try the name as the site writes it.
 - **A one-letter message or a stray number** gets the help text, not a search.
-- **"has no MP3 to download":** that post only has a video.
+- **"has no MP3 to download":** that post only has a video, or its MP3 is in a Google Drive folder (an album), which the bot can't open.
+- **New releases stopped appearing in the catalog** (the log says `synced … 0 new` or `npm run library -- status` shows an old date, and new posts have no songs): the site probably changed how it offers its MP3s. In October 2026 it moved from attached files to download buttons, and posts looked like videos until the bot learned to read them. `npm run music-table -- search <a new song>` shows what the bot sees in a post's files. After a fix, the next sync (every three hours; restarting the bot doesn't force one) fills the gap for the last 50 posts.
 
 ## Alerts for artists you follow
 

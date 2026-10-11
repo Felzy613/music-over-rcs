@@ -178,6 +178,26 @@ describe('recovering by itself when Google turns the bridge away for a while', (
     assert.equal(shown.at(-1), 'Fixed: the bridge is connected to Google Messages again.');
   });
 
+  test("when Google has unlinked the bridge, restarting is pointless: it isn't tried, and the Mac says plainly to link it again", async () => {
+    const { state, shown, tick } = setUp();
+    const message = 'Unpaired from Google Messages, please re-link the connection to continue using SMS/RCS';
+    state.status = { state: 'BAD_CREDENTIALS', error: 'gm-unpaired', message };
+    await tick(8, 0);
+    assert.match(shown.at(-1)!, /^Google Messages unlinked the bridge \(Unpaired from Google Messages.*Restarting can't fix that; link it again: npm run matrix-console, then "login google"/);
+    await run(tick, 1, 180);
+    assert.equal(state.restarts, 0);
+    assert.equal(shown.length, 1, 'said once, not at every check');
+
+    // The same when only the text says so, and after linking it again it is fixed.
+    const text = setUp();
+    text.state.status = { state: 'LOGGED_OUT', message };
+    await text.tick(8, 0);
+    assert.match(text.shown.at(-1)!, /unlinked the bridge/);
+    text.state.status = CONNECTED;
+    await text.tick(8, 1);
+    assert.equal(text.shown.at(-1), 'Fixed: the bridge is connected to Google Messages again.');
+  });
+
   test("a bridge that has only just started, and has no state yet, is not called logged out; one with no login at all is, after two minutes, and isn't restarted", async () => {
     const { state, shown, tick } = setUp();
     state.status = { state: undefined };
@@ -223,6 +243,8 @@ describe("the bridge's login status", () => {
     const connected = await ask([{ state: { state_event: 'CONNECTED', info: { settings: { rcs_enabled: true } } } }]);
     assert.deepEqual([connected.state, connected.rcsEnabled], ['CONNECTED', true]);
     assert.equal((await ask([{ state: { state_event: 'BAD_CREDENTIALS', message: 'Logged out' } }])).message, 'Logged out');
+    const unpaired = { state: { state_event: 'BAD_CREDENTIALS', error: 'gm-not-logged-in', message: 'Unpaired from Google Messages' } };
+    assert.equal((await ask([unpaired, unpaired, { state: { state_event: 'CONNECTED' } }])).state, 'CONNECTED', 'old failed pairings left behind are passed over');
   });
 });
 

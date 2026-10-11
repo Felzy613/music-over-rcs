@@ -107,7 +107,9 @@ export async function bridgeStatus(options: { url: string; token: string; userId
   const body = (await res.json()) as {
     logins?: Array<{ state?: { state_event?: string; error?: string; message?: string; info?: { settings?: { rcs_enabled?: boolean } } } }>;
   };
-  const login = body.logins?.[0];
+  // Failed pairing attempts stay behind as signed-out logins, so the working one is looked for first.
+  const logins = body.logins ?? [];
+  const login = logins.find((l) => l.state?.state_event === 'CONNECTED' || l.state?.state_event === 'BACKFILLING') ?? logins[0];
   if (!login) return { state: undefined };
   return {
     // A login that hasn't reported yet (the bridge has just started) is connecting, not logged out.
@@ -195,6 +197,8 @@ export class BridgeWatch {
     const now = this.#now().getTime();
     const noLogin = !status.state;
     const signedOut = status.state === 'BAD_CREDENTIALS' || status.state === 'LOGGED_OUT';
+    // Google itself ended the link ("Unpaired from Google Messages, please re-link"), as opposed to turning the bridge away for a while.
+    const unlinked = signedOut && /unpaired|re-?link/i.test(`${status.error ?? ''} ${status.message ?? ''}`);
     const connected = status.state === 'CONNECTED' || status.state === 'BACKFILLING';
     if (!noLogin && this.#online) {
       if (!(await this.#online())) {
@@ -228,6 +232,18 @@ export class BridgeWatch {
       if (now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
         this.#health.problem('bridge', 'Google Messages is logged out of the bridge. Log in again: npm run matrix-console, then "login google".');
       }
+    } else if (unlinked) {
+      // Restarting can't undo this, so it isn't tried: only a new link, made with a code scanned on the phone, mends it.
+      this.#troubleSince = undefined;
+      this.#networkRecovery = false;
+      this.#restartAttempted = false;
+      this.#restarts = 0;
+      this.#lastRestartAt = undefined;
+      this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
+      this.#health.problem(
+        'bridge',
+        `Google Messages unlinked the bridge${why ? ` (${why})` : ''}. Restarting can't fix that; link it again: npm run matrix-console, then "login google" (docs/setup-mac.md, step 4, has the steps).`,
+      );
     } else if (connected) {
       if (this.#networkRecovery && this.#restart && !this.#restartAttempted && this.#troubleSince !== undefined && now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
         await this.#restartBridge('Google Messages still reports connected after a network outage; restarting its bridge service to refresh the session.', now);
