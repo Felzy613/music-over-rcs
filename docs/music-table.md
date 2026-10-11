@@ -4,7 +4,7 @@
 
 ## What it uses, and what it doesn't
 
-- **Only the MP3 files a post offers for download**, the same ones its Download button gives you. The YouTube videos in the posts are ignored, and the site's artist pages (galleries of YouTube videos) aren't used. Nothing here downloads from YouTube or any streaming site.
+- **Only the MP3 files a post offers for download**, the same ones its Download button gives you. A post offers one in one of two ways: attached to the post (the bot asks the site for a time-limited link), or as a button linking straight to the file, either on the site's own storage or as a public Google Drive file on a button that says Mp3 or Download (the bot downloads it from Drive the way the button would). A button for a video, tickets, or a Drive *folder* (an album the bot can't list) is not a song. The YouTube videos in the posts are ignored, and the site's artist pages (galleries of YouTube videos) aren't used. Nothing here downloads from YouTube or any streaming site.
 - **A song is stored as a link to its post**, not the audio and not the download address. The site's download links expire, so a fresh one is asked for when the song is sent.
 - **Rights.** These are files the site offers for download. Whether you may keep or share them is between you and the rights holders; this project only fetches what you ask for, into your own chat.
 
@@ -18,7 +18,7 @@ The site is a Wix blog. The bot uses the same public endpoints the site's own pa
 | Searching | The quick search behind the site's search box (a small JSON request, about 0.1 s). The full search page (about 2.4 s, 1.8 MB) is used only when the quick search knows none of your words. |
 | Reading posts | `GET /_api/communities-blog-node-api/_api/posts/<post>` for one post, or the post list for 50 at a time (files, album art, views and dates included) |
 | Category names | The RSS feed, `/blog-feed.xml` |
-| A song's file | `POST .../v2/files/download-url` for a time-limited link, then the file from the site's file host |
+| A song's file | An attached file: `POST .../v2/files/download-url` for a time-limited link, then the file from the site's file host. A button's link is used as it is, after the same check of where it points (the site's file hosts and Google Drive's download host only). |
 | Album art | The post's picture from the site's image host, resized to 640×360 (about 40 KB) |
 
 **How it behaves toward the site:** about ten requests a second at most, in short bursts; searches remembered for 10 minutes, posts for 5, download links for a minute; the background sync is two requests every three hours; the one-time full scan pauses between pages; songs kept ready are downloaded one at a time with a pause between them. A typical request costs one search and a few post reads, or nothing at all when the catalog already has the song.

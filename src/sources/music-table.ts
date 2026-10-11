@@ -23,9 +23,13 @@ const SUGGEST_PATH = '/_api/search-services-sitesearch/v1/suggest/federated';
 const SUGGEST_LIMIT = 20;
 /** Node type of an attached file in the blog API's rich content (10 is the number the API uses; "FILE" in other formats). */
 const FILE_NODE_TYPE = 10;
+/** Node type of a button (the "To Download" ones): since October 2026 many posts offer their MP3 as a button with a link, not an attached file. */
+const BUTTON_NODE_TYPE = 19;
 const AUDIO_NAME = /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac)$/i;
 /** Where the site stores uploaded files. It hands out these links itself; anything else is refused. */
 const FILE_HOSTS = ['wixmp.com', 'wixstatic.com', 'usrfiles.com'];
+/** Where a public Google Drive file downloads from. The posts link its "view" page; this is the same file's download. */
+const DRIVE_DOWNLOAD_HOST = 'drive.usercontent.google.com';
 
 const MAX_QUERY_CHARS = 100;
 const MAX_POSTS_PER_LOOKUP = 5;
@@ -59,8 +63,10 @@ export interface SearchHit {
 
 export interface AudioFile {
   name: string;
-  /** Where the file is stored; the site signs a download link from this. */
+  /** Where the file is stored; the site signs a download link from this. Empty for a file the post links to directly. */
   path: string;
+  /** The link the post gives for the file itself (a button), which needs no signing. */
+  url?: string;
   size: number;
   mimeType: string;
 }
@@ -185,6 +191,38 @@ export function parseSuggest(body: unknown, origin: string): SearchHit[] {
   return hits;
 }
 
+/** A Google Drive file's id, from the link to its page (a folder, which can't be listed, gives none). */
+const driveFileId = (url: URL): string | undefined =>
+  url.hostname === 'drive.google.com' ? /^\/file\/d\/([\w-]{10,})(?:\/|$)/.exec(url.pathname)?.[1] : undefined;
+
+/**
+ * The audio file a post's button links to, when it is one: a file on the site's own storage that ends in an audio
+ * extension, or a public Google Drive file on a button that says MP3 or download (not video, and not a folder).
+ * Anything else a button links to (tickets, a video, a folder) is not a song.
+ */
+function linkedAudio(button: unknown, title: string): AudioFile | undefined {
+  const b = button as { text?: unknown; link?: { url?: unknown } | null };
+  const href = typeof b.link?.url === 'string' ? b.link.url : '';
+  const label = typeof b.text === 'string' ? b.text : '';
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:') return undefined;
+  const base = title.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() || 'song';
+  if (FILE_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) {
+    const extension = AUDIO_NAME.exec(url.pathname)?.[1]?.toLowerCase();
+    return extension ? { name: `${base}.${extension}`, path: '', url: url.href, size: 0, mimeType: audioTypeOf(`x.${extension}`, '') } : undefined;
+  }
+  const id = driveFileId(url);
+  if (id && /\b(mp3|m4a|audio|download)\b/i.test(label) && !/\b(mp4|video|watch|clip)\b/i.test(label)) {
+    return { name: `${base}.mp3`, path: '', url: `https://${DRIVE_DOWNLOAD_HOST}/download?id=${id}&export=download&confirm=t`, size: 0, mimeType: 'audio/mpeg' };
+  }
+  return undefined;
+}
+
 function parsePost(body: unknown, slug: string, origin: string): Post {
   const raw = (body ?? {}) as {
     id?: unknown;
@@ -196,10 +234,15 @@ function parsePost(body: unknown, slug: string, origin: string): Post {
     categoryIds?: unknown;
   };
   if (typeof raw.id !== 'string' || !raw.id) throw new MusicTableError("music-table.com sent a post I couldn't read");
+  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : slug;
   const files: AudioFile[] = [];
   const visit = (node: unknown): void => {
     if (!node || typeof node !== 'object') return;
-    const n = node as { type?: unknown; fileData?: unknown; nodes?: unknown };
+    const n = node as { type?: unknown; fileData?: unknown; buttonData?: unknown; nodes?: unknown };
+    if ((n.type === BUTTON_NODE_TYPE || n.type === 'BUTTON') && n.buttonData && typeof n.buttonData === 'object' && files.length < MAX_FILES_PER_POST) {
+      const linked = linkedAudio(n.buttonData, title);
+      if (linked && !files.some((file) => file.url === linked.url)) files.push(linked);
+    }
     if ((n.type === FILE_NODE_TYPE || n.type === 'FILE') && n.fileData && typeof n.fileData === 'object') {
       const f = n.fileData as { name?: unknown; path?: unknown; size?: unknown; mimeType?: unknown };
       const name = typeof f.name === 'string' ? f.name : '';
@@ -212,7 +255,6 @@ function parsePost(body: unknown, slug: string, origin: string): Post {
     if (Array.isArray(n.nodes)) n.nodes.forEach(visit);
   };
   if (Array.isArray(raw.richContent?.nodes)) raw.richContent.nodes.forEach(visit);
-  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : slug;
   const imageId = raw.coverImage?.src?.id;
   const cover = typeof imageId === 'string' ? coverUrl(imageId) : undefined;
   const views = Number(raw.viewCount);
@@ -273,7 +315,8 @@ function audioTypeOf(name: string, mimeType: string): string {
 }
 
 const defaultTrusted = (url: URL): boolean =>
-  url.protocol === 'https:' && FILE_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`));
+  url.protocol === 'https:' &&
+  (url.hostname === DRIVE_DOWNLOAD_HOST || FILE_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`)));
 
 export class MusicTable {
   readonly baseUrl: string;
@@ -643,6 +686,13 @@ export class MusicTable {
   /** Asks the site for a time-limited download link to one of a post's files, the way its Download button does. */
   async #sign(post: Post, file: AudioFile): Promise<string> {
     const started = this.#now();
+    if (file.url) {
+      // The post links the file itself; there is nothing to sign, but the same rule applies to where it may point.
+      const direct = new URL(file.url);
+      if (!this.#trusted(direct)) throw new MusicTableError('music-table.com pointed me at a download host I do not trust');
+      this.#emit({ kind: 'link', detail: post.slug, ms: this.#now() - started, cached: false, note: 'download link from the post' });
+      return direct.href;
+    }
     const res = await this.#api('/_api/communities-blog-node-api/v2/files/download-url', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

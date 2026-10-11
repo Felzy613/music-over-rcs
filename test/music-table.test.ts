@@ -867,3 +867,69 @@ describe('music-table.com over Matrix, end to end', () => {
     assert.deepEqual(matrix.uploads[0]?.bytes, site.bytes('yoely-weiss-shabbos'));
   });
 });
+
+describe('posts that offer the MP3 as a download button', () => {
+  const button = (text: string, url: string) => ({ type: 19, buttonData: { text, link: { url } } });
+  const post = (title: string, nodes: unknown[]) => ({ id: 'p1', title, richContent: { nodes } });
+  const WIX = 'https://static.wixstatic.com/mp3/1ce022_cb5b5696e53a4434b70164944fd3e377.mp3';
+  const DRIVE = 'https://drive.google.com/file/d/1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM/view?usp=sharing';
+
+  /** A site whose one post is `body`; the download-url API fails the test if it is asked for anything. */
+  function siteWith(body: unknown): MusicTable {
+    const stub = (async (input: string | URL | Request) => {
+      const { pathname } = new URL(String(input));
+      if (pathname === '/_api/v1/access-tokens') return Response.json({ apps: { [BLOG_APP_ID]: { instance: 't' } } });
+      if (pathname.startsWith('/_api/communities-blog-node-api/_api/posts/')) return Response.json(body);
+      if (pathname.endsWith('/files/download-url')) assert.fail('a direct link needs no signing');
+      return new Response('nope', { status: 404 });
+    }) as typeof fetch;
+    return new MusicTable({ fetch: stub, minIntervalMs: 0 });
+  }
+
+  test('a button linking to an MP3 on the site’s storage is a song, and its link is used as it is', async () => {
+    const table = siteWith(post('Avraham Fried & Ari Stern - Chibas Yerushalayim', [button('To Download', WIX)]));
+    const found = await table.getPost('a-b');
+    assert.equal(found.files.length, 1);
+    assert.equal(found.files[0]!.name, 'Avraham Fried & Ari Stern - Chibas Yerushalayim.mp3');
+    assert.equal(found.files[0]!.mimeType, 'audio/mpeg');
+    assert.equal(await table.resolveUrl(table.trackUrl({ slug: 'a-b' }, 0)), WIX);
+    assert.deepEqual(tracksOf(table, found).map((t) => [t.artist, t.title]), [['Avraham Fried & Ari Stern', 'Chibas Yerushalayim']]);
+  });
+
+  test('a button on a Google Drive file that says Mp3 is a song, downloaded from Drive’s download address', async () => {
+    const table = siteWith(post('Gad Elbaz - Higale Na', [button('Mp3', DRIVE), button('Mp4', 'https://drive.google.com/file/d/1apYuXyNsZc4C-bdTwbZv-M6kVgjY2aAA/view?usp=sharing')]));
+    const found = await table.getPost('a-b');
+    assert.equal(found.files.length, 1, 'the Mp4 button is the video, not a song');
+    assert.equal(
+      await table.resolveUrl(table.trackUrl({ slug: 'a-b' }, 0)),
+      'https://drive.usercontent.google.com/download?id=1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM&export=download&confirm=t',
+    );
+    assert.deepEqual(await table.inspect(table.trackUrl({ slug: 'a-b' }, 0)), {
+      link: 'https://drive.usercontent.google.com/download?id=1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM&export=download&confirm=t',
+      type: 'audio/mpeg',
+      bytes: 0,
+    });
+  });
+
+  test('buttons that are not a song are left alone: folders, tickets, other hosts, plain http, videos', async () => {
+    const table = siteWith(
+      post('A - B', [
+        button('Google Drive', 'https://drive.google.com/drive/folders/14LcWriDEKnZa_uWkyBQHqZqThM5RTFS1?usp=sharing'),
+        button('To Buy Tickets', 'https://tickets.example.com/show'),
+        button('Mp3', 'https://evil.example/song.mp3'),
+        button('Mp3', 'http://static.wixstatic.com/mp3/x.mp3'),
+        button('To Download', 'https://static.wixstatic.com/video/x.mp4'),
+        button('Download the video', 'https://drive.google.com/file/d/1apYuXyNsZc4C-bdTwbZv-M6kVgjY2aAA/view'),
+        button('Mp3', 'not a url'),
+      ]),
+    );
+    assert.deepEqual((await table.getPost('a-b')).files, []);
+  });
+
+  test('a post that has both an attached file and a button keeps both, and a repeated button counts once', async () => {
+    const file = { name: 'B.mp3', mimeType: 'audio/mpeg', path: '/x/B.mp3', size: 5 };
+    const table = siteWith(post('A - B', [{ type: 10, fileData: file }, button('Mp3', DRIVE), button('Mp3', DRIVE)]));
+    const found = await table.getPost('a-b');
+    assert.deepEqual(found.files.map((f) => f.url ?? 'attached'), ['attached', 'https://drive.usercontent.google.com/download?id=1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM&export=download&confirm=t']);
+  });
+});
