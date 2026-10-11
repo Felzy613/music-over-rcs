@@ -1,0 +1,62 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A personal bot: you text `search <song>` in your own Google Messages "message yourself" chat and it sends back the audio file with album art. It reaches the phone through a self-hosted mautrix-gmessages bridge and a Matrix (Synapse) homeserver, both running on the user's Mac. Songs come from a local SQLite catalog fed by music-table.com (direct MP3 downloads on its release posts). `README.md` covers the user-facing behavior; `docs/architecture.md` is the fuller code tour.
+
+## Commands
+
+TypeScript runs directly on Node ≥ 22.18 (no build step), and there are **no runtime dependencies** (`node:sqlite`, `node:http`, built-in `fetch`). `npm install` only brings in `typescript` and `@types/node`.
+
+```bash
+npm test                          # whole suite, no network (mock servers in test/helpers/)
+npm run typecheck                 # tsc, noEmit; covers src, scripts, test and extensions
+npm run simulate:web -- --open    # real bot + real site in a browser chat; needs no accounts
+npm run matrix                    # run the bridge-route bot in the foreground (needs .env)
+npm run library -- <cmd>          # status | sync | scan | prefetch | digest [--days N] [--send]
+npm run stack -- status|restart|logs bot|sync-bot|enable-bot   # the launchd services
+```
+
+Run one test file, or one test by name (invoke `node` directly; `npm test` takes a fixed glob):
+
+```bash
+node --disable-warning=ExperimentalWarning --test test/naming.test.ts
+node --disable-warning=ExperimentalWarning --test --test-name-pattern="restart" test/bridge-restart.test.ts
+```
+
+There is no linter or formatter configured.
+
+## The running bot is a copy, not this folder
+
+macOS stops launchd jobs from reading `~/Documents`, so the always-on bot does **not** run from this checkout. `deploy/mac/stack` rsyncs `src/`, `extensions/`, `package.json` and `.env` into `~/Library/Application Support/music-over-rcs/bot/`, and the catalog and logs live there too (not in `data/`). Editing code here changes nothing in the live bot until `npm run stack -- restart` (it re-syncs the copy when the bot is loaded) or `sync-bot`. The same goes for `.env` edits. `data/catalog.db` is only what a local `npm run …` uses.
+
+## Architecture
+
+Three layers, in the order a message travels:
+
+1. **Transport** (`ChatClient`: `listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `setTyping`). Implementations: `src/matrix/` (the main route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`, entry `npm start`) is a separate webhook server that calls the bot directly and doesn't get the library features.
+2. **`src/runner.ts`** binds the bot to one chat: polls, ignores its own messages, handles 👍 reactions, `all`, typing indicators, downloading ahead (max 3 at once), spacing audio files by `SONG_GAP_SECONDS`, and sends bot-initiated messages through `announce` (never in the middle of answering a request).
+3. **`src/bot.ts`** decides what to answer and knows nothing about platforms. It takes text or a postback (`play:42`, `post:<slug>`, `all:…`) and returns `Reply[]` (`text`, `image`, `collage`, `audio`; see `src/types.ts`). A reply's `postback` is what makes a 👍 on that message mean "that song"; lists deliberately have no numbers.
+
+Entry points wire these together: `src/matrix-main.ts` is the best single file to read for how everything is assembled (catalog, music-table source, library jobs, health, bridge watch, extensions, runner).
+
+Behind the bot:
+
+- **`src/catalog.ts`**: one SQLite file (WAL, shared with the CLI tools): tracks + FTS, artists, site posts, plays, follows, audio cache, `message_links`, and a `state` key/value table. The background jobs persist their progress there, so restarts resume.
+- **`src/library/jobs.ts`** (`LibraryJobs`): ticks once a minute, doing one thing at a time (site sync every 3 h, prefetch, RSS check every 15 min while following anyone, daily message, follow alerts outside quiet hours, one-time full-site scan). The library tests drive it on a fake clock.
+- **`src/sources/music-table.ts`** (+ `relevance.ts`, `titles.ts`): the only song source; implements `TrackSource`. Site songs are stored as `…/post/<slug>#<n>` links, never download URLs, because the site's links expire; `resolvingAudio` fetches a fresh one at send time.
+- **`src/health.ts`**: `Health` raises macOS notifications (via `osascript`) because the chat can't report its own outage; `BridgeWatch` polls the bridge's login status and triggers `src/bridge-restart.ts` (launchd restart of the bridge).
+- **`src/library/`** also owns file naming (`naming.ts`: `Artist/Album/01 Title.mp3`), tag writing (`id3.ts`, `mp4.ts`, hand-rolled, untouched audio), and picture composition (`compose.ts` drives AppKit through `osascript`, so image features are macOS-only).
+- **`extensions/`** is gitignored (each add-on can be its own repo) but is still typechecked and tested. An add-on's `index.ts` default-exports an `ExtensionSetup` (`src/extensions.ts`); only the bridge route loads them, and a failing one is reported and skipped rather than stopping the bot.
+
+## Conventions and constraints
+
+- `tsconfig` uses `erasableSyntaxOnly`, `verbatimModuleSyntax`, `noUncheckedIndexedAccess` and `allowImportingTsExtensions`: no enums, namespaces or parameter properties; use `import type`; import local files with their `.ts` extension.
+- Entry points `import './load-env.ts'` first (loads `.env`; real environment variables win).
+- Every message the bot sends starts with `BOT_MARK` (🎵), and add-on relays start with `RELAY_MARK` (🤖); the runner never answers a message starting with either. The self-chat is shared by the bot and the user, so this is the loop guard; keep it when adding message types. The runner also treats a word-for-word repeat within 20 seconds as an echo of the first (a phone can show one text twice) and caps messages per minute.
+- Downloads must be audio, within `MAX_DOWNLOAD_MB`, and from the site's own HTTPS hosts; page links are rejected. The project **never downloads from YouTube or other streaming sites** (the YouTube embeds in site posts are ignored); don't add a source that does.
+- Servers (simulator, webhook) bind to 127.0.0.1 only.
+- Tests are `node:test` with mock servers for Matrix, music-table.com, Beeper, Google's RBM API and an audio host (`test/helpers/`); new behavior against those services should extend the mocks, not hit the network.
+- `.env`, `data/`, `*.db`, `keys/`, `extensions/` and `.claude/` are gitignored. `deploy/dell/` is an abandoned Windows/WSL setup (also ignored); don't revive it.
