@@ -8,11 +8,12 @@ The bot shows a notification titled **Music over RCS** when something it depends
 
 | Notification | What to do |
 | --- | --- |
-| Google Messages is logged out of the bridge | `npm run matrix-console`, then `login google`, and follow the bridge's steps (the same as the first time) |
+| Google Messages is logged out of the bridge | The bridge has no Google login at all (the phone unlinked it, or its data was lost), so nothing can reconnect by itself: `npm run matrix-console`, then `login google`, and follow the bridge's steps (the same as the first time). Said two minutes after the bridge starts without one. |
+| The bridge is signed out of Google Messages | Usually Google turned the bridge away for a while (a web filter or network block on `instantmessaging-pa.clients6.google.com` does this). The bot restarts the bridge every few minutes and it reconnects on its own once Google lets it through; there is nothing to do unless it lasts for hours, and then `login google` as above. (Said after fifteen minutes.) |
 | This Mac has no internet | The Mac can't reach the internet, even if Wi-Fi shows connected: usually the router's or the provider's connection is down, so restarting the modem and router is the fix. Texts you send meanwhile aren't lost: the bridge picks them up within a minute of the internet coming back, and the bot answers them. (Said after ten minutes, and only once.) |
-| The bridge can't reach Google Messages | The internet works but the bridge can't get through to Google. With "phone" in the reason, open Google Messages on the phone; otherwise `npm run stack -- restart` if it lasts. (Short drops are normal and aren't reported; this one has lasted 15 minutes.) |
+| The bridge can't reach Google Messages | The internet works but the bridge can't get through to Google. The bot restarts the bridge every few minutes (after the first, five minutes later, then every ten) for as long as it lasts, so it comes back by itself within about ten minutes of whatever was in the way (a web filter's downtime, say) going away. With "phone" in the reason, open Google Messages on the phone. (Short drops are normal and aren't reported; this one has lasted 15 minutes.) |
 | RCS chats are off on your phone | Google Messages → Settings → RCS chats → on. Without RCS, files this size can't be sent. |
-| The Google Messages bridge isn't answering | `npm run stack -- start` (or `npm run stack -- status` to see what stopped) |
+| The Google Messages bridge isn't answering | The bot restarts the bridge's service after two minutes, and again every few minutes. If it still says so, `npm run stack -- start` (or `npm run stack -- status` to see what stopped) |
 | The bot can't reach the Matrix homeserver | `npm run stack -- start` |
 | The drive for … has been away for a day; N songs wait on this Mac | Connect the drive (or check `SONGS_ARCHIVE_DIR`); the songs move within a minute. Nothing is lost meanwhile. |
 | macOS won't let the bot use … | System Settings → Privacy & Security → Files and Folders: allow `node` to use removable volumes (or the drive's folder). |

@@ -86,7 +86,7 @@ export class Health {
 
 /** What the bridge says about your Google Messages login. */
 export interface BridgeStatus {
-  /** CONNECTED, CONNECTING, TRANSIENT_DISCONNECT, BAD_CREDENTIALS, LOGGED_OUT, UNKNOWN_ERROR…; none when no login. */
+  /** CONNECTED, CONNECTING, TRANSIENT_DISCONNECT, BAD_CREDENTIALS, LOGGED_OUT, UNKNOWN_ERROR…; none when there is no login at all. */
   state: string | undefined;
   error?: string | undefined;
   message?: string | undefined;
@@ -110,7 +110,8 @@ export async function bridgeStatus(options: { url: string; token: string; userId
   const login = body.logins?.[0];
   if (!login) return { state: undefined };
   return {
-    state: login.state?.state_event,
+    // A login that hasn't reported yet (the bridge has just started) is connecting, not logged out.
+    state: login.state?.state_event ?? 'CONNECTING',
     error: login.state?.error,
     message: login.state?.message,
     rcsEnabled: login.state?.info?.settings?.rcs_enabled,
@@ -134,11 +135,18 @@ export async function online(doFetch: typeof fetch = fetch): Promise<boolean> {
 const OFFLINE_GRACE_MS = 10 * 60_000;
 const BRIDGE_RESTART_GRACE_MS = 2 * 60_000;
 const TROUBLE_GRACE_MS = 15 * 60_000;
+/** How long to wait before restarting a bridge that is still down after the first restart, then after the second and every one after. */
+const RESTART_AGAIN_MS = [5 * 60_000, 10 * 60_000];
 
 /**
  * Turns the bridge's status into problems: logged out (log in again), not reaching Google (after a while), RCS off
  * on the phone, or the bridge not running. When the bridge can't reach Google because this Mac has no internet,
  * that is what's said instead (once, after ten minutes), with nothing blamed on the bridge or the phone.
+ *
+ * A bridge that is down with the internet up is restarted, and restarted again every few minutes for as long as it
+ * stays down: Google can turn it away for a while (a web filter's downtime, a bad stretch of network) and the bridge
+ * doesn't reliably try again by itself once Google is reachable, so there is no one restart that is "the" restart.
+ * Only a bridge with no Google login at all can't mend itself; linking one takes a code scanned on the phone.
  */
 export class BridgeWatch {
   #health: Health;
@@ -151,6 +159,9 @@ export class BridgeWatch {
   #offlineSince: number | undefined;
   #networkRecovery = false;
   #restartAttempted = false;
+  /** Restarts in this stretch of trouble, and when the last one was. */
+  #restarts = 0;
+  #lastRestartAt: number | undefined;
   #lastSendFailureRestartAt: number | undefined;
 
   constructor(options: {
@@ -174,13 +185,18 @@ export class BridgeWatch {
     try {
       status = await this.#status();
     } catch {
+      // launchd starts a crashed bridge again by itself; one that hangs without exiting is restarted here.
+      const now = this.#now().getTime();
+      this.#troubleSince ??= now;
       this.#health.problem('bridge', "The Google Messages bridge isn't answering. Start it: npm run stack -- start");
+      if (this.#restartDue(now, BRIDGE_RESTART_GRACE_MS)) await this.#restartBridge("The Google Messages bridge isn't answering; restarting its bridge service.", now);
       return;
     }
     const now = this.#now().getTime();
-    const loggedOut = !status.state || status.state === 'BAD_CREDENTIALS' || status.state === 'LOGGED_OUT';
+    const noLogin = !status.state;
+    const signedOut = status.state === 'BAD_CREDENTIALS' || status.state === 'LOGGED_OUT';
     const connected = status.state === 'CONNECTED' || status.state === 'BACKFILLING';
-    if (!loggedOut && this.#online) {
+    if (!noLogin && this.#online) {
       if (!(await this.#online())) {
         this.#offlineSince ??= now;
         this.#troubleSince = undefined;
@@ -202,12 +218,16 @@ export class BridgeWatch {
       this.#restartAttempted = false;
     }
     const why = status.message || status.error;
-    if (loggedOut) {
-      this.#troubleSince = undefined;
+    if (noLogin) {
+      // Nothing to reconnect: Google Messages has to be linked again, which takes a code scanned on the phone. A bridge
+      // that has only just started may not list its login yet, so that isn't said at once.
+      this.#troubleSince ??= now;
       this.#networkRecovery = false;
       this.#restartAttempted = false;
       this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
-      this.#health.problem('bridge', `Google Messages is logged out of the bridge${why ? ` (${why})` : ''}. Log in again: npm run matrix-console, then "login google".`);
+      if (now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
+        this.#health.problem('bridge', 'Google Messages is logged out of the bridge. Log in again: npm run matrix-console, then "login google".');
+      }
     } else if (connected) {
       if (this.#networkRecovery && this.#restart && !this.#restartAttempted && this.#troubleSince !== undefined && now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
         await this.#restartBridge('Google Messages still reports connected after a network outage; restarting its bridge service to refresh the session.', now);
@@ -217,19 +237,38 @@ export class BridgeWatch {
         this.#troubleSince = undefined;
         this.#networkRecovery = false;
         this.#restartAttempted = false;
+        this.#restarts = 0;
+        this.#lastRestartAt = undefined;
       }
       this.#health.ok('bridge', 'Fixed: the bridge is connected to Google Messages again.');
       this.#health.ok('bridge-restart', 'Fixed: the bridge recovered after its automatic restart.');
     } else {
-      // Brief disconnects happen; only one that lasts is worth a word.
+      // Brief disconnects happen; only one that lasts is worth a word. Google turning the bridge away (signed out) is
+      // restarted sooner: a restart is how it tries again, and it costs nothing if it's still being turned away.
       this.#troubleSince ??= now;
       const troubleFor = now - this.#troubleSince;
-      const restartAfter = this.#networkRecovery ? BRIDGE_RESTART_GRACE_MS : TROUBLE_GRACE_MS;
-      if (this.#restart && !this.#restartAttempted && troubleFor >= restartAfter) {
-        await this.#restartBridge('Google Messages is still disconnected with the internet up; restarting its bridge service.', now);
-      } else if (troubleFor >= TROUBLE_GRACE_MS) {
-        const hint = /phone/i.test(why ?? '') ? 'Is your phone on and online?' : 'It keeps trying; if this lasts, restart it: npm run stack -- restart';
-        this.#health.problem('bridge', `The bridge can't reach Google Messages${why ? ` (${why})` : ''}. ${hint}`);
+      const restartAfter = this.#networkRecovery || signedOut ? BRIDGE_RESTART_GRACE_MS : TROUBLE_GRACE_MS;
+      if (this.#restartDue(now, restartAfter)) {
+        await this.#restartBridge(
+          signedOut
+            ? 'Google Messages has the bridge signed out; restarting its bridge service to try again.'
+            : 'Google Messages is still disconnected with the internet up; restarting its bridge service.',
+          now,
+        );
+      }
+      // With no automatic restarts there is nothing to wait for, so being signed out is said at once.
+      if (troubleFor >= TROUBLE_GRACE_MS || (signedOut && !this.#restart)) {
+        const detail = why ? ` (${why})` : '';
+        const retrying = ' The bot keeps restarting it and reconnects on its own once Google lets it through (a web filter blocking Google does this).';
+        if (signedOut && this.#restart) {
+          this.#health.problem('bridge', `The bridge is signed out of Google Messages${detail}.${retrying} If this lasts for hours, log in again: npm run matrix-console, then "login google".`);
+        } else if (signedOut) {
+          this.#health.problem('bridge', `Google Messages is logged out of the bridge${detail}. Log in again: npm run matrix-console, then "login google".`);
+        } else {
+          const phone = /phone/i.test(why ?? '') ? ' Is your phone on and online?' : '';
+          const hint = this.#restart ? retrying : phone || ' It keeps trying; if this lasts, restart it: npm run stack -- restart';
+          this.#health.problem('bridge', `The bridge can't reach Google Messages${detail}.${hint}${this.#restart ? phone : ''}`);
+        }
       }
     }
     if (status.rcsEnabled === false) this.#health.problem('rcs', "RCS chats are off on your phone, so songs can't be sent. Turn them on: Messages → Settings → RCS chats.");
@@ -251,14 +290,24 @@ export class BridgeWatch {
     await this.#restartBridge('Google Messages reported an undelivered message; restarting its bridge service.', now);
   }
 
+  /** Whether a bridge that is still not working is due a restart: the first after `firstAfterMs` of trouble, then again after growing gaps, for as long as it lasts. */
+  #restartDue(now: number, firstAfterMs: number): boolean {
+    if (!this.#restart || this.#troubleSince === undefined) return false;
+    if (this.#lastRestartAt === undefined) return now - this.#troubleSince >= firstAfterMs;
+    const gap = RESTART_AGAIN_MS[Math.min(this.#restarts - 1, RESTART_AGAIN_MS.length - 1)] ?? 10 * 60_000;
+    return now - this.#lastRestartAt >= gap;
+  }
+
   async #restartBridge(reason: string, now: number): Promise<void> {
     if (!this.#restart) return;
     this.#restartAttempted = true;
     this.#networkRecovery = false;
+    // Counted even if it fails, so a restart that can't happen (the service was stopped on purpose) isn't retried every minute.
+    this.#restarts += 1;
+    this.#lastRestartAt = now;
     this.#log(reason);
     try {
       await this.#restart();
-      this.#troubleSince = now;
       this.#log('restarted the Google Messages bridge; waiting for it to reconnect');
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
