@@ -197,7 +197,11 @@ describe('following artists', () => {
     { slug: 'other-new', title: 'Someone Else - Also New', files: [{ name: 'other.mp3' }], publishedAt: published },
   ];
 
-  async function alertSetUp(clock: { now: Date }, quiet?: { from: { hour: number; minute: number }; to: { hour: number; minute: number } }) {
+  async function alertSetUp(
+    clock: { now: Date },
+    quiet?: { from: { hour: number; minute: number }; to: { hour: number; minute: number } },
+    chat: { down: boolean } = { down: false },
+  ) {
     site = await startMockMusicTable([]);
     catalog = new Catalog(':memory:');
     catalog.setState(STATE.scanDone, iso(day(2026, 10, 1)));
@@ -207,7 +211,10 @@ describe('following artists', () => {
     const jobs = new LibraryJobs({
       musicTable: new MusicTable({ baseUrl: site.url, minIntervalMs: 0 }),
       catalog,
-      announce: async (replies) => void sent.push(replies),
+      announce: async (replies) => {
+        if (chat.down) throw new Error('the bridge is not connected to Google Messages');
+        sent.push(replies);
+      },
       digestAt: undefined,
       fetchAudio: async () => {
         throw new Error('no downloads here');
@@ -239,6 +246,24 @@ describe('following artists', () => {
     const card = alert![0]!;
     assert.ok(card.kind === 'image' && card.postback?.startsWith('play:') && card.caption?.title === 'Brand New');
     assert.equal(await jobs.alertFollowed(), 0, 'not twice');
+  });
+
+  test('an alert the chat could not take is not counted as sent: it goes once the chat can', async () => {
+    const clock = { now: day(2026, 10, 6, 23) };
+    const chat = { down: true };
+    const { jobs, sent } = await alertSetUp(clock, undefined, chat);
+    const fresh = await startMockMusicTable(alertPosts(iso(day(2026, 10, 6, 21))));
+    await syncSite({ musicTable: new MusicTable({ baseUrl: fresh.url, minIntervalMs: 0 }), catalog, now: () => clock.now });
+    await fresh.close();
+    assert.equal(await jobs.alertFollowed(), 0);
+    assert.equal(await jobs.alertFollowed(), 0, 'still waiting');
+    assert.equal(sent.length, 0);
+    assert.equal(catalog.sitePost('yw-new')?.alertedAt, undefined, 'not marked as alerted');
+    chat.down = false;
+    clock.now = day(2026, 10, 6, 23, 30);
+    assert.equal(await jobs.alertFollowed(), 1);
+    assert.equal(sent.length, 1);
+    assert.equal(await jobs.alertFollowed(), 0, 'and then not again');
   });
 
   test("no alert for a song you've had already, or for one out before you followed the artist", async () => {

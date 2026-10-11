@@ -100,7 +100,14 @@ try {
     },
   });
   await runner.start();
-  library.start((replies) => runner.announce(replies));
+  // The daily message and the new-song alerts count as sent once the chat takes them, which it does even when the bridge
+  // can't pass them on to Google Messages (unlinked, disconnected) and they would be lost. So they wait until it can;
+  // the daily message tries again in half an hour, the alerts at the next round.
+  library.start(async (replies) => {
+    const blocked = ['bridge', 'internet'].find((key) => health.has(key));
+    if (blocked) throw new Error(blocked === 'internet' ? 'this Mac has no internet' : 'the bridge is not connected to Google Messages');
+    await runner.announce(replies);
+  });
   const chat: ExtensionChat = {
     announce: (replies) => runner.announce(replies),
     post: (text) => matrix.sendText(config.roomID, text),

@@ -91,6 +91,8 @@ export class LibraryJobs {
   #siteFailures = 0;
   /** Since when the archive's drive has been away (this run). */
   #archiveAwaySince: number | undefined;
+  /** Whether the last new-song alert could not be sent, so a lasting outage is logged once, not every minute. */
+  #alertFailing = false;
 
   constructor(options: LibraryJobsOptions) {
     this.#o = options;
@@ -250,9 +252,11 @@ export class LibraryJobs {
     try {
       await this.#o.announce(replies);
     } catch (err) {
-      this.#log(`could not send the new-song alert: ${err instanceof Error ? err.message : String(err)}`);
+      if (!this.#alertFailing) this.#log(`could not send the new-song alert (it is tried again every minute): ${err instanceof Error ? err.message : String(err)}`);
+      this.#alertFailing = true;
       return 0;
     }
+    this.#alertFailing = false;
     catalog.markAlerted(posts.map((post) => post.slug), now);
     this.#log(`alerted ${posts.length} new post${posts.length === 1 ? '' : 's'} by artists you follow`);
     return posts.length;
