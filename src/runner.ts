@@ -21,6 +21,8 @@ const SEEN_LIMIT = 2000;
 const REPEAT_WINDOW_MS = 20_000;
 /** Songs downloading at once, ahead of their turn to be sent. */
 const DOWNLOADS_AHEAD = 3;
+/** Covers being drawn at once, ahead of their turn. Each is a separate drawing process, so only a couple. */
+const PICTURES_AHEAD = 2;
 const CHOICE_HINT = 'Reply with a number to choose.';
 /** What a number gets where a 👍 picks: lists there have no numbers. */
 const LIKE_HINT = 'To get a song from the list, tap 👍 on it.';
@@ -317,6 +319,21 @@ export function createRunner(options: RunnerOptions): Runner {
       }
     };
     startDownloads();
+    // Covers are drawn ahead too, so a song's card is ready when its turn comes instead of being drawn after the wait.
+    const pictures = replies.filter((reply): reply is Picture => reply.kind === 'image' || reply.kind === 'collage');
+    const drawn = new Map<Reply, Promise<PreparedPicture>>();
+    let drawing = 0;
+    let sentPictures = 0;
+    const startPictures = (): void => {
+      if (!chat.sendImage || !options.prepareImage) return;
+      while (drawing < pictures.length && drawing - sentPictures < PICTURES_AHEAD) {
+        const picture = pictures[drawing++]!;
+        const card = options.prepareImage(picture);
+        card.catch(() => {}); // handled when it's sent
+        drawn.set(picture, card);
+      }
+    };
+    startPictures();
     // The messages from the start (or from the song before) up to a song go together: the card waits with its song.
     const lastSong = replies.findLastIndex((reply) => reply.kind === 'audio');
     let songNext = true;
@@ -363,12 +380,15 @@ export function createRunner(options: RunnerOptions): Runner {
           continue;
         }
         try {
-          const prepared = await options.prepareImage(reply);
+          const prepared = await (drawn.get(reply) ?? options.prepareImage(reply));
           rememberLink(await chat.sendImage(chatID, prepared.image), reply.kind === 'image' ? reply.postback : undefined);
           if (!prepared.captioned) await sendCaption();
         } catch (err) {
           log(`could not send a picture: ${errorText(err)}`);
           await sendCaption();
+        } finally {
+          sentPictures += 1;
+          startPictures();
         }
       } else {
         if (reply.chips) setChoices({ chips: reply.chips, at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
@@ -448,24 +468,35 @@ export function createRunner(options: RunnerOptions): Runner {
     }
   }
 
-  /** A 👍 on a message that stands for a song gets that song. Any other reaction is just a reaction. */
-  async function handleReaction(message: ChatMessage): Promise<void> {
-    const postback = await postbackFor(message.reaction!.to);
-    if (!postback) {
-      log('ignoring a 👍 on a message that does not stand for a song');
-      return;
-    }
-    log(`<- 👍 ${postback}`);
+  /**
+   * 👍s on messages that stand for songs get those songs. Any other reaction is just a reaction. 👍s read together
+   * (five songs picked in a few seconds) are answered together: the songs are looked up at once and their downloads
+   * and covers run ahead of their turns as one line, instead of each waiting for the one before to be sent. The songs
+   * still go out in the order they were picked, songGapMs apart.
+   */
+  async function handleReactions(reactions: ChatMessage[]): Promise<void> {
+    const postbacks = await Promise.all(reactions.map((reaction) => postbackFor(reaction.reaction!.to)));
+    const asked = reactions.flatMap((reaction, i) => (postbacks[i] ? [{ reaction, postback: postbacks[i]! }] : []));
+    if (asked.length < reactions.length) log('ignoring a 👍 on a message that does not stand for a song');
+    if (asked.length === 0) return;
+    for (const { postback } of asked) log(`<- 👍 ${postback}`);
     const stopTyping = startTyping();
     try {
-      let replies: Reply[];
-      try {
-        replies = await bot.handle({ from: chatID, messageId: message.id, postback });
-      } catch (err) {
-        log(`bot error: ${errorText(err)}`);
-        replies = [{ kind: 'text', text: ERROR_NOTICE }];
-      }
-      await respond(replies);
+      let failed = false;
+      const answers = await Promise.all(
+        asked.map(async ({ reaction, postback }): Promise<Reply[]> => {
+          try {
+            return await bot.handle({ from: chatID, messageId: reaction.id, postback });
+          } catch (err) {
+            log(`bot error: ${errorText(err)}`);
+            // One apology for the lot, however many songs failed.
+            if (failed) return [];
+            failed = true;
+            return [{ kind: 'text', text: ERROR_NOTICE }];
+          }
+        }),
+      );
+      await respond(answers.flat());
     } finally {
       await stopTyping();
     }
@@ -496,6 +527,13 @@ export function createRunner(options: RunnerOptions): Runner {
         const messages = await chat.listMessages(chatID);
         failures = 0;
         options.onPoll?.(true, 0);
+        // 👍s are held until a request that is not one (or the end of what was read), then answered together.
+        let likes: ChatMessage[] = [];
+        const answerLikes = async (): Promise<void> => {
+          const batch = likes;
+          likes = [];
+          if (batch.length > 0) await handleReactions(batch);
+        };
         for (const message of messages) {
           if (seen.has(message.id)) continue;
           remember(message.id);
@@ -505,7 +543,7 @@ export function createRunner(options: RunnerOptions): Runner {
             continue;
           }
           if (message.reaction) {
-            if (isLike(message.reaction.key)) await handleReaction(message);
+            if (isLike(message.reaction.key)) likes.push(message);
             continue;
           }
           if (message.picture) {
@@ -521,8 +559,10 @@ export function createRunner(options: RunnerOptions): Runner {
             log(`ignoring a repeat of the last request (within ${REPEAT_WINDOW_MS / 1000} s): ${JSON.stringify(message.text?.trim())}`);
             continue;
           }
+          await answerLikes();
           await handleMessage(message);
         }
+        await answerLikes();
       } catch (err) {
         failures++;
         log(`poll failed (${failures} in a row): ${errorText(err)}`);
