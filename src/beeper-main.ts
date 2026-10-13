@@ -9,6 +9,9 @@ import { loadBeeperConfig } from './config.ts';
 import { setUpLibrary } from './library/setup.ts';
 import { createRunner } from './runner.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
+import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
+import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat (your "message yourself" chat), through Beeper Desktop.
 const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
@@ -24,20 +27,34 @@ try {
 
   // This machine downloads the file, so private addresses (a NAS, say) are fine and any audio format will do.
   const catalog = new Catalog(config.dbPath);
-  // When the catalog has no match the bot looks on music-table.com (MUSIC_TABLE=off turns that off).
+  // When the catalog has no match the bot looks on YouTube Music and music-table.com (YOUTUBE_MUSIC=off and
+  // MUSIC_TABLE=off turn them off; SONG_SOURCES sets which is asked first).
   const musicTable = musicTableFromEnv();
   void musicTable?.warm();
-  const audio = resolvingAudio(
-    musicTable,
-    {
-      checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true, maxBytes }),
-      fetchAudio: (url, title) => fetchAudio(url, title, { maxBytes }),
-    },
+  const youTube = youTubeMusicFromEnv();
+  const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
+  const audio = resolvingYouTubeAudio(
+    youTube,
+    resolvingAudio(
+      musicTable,
+      {
+        checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true, maxBytes }),
+        fetchAudio: (url, title) => fetchAudio(url, title, { maxBytes }),
+      },
+      { maxBytes },
+    ),
     { maxBytes },
   );
   // What's wrong, shown on the Mac: the chat can't carry news of its own breakdown.
   const health = new Health({ log, save: (problems) => catalog.setState('health.problems', JSON.stringify(problems)) });
   catalog.setState('health.problems', '[]');
+  // Zemer's artist list is what YouTube Music songs are filtered by, and it changes through the day: kept current while the
+  // bot runs, with a note on the Mac if it goes a day without updating (the last good list is used meanwhile).
+  const stopWatching = whitelist?.watch((error) => {
+    if (error === undefined) health.ok('whitelist', "Fixed: Zemer's artist list is updating again.");
+    else if (whitelist.ageMs > 24 * 60 * 60_000) health.problem('whitelist', `Zemer's artist list hasn't updated for a day (${error}). YouTube Music songs are being checked against the old list.`);
+  });
+  void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs`));
 
   // Songs kept on disk (the most played, the newest, the most viewed), album art, and the daily new-music message.
   const library = setUpLibrary({
@@ -53,13 +70,19 @@ try {
     onSite: (ok, problem) => (ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.problem('site', problem ?? "music-table.com isn't answering.")),
     log,
   });
+  const source = sourcesInOrder(songSourceOrder(), {
+    'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist }),
+    'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
+  });
+  // A YouTube Music song is checked against the list as it stands when it is sent, not only when it was found.
+  const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
   const bot = createBot({
     catalog,
-    checkAudio: library.checkAudio,
+    checkAudio: gatedAudioCheck(gate, library.checkAudio),
     onPlay: library.onPlay,
     browse: library.browse,
     follows: library.follows,
-    ...(musicTable ? { source: createMusicTableSource({ musicTable, catalog }) } : {}),
+    ...(source ? { source } : {}),
   });
   const runner = createRunner({
     chat: beeper,
@@ -80,11 +103,12 @@ try {
   await runner.start();
   library.start((replies) => runner.announce(replies));
   log(
-    `watching chat ${config.chatID}, ${catalog.count()} tracks in ${config.dbPath}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}. Text "search" and a song name in that chat.`,
+    `watching chat ${config.chatID}, ${catalog.count()} tracks in ${config.dbPath}, YouTube Music ${youTube ? 'on' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}. Text "search" and a song name in that chat.`,
   );
 
   const shutdown = async () => {
     log('shutting down');
+    stopWatching?.();
     await library.stop();
     await runner.stop();
     catalog.close();

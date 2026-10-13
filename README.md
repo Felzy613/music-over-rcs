@@ -2,7 +2,7 @@
 
 Text "search" and a song name in Google Messages and get the audio file back, with its album art.
 
-A personal bot that lives in your own "message yourself" chat. You text it a song or an artist; it finds the music in its catalog or on [music-table.com](https://www.music-table.com) (a Jewish music blog that offers MP3 downloads on its release posts) and sends the file back over RCS. Every morning it can also send you what's new.
+A personal bot that lives in your own "message yourself" chat. You text it a song or an artist; it finds the music in its catalog, on YouTube Music (through the same app API as the [Zemer](https://github.com/ZemerTeam/zemer-app) app, and only artists on Zemer's list, with no female singers) or on [music-table.com](https://www.music-table.com) (a Jewish music blog that offers MP3 downloads on its release posts) and sends the file back over RCS. Every morning it can also send you what's new.
 
 ```text
 you:  search yoely weiss shabbos
@@ -82,6 +82,7 @@ npm run stack -- enable-bot       # always on, starts at login
 | [Using the bot](docs/using-the-bot.md) | Everything you can text, what the answers look like, the daily message, 👍, following artists, holiday lists |
 | [Mac setup with the bridge](docs/setup-mac.md) | Installing, logging in to Google Messages, finding your chat, running it in the background |
 | [The library](docs/library.md) | The catalog, the site sync and full scan, songs kept ready, the daily message, alerts, `npm run library` |
+| [YouTube Music](docs/youtube-music.md) | What it asks YouTube Music for, Zemer's artist list and how it stays current, what you get, the order of the sources, and what breaks it |
 | [music-table.com](docs/music-table.md) | How the site is used, how matching and spelling fixes work, how it behaves toward the site |
 | [The simulator](docs/simulator.md) | Trying the bot in a browser or a terminal |
 | [Configuration](docs/configuration.md) | Every setting in `.env` |
@@ -92,8 +93,8 @@ npm run stack -- enable-bot       # always on, starts at login
 
 ## Good to know
 
-- **It's for personal use.** The songs are the files music-table.com offers for download. Whether you may keep or share them is between you and the rights holders; this project only fetches what you ask for, into your own chat. It never downloads from YouTube or other streaming sites, and the YouTube videos in the posts are ignored.
-- **Two unofficial pieces.** The bridge reverse-engineers Google Messages for web, and the site lookups use music-table.com's own page API. A change on either side can break things; the rest keeps working.
+- **It's for personal use.** The songs are the files music-table.com offers for download and the audio YouTube Music streams to its app. Whether you may keep or share them is between you and the rights holders; this project only fetches what you ask for, into your own chat. YouTube's terms don't allow fetching its streams outside its own apps. The YouTube videos in music-table.com's posts are still ignored; YouTube Music is a separate source.
+- **Three unofficial pieces.** The bridge reverse-engineers Google Messages for web, the site lookups use music-table.com's own page API, and the YouTube Music lookups use its app API. A change on any side can break things; the rest keeps working.
 - **Your phone and your Mac must be on.** The bridge works through your phone's Google Messages, and the bot runs on the Mac.
 
 ## License

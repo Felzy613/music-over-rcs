@@ -27,13 +27,13 @@ Options:
 | `--full` | Really download each file before "sending" it, as the bot does for a phone |
 | `--open` | Open the page in your browser |
 
-It listens on `127.0.0.1` only, and answers only pages loaded from that address with its own header, so another website can't drive it. It uses the live site, so it needs the internet; with `MUSIC_TABLE=off` it uses only the catalog.
+It listens on `127.0.0.1` only, and answers only pages loaded from that address with its own header, so another website can't drive it. It uses the live sites, so it needs the internet; with `MUSIC_TABLE=off` and `YOUTUBE_MUSIC=off` it uses only the catalog. A YouTube Music song can't be played in the browser (its link only works with the headers the bot sends); run it with `--full` to download it.
 
 ## In a terminal
 
 ```bash
 npm run simulate -- --demo     # three made-up songs, no network
-npm run simulate               # your catalog, and music-table.com when the catalog has no match
+npm run simulate               # your catalog, and YouTube Music and music-table.com when the catalog has no match
 npm run simulate -- --offline  # your catalog only; no link checks
 ```
 

@@ -11,6 +11,7 @@ import { catalogNaming } from '../src/library/naming.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
 import { createRunner, markBotText } from '../src/runner.ts';
 import { musicTableFromEnv, resolvingAudio } from '../src/sources/music-table.ts';
+import { resolvingYouTubeAudio, youTubeMusicFromEnv } from '../src/sources/youtube-music.ts';
 import type { Reply } from '../src/types.ts';
 
 // The bot's library: the catalog kept in step with music-table.com, the songs kept ready, the daily message.
@@ -38,12 +39,17 @@ if (!musicTable) {
   process.exit(1);
 }
 const maxBytes = (Number(env.MAX_DOWNLOAD_MB) || 100) * 1024 * 1024;
-const audio = resolvingAudio(
-  musicTable,
-  {
-    checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true, maxBytes }),
-    fetchAudio: (url, title) => fetchAudio(url, title, { maxBytes }),
-  },
+// Songs that came from YouTube Music are in the catalog too, and are kept ready the same way.
+const audio = resolvingYouTubeAudio(
+  youTubeMusicFromEnv(),
+  resolvingAudio(
+    musicTable,
+    {
+      checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true, maxBytes }),
+      fetchAudio: (url, title) => fetchAudio(url, title, { maxBytes }),
+    },
+    { maxBytes },
+  ),
   { maxBytes },
 );
 const digestAt = parseDailyTime(env.DIGEST_TIME);

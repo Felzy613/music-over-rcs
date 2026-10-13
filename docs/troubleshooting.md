@@ -37,6 +37,9 @@ A problem that lasts is repeated every six hours. **No notifications at all?** m
 
 ## Songs and lists
 
+- **"I couldn't search YouTube Music: …" or "YouTube Music wouldn't give me that song (…)":** the message says why. If it says `HTTP 400` or `HTTP 404`, YouTube has probably retired the client versions the bot imitates; see [YouTube Music](youtube-music.md#it-can-break). "not a bot" means YouTube wants a new session; the bot asks for one by itself, and if that keeps failing, try again later. Everything else keeps working, and `SONG_SOURCES=music-table` keeps the bot off YouTube meanwhile.
+- **A notification that Zemer's artist list hasn't updated for a day:** the bot keeps filtering with the last list it got, but new artists and newly blocked songs aren't in it. Usually `content.zemer.io` is down; it resolves itself. "I couldn't reach Zemer's artist list" in a reply means there is no list at all (a first run with no internet): YouTube Music is skipped until there is one.
+- **A YouTube Music song says "its artist isn't on Zemer's artist list", "it has a female singer" or "Zemer's list blocks that song":** that's the filter working on a song found earlier; the list changed since. See [Zemer's artist list](youtube-music.md#zemers-artist-list).
 - **"I couldn't search music-table.com: …":** the message says why. If it says the site may have changed, `npm run music-table -- search <words>` shows what the site returns now.
 - **A song you know is there isn't found:** try the artist and title as the site writes them, or fewer words. `npm run simulate:web` and **Behind the scenes** show what was searched and what the site listed.
 - **An artist's name gives songs instead of their list:** the name fits several artists and none clearly has the most songs (like `weiss`). Use the full name.

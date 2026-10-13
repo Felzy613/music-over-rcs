@@ -115,14 +115,19 @@ function chipLabel(n: number, title: string): string {
   return chars.length <= MAX_CHIP_LABEL ? chars.join('') : `${chars.slice(0, MAX_CHIP_LABEL - 1).join('')}…`;
 }
 
-/** Both lists, without repeats, the first one's order first, at most `limit`. */
+/** A song as two sources would both spell it, so the same song from each is told apart from different ones. */
+const sameSong = (track: Track): string => `${tokenize(track.title).join(' ')}|${tokenize(track.artist).join(' ')}`;
+
+/** Both lists, without repeats (the same song twice counts as one: the first list's copy stays), the first one's order first, at most `limit`. */
 function merge(first: Track[], second: Track[], limit: number): Track[] {
   const seen = new Set<number>();
+  const songs = new Set<string>();
   const out: Track[] = [];
   for (const track of [...first, ...second]) {
     if (out.length >= limit) break;
-    if (seen.has(track.id)) continue;
+    if (seen.has(track.id) || songs.has(sameSong(track))) continue;
     seen.add(track.id);
+    songs.add(sameSong(track));
     out.push(track);
   }
   return out;

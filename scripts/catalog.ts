@@ -5,6 +5,7 @@ import { checkAudio } from '../src/audio-check.ts';
 import { Catalog } from '../src/catalog.ts';
 import { tracksFromCsv, tracksFromJson } from '../src/import.ts';
 import { musicTableFromEnv } from '../src/sources/music-table.ts';
+import { youTubeMusicFromEnv } from '../src/sources/youtube-music.ts';
 import type { Track } from '../src/types.ts';
 
 const USAGE = `Usage: npm run catalog -- <command>
@@ -86,10 +87,12 @@ async function run(command: string | undefined, args: string[], catalog: Catalog
     case 'check': {
       const tracks = catalog.all();
       const failures = new Map<number, string | undefined>();
-      // Tracks found on music-table.com are links to posts, turned into a download link only when played.
-      // Checking them all here would mean a burst of requests to somebody's small site, so they are skipped.
+      // Tracks found on music-table.com or YouTube Music are links to a post or a song, turned into a download link
+      // only when played. Checking them all here would mean a burst of requests to somebody else's servers, so
+      // they are skipped.
       const musicTable = musicTableFromEnv();
-      const onSite = new Set(tracks.filter((track) => musicTable?.parseTrackUrl(track.url)).map((track) => track.id));
+      const youTube = youTubeMusicFromEnv();
+      const onSite = new Set(tracks.filter((track) => musicTable?.parseTrackUrl(track.url) || youTube?.parseTrackUrl(track.url)).map((track) => track.id));
       const queue = tracks.filter((track) => !onSite.has(track.id));
       const worker = async () => {
         for (let track = queue.shift(); track; track = queue.shift()) {
@@ -101,7 +104,7 @@ async function run(command: string | undefined, args: string[], catalog: Catalog
       let bad = 0;
       for (const track of tracks) {
         if (onSite.has(track.id)) {
-          console.log(`skip  #${track.id} ${label(track)}: on music-table.com, checked when played (npm run music-table -- check ${track.url})`);
+          console.log(`skip  #${track.id} ${label(track)}: ${youTube?.parseTrackUrl(track.url) ? 'on YouTube Music' : 'on music-table.com'}, checked when played`);
           continue;
         }
         const reason = failures.get(track.id);
@@ -112,7 +115,7 @@ async function run(command: string | undefined, args: string[], catalog: Catalog
           console.log(`FAIL  #${track.id} ${label(track)}: ${reason}\n      ${track.url}`);
         }
       }
-      const skipped = onSite.size > 0 ? `, ${onSite.size} on music-table.com not checked` : '';
+      const skipped = onSite.size > 0 ? `, ${onSite.size} on music-table.com or YouTube Music not checked` : '';
       console.log(`\n${tracks.length - bad - onSite.size} ok, ${bad} failing${skipped}`);
       return bad > 0 ? 1 : 0;
     }

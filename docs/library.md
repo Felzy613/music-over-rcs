@@ -14,7 +14,7 @@ Everything the bot knows lives in one SQLite file, the **catalog** (`CATALOG_DB`
 | **Songs kept ready**: which files are on disk, and when each was last used | Sending without downloading |
 | **The current list**, and which messages stand for which song | `all` and 👍 working across restarts |
 
-A site song is stored as a link to its post (`https://www.music-table.com/post/<name>#<n>`), never as the song's own download address: the site's download links expire, so a fresh one is asked for when the song is sent.
+A site song is stored as a link to its post (`https://www.music-table.com/post/<name>#<n>`), never as the song's own download address: the site's download links expire, so a fresh one is asked for when the song is sent. A [YouTube Music](youtube-music.md) song is stored the same way, as `https://music.youtube.com/watch?v=<id>`.
 
 Your own songs can go in too: direct links to audio files you have the right to use, from a CSV (`title,artist,url`) or one by one:
 
@@ -24,7 +24,7 @@ npm run catalog -- add "Song Name" "Artist Name" https://your-host.example/song.
 npm run catalog -- list | search <words> | remove <id> | check
 ```
 
-Page links (a video site's watch page, say) are refused on purpose. `check` tests every URL (it skips music-table.com songs, which are checked when they're sent).
+Page links (a video site's watch page, say) are refused on purpose. `check` tests every URL (it skips music-table.com and YouTube Music songs, which are checked when they're sent).
 
 ## Keeping up with the site
 
