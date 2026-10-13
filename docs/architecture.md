@@ -40,6 +40,7 @@ src/audio-check.ts      checks a link: reachable, audio, within the size limit
 src/audio-fetch.ts      downloads a direct audio link into memory
 src/image-fetch.ts      downloads album art (with a small memory)
 src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies
+src/library/zip.ts      writes a ZIP (files stored as they are, UTF-8 names) for albums: no dependencies
 src/library/images.ts   a song's card (cover + name) and the daily collage (the new covers in a grid)
 src/sources/            music-table.com: the client, the lookup, relevance and spelling; youtube-music.ts: YouTube Music's app API (search, stream links, download); zemer-whitelist.ts: Zemer's artist list, kept current; songs.ts: which source is asked first
 src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs, and:

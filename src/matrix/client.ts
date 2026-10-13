@@ -443,9 +443,14 @@ export class MatrixClient {
     return this.#sendFile(roomID, 'm.image', image);
   }
 
+  /** Uploads a file and posts it to the room as an attachment (an album's ZIP). */
+  async sendFile(roomID: string, file: { data: Blob; fileName: string; mimeType: string; bytes: number }): Promise<string | undefined> {
+    return this.#sendFile(roomID, 'm.file', file);
+  }
+
   async #sendFile(
     roomID: string,
-    msgtype: 'm.audio' | 'm.image',
+    msgtype: 'm.audio' | 'm.image' | 'm.file',
     file: { data: Blob; fileName: string; mimeType: string; bytes: number },
   ): Promise<string | undefined> {
     const upload = await this.#request('POST', '/_matrix/media/v3/upload', {

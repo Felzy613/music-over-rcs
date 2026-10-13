@@ -790,16 +790,20 @@ describe('Zemer’s artist list', () => {
     const list = make();
     await list.ready();
     const outcomes: Array<string | undefined> = [];
+    const until = async (done: () => boolean): Promise<void> => {
+      for (let waited = 0; !done() && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+    };
     const stop = list.watch((error) => outcomes.push(error), 20);
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    zemer.failing = new Set(['/whitelist/version']);
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    stop();
-    const seen = outcomes.length;
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.equal(outcomes.length, seen, 'stopped');
+    await until(() => outcomes.includes(undefined));
     assert.ok(outcomes.includes(undefined), 'it succeeded while the server was fine');
-    assert.ok(outcomes.some((outcome) => outcome === "Zemer's artist list answered HTTP 503"), 'and said so when it failed');
+    zemer.failing = new Set(['/whitelist/version']);
+    await until(() => outcomes.includes("Zemer's artist list answered HTTP 503"));
+    assert.ok(outcomes.includes("Zemer's artist list answered HTTP 503"), 'and said so when it failed');
+    stop();
+    await new Promise((resolve) => setTimeout(resolve, 60)); // a check already under way may still report
+    const seen = outcomes.length;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(outcomes.length, seen, 'stopped');
   });
 
   test('zemerWhitelistFromEnv can be pointed elsewhere', () => {

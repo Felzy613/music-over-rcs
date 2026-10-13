@@ -2,6 +2,26 @@ import { listen, readText, type Listening } from './servers.ts';
 
 /** The songs filter Zemer sends with a search (SearchFilter.FILTER_SONG). */
 export const SONG_FILTER = 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D';
+/** And its albums filter (SearchFilter.FILTER_ALBUM). */
+export const ALBUM_FILTER = 'EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D';
+
+export interface MockAlbumTrack {
+  /** Left out for a song that can't be played (greyed out on the real page): it has no video id. */
+  videoId?: string;
+  title: string;
+  /** Left out for most songs: an album page usually doesn't name them, and they are the album's. */
+  artists?: string[];
+}
+
+export interface MockAlbum {
+  browseId: string;
+  title: string;
+  artists: string[];
+  year?: number;
+  tracks: MockAlbumTrack[];
+  /** How many songs the page holds before the rest comes by continuation. All of them by default. */
+  firstPage?: number;
+}
 
 export interface MockSong {
   videoId: string;
@@ -40,6 +60,8 @@ export interface MockYouTubeMusic extends Listening {
   searches: Array<{ query: string; params: string | undefined; visitor: string | undefined }>;
   playerCalls: MockPlayerCall[];
   mediaCalls: MockMediaCall[];
+  /** Every browse request: the album's id, or "continuation". */
+  browses: string[];
   /** How many visitor ids were handed out. They are "VISITOR1==", "VISITOR2==", and so on, sent URL-encoded. */
   visitorIds: number;
   /** Visitor ids numbered below this are refused with "confirm you're not a bot". */
@@ -109,6 +131,38 @@ function row(song: MockSong): unknown {
   };
 }
 
+const AT_A_TIME = 100;
+
+function albumRow(album: MockAlbum): unknown {
+  const second: Array<{ text: string; navigationEndpoint?: unknown }> = [{ text: 'Album' }, { text: ' • ' }, ...joinCredit(album.artists)];
+  if (album.year) second.push({ text: ' • ' }, { text: String(album.year) });
+  return {
+    musicResponsiveListItemRenderer: {
+      navigationEndpoint: { browseEndpoint: { browseId: album.browseId } },
+      thumbnail: { musicThumbnailRenderer: { thumbnail: { thumbnails: [{ url: `https://lh3.googleusercontent.com/${album.browseId}=w60-h60-l90-rj` }, { url: `https://lh3.googleusercontent.com/${album.browseId}=w120-h120-l90-rj` }] } } },
+      flexColumns: [
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: album.title }] } } },
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: second } } },
+      ],
+    },
+  };
+}
+
+function trackRow(track: MockAlbumTrack, number: number): unknown {
+  return {
+    musicResponsiveListItemRenderer: {
+      ...(track.videoId ? { playlistItemData: { videoId: track.videoId } } : {}),
+      index: { runs: [{ text: String(number) }] },
+      flexColumns: [
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: track.title }] } } },
+        { musicResponsiveListItemFlexColumnRenderer: track.artists ? { text: { runs: joinCredit(track.artists) } } : {} },
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: '27K plays' }] } } },
+      ],
+      fixedColumns: [{ musicResponsiveListItemFixedColumnRenderer: { text: { runs: [{ text: '3:05' }] } } }],
+    },
+  };
+}
+
 const words = (text: string): string[] => text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 
 /**
@@ -117,7 +171,7 @@ const words = (text: string): string[] => text.toLowerCase().match(/[\p{L}\p{N}]
  * refused as a bot check, a retired client version is HTTP 400, and a media link answers 403 unless the request carries
  * the client's own User-Agent and a Range header.
  */
-export async function startMockYouTubeMusic(songs: MockSong[]): Promise<MockYouTubeMusic> {
+export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum[] = []): Promise<MockYouTubeMusic> {
   const byId = new Map(songs.map((song) => [song.videoId, song]));
   let origin = '';
 
@@ -128,6 +182,7 @@ export async function startMockYouTubeMusic(songs: MockSong[]): Promise<MockYouT
     searches: [],
     playerCalls: [],
     mediaCalls: [],
+    browses: [],
     visitorIds: 0,
     firstAcceptedVisitor: 1,
     retiredVersions: new Set(),
@@ -138,6 +193,7 @@ export async function startMockYouTubeMusic(songs: MockSong[]): Promise<MockYouT
       mock.searches = [];
       mock.playerCalls = [];
       mock.mediaCalls = [];
+      mock.browses = [];
       mock.visitorIds = 0;
       mock.firstAcceptedVisitor = 1;
       mock.retiredVersions = new Set();
@@ -186,6 +242,16 @@ export async function startMockYouTubeMusic(songs: MockSong[]): Promise<MockYouT
       mock.searches.push({ query: body.query, params: body.params, visitor: req.headers['x-goog-visitor-id'] as string | undefined });
       if (mock.failSearch) return json(500, { error: 'boom' });
       const wanted = words(String(body.query ?? ''));
+      if (body.params === ALBUM_FILTER) {
+        const matching = albums.filter((album) => {
+          const text = words(`${album.title} ${album.artists.join(' ')}`);
+          return wanted.some((word) => text.some((have) => have.startsWith(word)));
+        });
+        return json(200, {
+          responseContext: {},
+          contents: { tabbedSearchResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{ musicShelfRenderer: { contents: matching.map(albumRow) } }] } } } }] } },
+        });
+      }
       const found = songs.filter((song) => {
         const text = words(`${song.title} ${song.artists.join(' ')}`);
         return wanted.some((word) => text.some((have) => have.startsWith(word)));
@@ -195,6 +261,53 @@ export async function startMockYouTubeMusic(songs: MockSong[]): Promise<MockYouT
         contents: {
           tabbedSearchResultsRenderer: {
             tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{ musicShelfRenderer: { contents: found.map(row) } }] } } } }],
+          },
+        },
+      });
+    }
+
+    if (endpoint === 'browse') {
+      const continuation = typeof body.continuation === 'string' ? /^CONT:(.+):(\d+)$/.exec(body.continuation) : null;
+      if (continuation) {
+        mock.browses.push('continuation');
+        const album = albums.find((candidate) => candidate.browseId === continuation[1]);
+        const from = Number(continuation[2]);
+        const rows = (album?.tracks ?? []).slice(from, from + AT_A_TIME).map((track, i) => trackRow(track, from + i + 1));
+        const next = from + AT_A_TIME < (album?.tracks.length ?? 0) ? [{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: `CONT:${album!.browseId}:${from + AT_A_TIME}` } } } }] : [];
+        return json(200, { onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [...rows, ...next] } }] });
+      }
+      mock.browses.push(String(body.browseId));
+      const album = albums.find((candidate) => candidate.browseId === body.browseId);
+      if (!album) return json(404, { error: { code: 404, message: 'not found' } });
+      const first = album.firstPage ?? album.tracks.length;
+      const rows = album.tracks.slice(0, first).map((track, i) => trackRow(track, i + 1));
+      if (first < album.tracks.length) rows.push({ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: `CONT:${album.browseId}:${first}` } } } });
+      return json(200, {
+        responseContext: {},
+        microformat: { microformatDataRenderer: { urlCanonical: `https://music.youtube.com/playlist?list=OLAK5uy_${album.browseId}` } },
+        contents: {
+          twoColumnBrowseResultsRenderer: {
+            tabs: [
+              {
+                tabRenderer: {
+                  content: {
+                    sectionListRenderer: {
+                      contents: [
+                        {
+                          musicResponsiveHeaderRenderer: {
+                            title: { runs: [{ text: album.title }] },
+                            straplineTextOne: { runs: joinCredit(album.artists) },
+                            subtitle: { runs: [{ text: 'Album' }, { text: ' • ' }, ...(album.year ? [{ text: String(album.year) }] : [])] },
+                            thumbnail: { musicThumbnailRenderer: { thumbnail: { thumbnails: [{ url: `https://lh3.googleusercontent.com/${album.browseId}=w226-h226-l90-rj` }, { url: `https://lh3.googleusercontent.com/${album.browseId}=w544-h544-l90-rj` }] } } },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+            secondaryContents: { sectionListRenderer: { contents: [{ musicShelfRenderer: { contents: rows } }] } },
           },
         },
       });

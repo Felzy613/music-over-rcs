@@ -12,7 +12,7 @@ import { setUpLibrary } from './library/setup.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat, through the mautrix-gmessages bridge and a Matrix room.
@@ -81,8 +81,10 @@ try {
   const assistant = extensions.find((extension) => extension.assistant)?.assistant;
   const pictureTakers = extensions.filter((extension) => extension.onPicture);
   const prepareImage = extensions.reduce((prepare, extension) => extension.pictures?.(prepare) ?? prepare, library.prepareImage);
+  const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
+  const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
   const source = sourcesInOrder(songSourceOrder(), {
-    'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist }),
+    'youtube-music': youTubeSongs,
     'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
   });
   // A YouTube Music song is checked against the list as it stands when it is sent, not only when it was found.
@@ -95,6 +97,8 @@ try {
     follows: library.follows,
     ...(assistant ? { assistant } : {}),
     ...(source ? { source } : {}),
+    ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
+    ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
   });
   const bridge = new BridgeWatch({
     health,
@@ -113,6 +117,7 @@ try {
     links: linksIn(catalog),
     pollMs: config.pollMs,
     songGapMs: config.songGapMs,
+    maxFileBytes: maxBytes,
     onBridgeSendFailure: () => bridge.sendFailed(),
     ...(pictureTakers.length > 0 ? { onPicture: (picture: IncomingPicture) => pictureTakers.forEach((extension) => extension.onPicture!(picture)) } : {}),
     log,

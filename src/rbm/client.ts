@@ -169,6 +169,7 @@ export class RbmClient {
   async send(to: string, reply: Reply): Promise<void> {
     if (reply.kind === 'audio') return this.sendAudio(to, reply.url);
     if (reply.kind === 'collage') return; // its songs are listed in the messages around it
+    if (reply.kind === 'album') return; // a ZIP can't be sent by link here; this route has no albums to offer
     if (reply.kind === 'image') {
       // Google shows the cover; the song's name goes under it as text.
       await this.sendImage(to, reply.url);
