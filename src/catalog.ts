@@ -17,6 +17,8 @@ export interface NewTrack {
   /** The music-table.com post it comes from, and when that was published (ISO). */
   post?: string | undefined;
   releasedAt?: string | undefined;
+  /** The channel ids of the artists credited on it, for songs found on YouTube Music (checked against Zemer's list when sent). */
+  artistIds?: string[] | undefined;
 }
 
 /** An artist found in the songs' credits, with how many songs they're on. */
@@ -206,6 +208,7 @@ export class Catalog {
     if (!columns.includes('cover')) this.#db.exec('ALTER TABLE tracks ADD COLUMN cover TEXT');
     if (!columns.includes('post')) this.#db.exec('ALTER TABLE tracks ADD COLUMN post TEXT');
     if (!columns.includes('released_at')) this.#db.exec('ALTER TABLE tracks ADD COLUMN released_at TEXT');
+    if (!columns.includes('artist_ids')) this.#db.exec('ALTER TABLE tracks ADD COLUMN artist_ids TEXT');
     this.#db.exec('CREATE INDEX IF NOT EXISTS tracks_by_post ON tracks (post)');
     const postColumns = this.#db.prepare('PRAGMA table_info(site_posts)').all().map((column) => String(column.name));
     if (!postColumns.includes('category_ids')) this.#db.exec('ALTER TABLE site_posts ADD COLUMN category_ids TEXT');
@@ -249,12 +252,13 @@ export class Catalog {
     const cover = input.cover?.trim() || null;
     const row = this.#db
       .prepare(
-        `INSERT INTO tracks (title, artist, url, cover, post, released_at) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO tracks (title, artist, url, cover, post, released_at, artist_ids) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (url) DO UPDATE SET title = excluded.title, artist = excluded.artist, cover = coalesce(excluded.cover, cover),
-           post = coalesce(excluded.post, post), released_at = coalesce(excluded.released_at, released_at)
+           post = coalesce(excluded.post, post), released_at = coalesce(excluded.released_at, released_at),
+           artist_ids = coalesce(excluded.artist_ids, artist_ids)
          RETURNING ${TRACK_COLUMNS}`,
       )
-      .get(title, artist, url, cover, input.post ?? null, input.releasedAt ?? null);
+      .get(title, artist, url, cover, input.post ?? null, input.releasedAt ?? null, input.artistIds ? JSON.stringify(input.artistIds) : null);
     const track = toTrack(row!);
     this.#linkArtists(track.id, artist);
     return track;
@@ -263,6 +267,18 @@ export class Catalog {
   get(id: number): Track | undefined {
     const row = this.#db.prepare(`SELECT ${TRACK_COLUMNS} FROM tracks WHERE id = ?`).get(id);
     return row ? toTrack(row) : undefined;
+  }
+
+  /** The channel ids of the artists credited on a song found on YouTube Music; undefined for any other song. */
+  artistIdsOf(url: string): string[] | undefined {
+    const raw = this.#db.prepare('SELECT artist_ids FROM tracks WHERE url = ?').get(url)?.artist_ids;
+    if (typeof raw !== 'string') return undefined;
+    try {
+      const ids: unknown = JSON.parse(raw);
+      return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   byUrl(url: string): Track | undefined {

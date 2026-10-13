@@ -22,6 +22,7 @@ You get two messages:
 - **Apostrophes are optional.** `search lipa vnusni` finds "V’Nusni", `search uvtuvcha` finds "U’v’tuvcha HaGadol", and `search v'nusni` works too.
 - **Typos are fine.** `search yoely wiess shabos`, `search lipa shmeltzer vnusni` (the site writes "Schmeltzer"), `search avrohom fried` ("Avraham"), `search shlomo daskal` ("Shloime") and `search mordechai ben dovid` all work. The bot learns the site's spelling from the titles around your other words.
 - **Extra words are fine.** `... by Yoely Weiss` is understood, and in a longer request one stray word (an `mp3` at the end, say) is forgiven.
+- **Where songs come from.** When the catalog has no match, the bot looks on YouTube Music, and then on music-table.com if YouTube Music finds nothing ([YouTube Music](youtube-music.md), `SONG_SOURCES`). A YouTube Music song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
 - **A song it already knows by name comes back at once.** The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
 - **A letter off in `search` itself is fine** (`serach`, `seach`).
 

@@ -13,12 +13,19 @@ import { catalogFollows } from '../library/follows.ts';
 import { LibraryJobs } from '../library/jobs.ts';
 import { createRunner, type Runner } from '../runner.ts';
 import { createMusicTableSource, resolvingAudio, type MusicTable } from '../sources/music-table.ts';
+import { sourcesInOrder, songSourceOrder } from '../sources/songs.ts';
+import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, type YouTubeMusic } from '../sources/youtube-music.ts';
+import type { ZemerWhitelist } from '../sources/zemer-whitelist.ts';
 import { SimulatedChat } from './chat.ts';
 import type { Trace, TraceItem, TraceRun } from './trace.ts';
 
 export interface SimulatorOptions {
   catalog: Catalog;
   musicTable: MusicTable | undefined;
+  /** YouTube Music, asked for songs before music-table.com unless SONG_SOURCES says otherwise. */
+  youTube?: YouTubeMusic | undefined;
+  /** Zemer's artist list, which YouTube Music results are filtered by. Needed whenever `youTube` is. */
+  whitelist?: ZemerWhitelist | undefined;
   trace: Trace;
   /** Really download each file the bot sends, as it does for a phone. By default only its type and size are checked. */
   full?: boolean;
@@ -69,7 +76,8 @@ const runSummary = (run: TraceRun) => ({
  * music-table.com lookup the phone setup uses, with a "behind the scenes" panel that shows each step and its time.
  */
 export function createSimulator(options: SimulatorOptions): Simulator {
-  const { catalog, musicTable, trace } = options;
+  const { catalog, musicTable, youTube, whitelist, trace } = options;
+  const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
   const now = options.now ?? Date.now;
   const maxBytes = options.maxBytes ?? 100 * 1024 * 1024;
   const clients = new Set<ServerResponse>();
@@ -88,12 +96,12 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     checkAudio: (url: string) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true, maxBytes }),
     fetchAudio: (url: string, title?: string) => fetchAudio(url, title, { maxBytes }),
   };
-  const audio = resolvingAudio(musicTable, real, { maxBytes });
+  const audio = resolvingYouTubeAudio(youTube, resolvingAudio(musicTable, real, { maxBytes }), { maxBytes });
   const pictures = options.prepareImage ?? createPictures();
 
   /** Type and size of a file without downloading it. */
   async function describeFile(url: string): Promise<{ type: string; bytes: number }> {
-    const site = await musicTable?.inspect(url);
+    const site = (await musicTable?.inspect(url)) ?? (await youTube?.inspect(url));
     if (site) return { type: site.type, bytes: site.bytes };
     const check = await real.checkAudio(url);
     if (!check.ok) throw new AudioFetchError(check.reason);
@@ -116,11 +124,16 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     postTracks: (slug: string) => catalog.postTracks(slug),
   };
 
+  const onNote = (note: string): void => trace.add({ label: 'lookup', detail: note, tone: 'note' });
+  const source = sourcesInOrder(songSourceOrder(), {
+    'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist, onNote }),
+    'music-table': musicTable && createMusicTableSource({ musicTable, catalog, onNote }),
+  });
   const bot = createBot({
     catalog: tracedCatalog,
     checkAudio: async (url) => {
       const started = now();
-      const result = await audio.checkAudio(url);
+      const result = await gatedAudioCheck(gate, audio.checkAudio)(url);
       trace.add({
         label: 'check file',
         detail: result.ok ? `${result.type}, ${mb(result.bytes ?? 0)}` : `refused: ${result.reason}`,
@@ -132,9 +145,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     onPlay: (track) => catalog.recordPlay(track.id),
     browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined),
     follows: catalogFollows(catalog),
-    ...(musicTable
-      ? { source: createMusicTableSource({ musicTable, catalog, onNote: (note) => trace.add({ label: 'lookup', detail: note, tone: 'note' }) }) }
-      : {}),
+    ...(source ? { source } : {}),
   });
 
   /**
@@ -333,6 +344,8 @@ export function createSimulator(options: SimulatorOptions): Simulator {
       } else if (req.method === 'GET' && path.startsWith('/api/play/')) {
         const original = links.get(decodeURIComponent(path.slice('/api/play/'.length)));
         if (!original) return json(res, 404, { error: 'unknown file' });
+        // A YouTube Music link only works with the headers the bot sends, so a browser can't play it.
+        if (youTube?.parseTrackUrl(original)) return json(res, 409, { error: "YouTube Music songs can't be played in the browser; use --full to download them" });
         try {
           json(res, 200, { url: musicTable ? await musicTable.resolveUrl(original) : original });
         } catch (err) {

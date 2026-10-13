@@ -5,11 +5,15 @@ import { checkAudio, MAX_BYTES } from './audio-check.ts';
 import { createBot, joinLists } from './bot.ts';
 import { Catalog } from './catalog.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
+import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
+import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 import type { Chip, Incoming, Reply } from './types.ts';
 
 // A local stand-in for Google Messages: same bot, no accounts, no network except the URL checks and, when the
-// catalog has no match, a look on music-table.com (MUSIC_TABLE=off stops that). It never downloads any audio.
-//   --offline  skip the URL checks and the music-table.com lookups
+// catalog has no match, a look on YouTube Music and music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off stop that).
+// It never downloads any audio.
+//   --offline  skip the URL checks and the YouTube Music and music-table.com lookups
 //   --demo     use three made-up tracks held in memory (implies --offline), to try it before you have a catalog
 const demo = process.argv.includes('--demo');
 const offline = demo || process.argv.includes('--offline');
@@ -27,20 +31,32 @@ if (demo) {
 }
 const musicTable = offline ? undefined : musicTableFromEnv();
 void musicTable?.warm();
-const checkLink = resolvingAudio(
-  musicTable,
-  {
-    checkAudio: (url) => checkAudio(url),
-    fetchAudio: async () => {
-      throw new Error('the simulator never downloads audio');
+const youTube = offline ? undefined : youTubeMusicFromEnv();
+const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
+void whitelist?.warm();
+const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
+const checkLink = resolvingYouTubeAudio(
+  youTube,
+  resolvingAudio(
+    musicTable,
+    {
+      checkAudio: (url) => checkAudio(url),
+      fetchAudio: async () => {
+        throw new Error('the simulator never downloads audio');
+      },
     },
-  },
+    { maxBytes: MAX_BYTES },
+  ),
   { maxBytes: MAX_BYTES },
 ).checkAudio;
+const source = sourcesInOrder(songSourceOrder(), {
+  'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist }),
+  'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
+});
 const bot = createBot({
   catalog,
-  checkAudio: offline ? async () => ({ ok: true, type: 'audio/mpeg' }) : checkLink,
-  ...(musicTable ? { source: createMusicTableSource({ musicTable, catalog }) } : {}),
+  checkAudio: offline ? async () => ({ ok: true, type: 'audio/mpeg' }) : gatedAudioCheck(gate, checkLink),
+  ...(source ? { source } : {}),
 });
 
 let chips: Chip[] = [];
@@ -67,10 +83,10 @@ function print(reply: Reply): void {
 
 const mode = demo
   ? 'demo: 3 made-up tracks'
-  : `${catalog.count()} tracks in ${dbPath}${offline ? ', URL checks skipped' : ''}${musicTable ? ', music-table.com on' : ''}`;
+  : `${catalog.count()} tracks in ${dbPath}${offline ? ', URL checks skipped' : ''}${youTube ? ', YouTube Music on' : ''}${musicTable ? ', music-table.com on' : ''}`;
 const intro = [`Local simulator (${mode})`];
-if (musicTable) intro.push('When the catalog has no match, the bot looks on music-table.com and keeps what it finds.');
-if (!demo && !musicTable && catalog.count() === 0) {
+if (source) intro.push(`When the catalog has no match, the bot looks on ${source.name} and keeps what it finds.`);
+if (!demo && !source && catalog.count() === 0) {
   intro.push('The catalog is empty, so every request will answer "No match".');
   intro.push('Add tracks first (see the README), or try the made-up catalog: npm run simulate -- --demo');
 }

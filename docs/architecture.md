@@ -41,7 +41,7 @@ src/audio-fetch.ts      downloads a direct audio link into memory
 src/image-fetch.ts      downloads album art (with a small memory)
 src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies
 src/library/images.ts   a song's card (cover + name) and the daily collage (the new covers in a grid)
-src/sources/            music-table.com: the client, the lookup, relevance and spelling
+src/sources/            music-table.com: the client, the lookup, relevance and spelling; youtube-music.ts: YouTube Music's app API (search, stream links, download); zemer-whitelist.ts: Zemer's artist list, kept current; songs.ts: which source is asked first
 src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs, and:
   categories.ts         holiday and other category lists (learning the site's category ids)
   category-list.ts      which categories, and the words that ask for them
@@ -99,10 +99,10 @@ npm test
 npm run typecheck
 ```
 
-`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list by category, category pages, feed, files, download links), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a Mac asleep at 09:00, retries, quiet hours), and the seasons are checked against real dates.
+`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list by category, category pages, feed, files, download links), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a Mac asleep at 09:00, retries, quiet hours), and the seasons are checked against real dates.
 
 ## Extending
 
 - **Another chat platform:** implement `ChatClient` beside `src/matrix/` and `src/beeper/`, then start a runner with it.
 - **An add-on kept elsewhere:** a folder in `extensions/` (git ignores it, so it can be a repository of its own) whose `index.ts` default-exports an `ExtensionSetup` (see `src/extensions.ts`). It can take messages that start with its own word, get the pictures sent from the phone, send into the chat and put reactions on messages. The bridge route loads it at start; `npm run stack -- sync-bot` copies it with the bot, and `npm test` and `npm run typecheck` include it.
-- **Another place to find music:** implement `TrackSource` (`name`, `lookup(query, limit)`) beside `src/sources/music-table.ts`. Its tracks go into the catalog like any others.
+- **Another place to find music:** implement `TrackSource` (`name`, `lookup(query, limit)`) beside `src/sources/music-table.ts` and `youtube-music.ts`, and add its name to `src/sources/songs.ts`. Its tracks go into the catalog like any others; if their addresses need turning into a download link, wrap the audio check and download the way `resolvingYouTubeAudio` does.
