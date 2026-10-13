@@ -14,7 +14,7 @@ import { LibraryJobs } from '../library/jobs.ts';
 import { createRunner, type Runner } from '../runner.ts';
 import { createMusicTableSource, resolvingAudio, type MusicTable } from '../sources/music-table.ts';
 import { sourcesInOrder, songSourceOrder } from '../sources/songs.ts';
-import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, type YouTubeMusic } from '../sources/youtube-music.ts';
+import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, type YouTubeMusic } from '../sources/youtube-music.ts';
 import type { ZemerWhitelist } from '../sources/zemer-whitelist.ts';
 import { SimulatedChat } from './chat.ts';
 import type { Trace, TraceItem, TraceRun } from './trace.ts';
@@ -125,8 +125,10 @@ export function createSimulator(options: SimulatorOptions): Simulator {
   };
 
   const onNote = (note: string): void => trace.add({ label: 'lookup', detail: note, tone: 'note' });
+  const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist, onNote }) : undefined;
+  const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist, onNote }) : undefined;
   const source = sourcesInOrder(songSourceOrder(), {
-    'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist, onNote }),
+    'youtube-music': youTubeSongs,
     'music-table': musicTable && createMusicTableSource({ musicTable, catalog, onNote }),
   });
   const bot = createBot({
@@ -146,6 +148,8 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined),
     follows: catalogFollows(catalog),
     ...(source ? { source } : {}),
+    ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
+    ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
   });
 
   /**

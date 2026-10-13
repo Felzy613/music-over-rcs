@@ -29,7 +29,7 @@ Settings come from environment variables, or from a `.env` file in the project f
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CATALOG_DB` | `data/catalog.db` | The catalog file. `npm run mac:setup` points it at the services folder, where the background bot can read it. |
-| `MAX_DOWNLOAD_MB` | `100` | Largest file to download and send, up to 500. (Google Messages and the bridge take about 100.) |
+| `MAX_DOWNLOAD_MB` | `100` | Largest file to download and send, up to 500. (Google Messages and the bridge take about 100.) An album's zip is split into parts of at most this size. |
 | `YOUTUBE_MUSIC` | on | `off` stops all use of YouTube Music. See [YouTube Music](youtube-music.md). |
 | `YOUTUBE_MUSIC_URL` | `https://music.youtube.com` | Where the YouTube Music lookups go; only the tests change it. |
 | `ZEMER_CONTENT_URL` | `https://content.zemer.io` | Where Zemer's artist list is read from; only the tests change it. |

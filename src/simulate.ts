@@ -6,7 +6,7 @@ import { createBot, joinLists } from './bot.ts';
 import { Catalog } from './catalog.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 import type { Chip, Incoming, Reply } from './types.ts';
 
@@ -49,14 +49,18 @@ const checkLink = resolvingYouTubeAudio(
   ),
   { maxBytes: MAX_BYTES },
 ).checkAudio;
+const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
+const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
 const source = sourcesInOrder(songSourceOrder(), {
-  'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist }),
+  'youtube-music': youTubeSongs,
   'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
 });
 const bot = createBot({
   catalog,
   checkAudio: offline ? async () => ({ ok: true, type: 'audio/mpeg' }) : gatedAudioCheck(gate, checkLink),
   ...(source ? { source } : {}),
+  ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
+  ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
 });
 
 let chips: Chip[] = [];
@@ -68,6 +72,10 @@ function print(reply: Reply): void {
   }
   if (reply.kind === 'image') {
     console.log(`bot > [picture] ${reply.url}${reply.caption ? `\n      ${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}` : ''}`);
+    return;
+  }
+  if (reply.kind === 'album') {
+    console.log(`bot > [zip: ${reply.artist ? `${reply.artist} — ` : ''}${reply.title}, ${reply.songs.length} songs]`);
     return;
   }
   if (reply.kind === 'collage') {

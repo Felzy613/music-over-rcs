@@ -1,6 +1,6 @@
 import { tooBig, type AudioCheck } from '../audio-check.ts';
 import { AudioFetchError, fetchAudio, type DownloadedAudio } from '../audio-fetch.ts';
-import { SourceError, type TrackSource } from '../bot.ts';
+import { SourceError, type Album, type AlbumSource, type TrackSource } from '../bot.ts';
 import type { NewTrack } from '../catalog.ts';
 import { parseQuery } from '../query.ts';
 import type { Track } from '../types.ts';
@@ -24,7 +24,13 @@ export const YOUTUBE_MUSIC_URL = 'https://music.youtube.com';
 const API_PATH = '/youtubei/v1/';
 /** Zemer's SearchFilter.FILTER_SONG: only songs, not videos, albums or playlists. */
 const SONG_FILTER = 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D';
+/** Zemer's SearchFilter.FILTER_ALBUM: albums, EPs and singles (anything with an album page). */
+const ALBUM_FILTER = 'EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D';
 const VIDEO_ID = /^[\w-]{11}$/;
+/** What the address of an album looks like (the id of its page). */
+const ALBUM_ID = /^MPREb_[\w-]{4,40}$/;
+/** An album page names its songs a page at a time; this is more than any album has. */
+const MAX_ALBUM_PAGES = 10;
 /** Where YouTube serves its media from. A link anywhere else is refused. */
 const MEDIA_HOSTS = ['googlevideo.com'];
 const MAX_STREAMS_KEPT = 100;
@@ -185,6 +191,140 @@ export function parseSearch(response: unknown): YouTubeHit[] {
   return hits;
 }
 
+/** An album in a search's results. */
+export interface YouTubeAlbumHit {
+  /** The album page's id ("MPREb_…"). */
+  browseId: string;
+  title: string;
+  artist: string;
+  artistIds: string[];
+  year?: number;
+  cover?: string;
+}
+
+export interface YouTubeAlbumTrack {
+  videoId: string;
+  /** Its place on the album, counting from 1. */
+  number: number;
+  title: string;
+  /** Empty when the album page doesn't name the song's artists (it usually doesn't: they are the album's). */
+  artist: string;
+  artistIds: string[];
+}
+
+export interface YouTubeAlbumPage extends YouTubeAlbumHit {
+  tracks: YouTubeAlbumTrack[];
+}
+
+interface Run {
+  text: string;
+  page: string | undefined;
+  id: string | undefined;
+}
+
+function runsOf(runs: unknown): Run[] {
+  return list(runs).map((run) => ({
+    text: str(at(run, 'text')) ?? '',
+    page: str(at(run, 'navigationEndpoint', 'browseEndpoint', 'browseEndpointContextSupportedConfigs', 'browseEndpointContextMusicConfig', 'pageType')),
+    id: str(at(run, 'navigationEndpoint', 'browseEndpoint', 'browseId')),
+  }));
+}
+
+const yearOf = (texts: string[]): number | undefined => {
+  const year = texts.findLast((text) => /^\d{4}$/.test(text.trim()));
+  return year ? Number(year) : undefined;
+};
+
+/** The albums in a search made with the album filter: the title, then "Album • artists • 2020". */
+export function parseAlbumSearch(response: unknown): YouTubeAlbumHit[] {
+  const sections = list(at(response, 'contents', 'tabbedSearchResultsRenderer', 'tabs', 0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents'));
+  const seen = new Set<string>();
+  const hits: YouTubeAlbumHit[] = [];
+  for (const section of sections) {
+    for (const row of list(at(section, 'musicShelfRenderer', 'contents'))) {
+      const item = at(row, 'musicResponsiveListItemRenderer');
+      const browseId = str(at(item, 'navigationEndpoint', 'browseEndpoint', 'browseId'));
+      const columns = list(at(item, 'flexColumns')).map((column) => runsOf(at(column, 'musicResponsiveListItemFlexColumnRenderer', 'text', 'runs')));
+      const title = (columns[0] ?? []).map((run) => run.text).join('').trim();
+      if (!browseId || !ALBUM_ID.test(browseId) || !title || seen.has(browseId)) continue;
+      const groups: Run[][] = [[]];
+      for (const run of columns[1] ?? []) {
+        if (run.text === SEPARATOR) groups.push([]);
+        else groups[groups.length - 1]!.push(run);
+      }
+      const written = groups.map((group) => group.map((run) => run.text).join('').trim());
+      // The first group says what kind of release it is ("Album", "EP", "Single"); the next is who made it.
+      if (/^(?:album|ep|single)$/i.test(written[0] ?? '')) {
+        groups.shift();
+        written.shift();
+      }
+      const artist = written[0] && !/^\d{4}$/.test(written[0]) ? written[0] : '';
+      const artistIds = artist ? [...new Set((groups[0] ?? []).flatMap((run) => (run.id && run.page !== 'MUSIC_PAGE_TYPE_ALBUM' ? [run.id] : [])))] : [];
+      const year = yearOf(written);
+      const thumbnails = list(at(item, 'thumbnail', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails'));
+      const cover = str(at(thumbnails[thumbnails.length - 1], 'url'));
+      seen.add(browseId);
+      hits.push({ browseId, title, artist, artistIds, ...(year !== undefined ? { year } : {}), ...(cover ? { cover: largerCover(cover) } : {}) });
+    }
+  }
+  return hits;
+}
+
+/** One song row of an album page; undefined for a row that can't be played (greyed out, or not a song). */
+function parseAlbumTrack(row: unknown, position: number, albumArtistIds: string[]): YouTubeAlbumTrack | undefined {
+  const item = at(row, 'musicResponsiveListItemRenderer');
+  const videoId =
+    str(at(item, 'playlistItemData', 'videoId')) ??
+    str(at(item, 'overlay', 'musicItemThumbnailOverlayRenderer', 'content', 'musicPlayButtonRenderer', 'playNavigationEndpoint', 'watchEndpoint', 'videoId'));
+  if (!videoId || !VIDEO_ID.test(videoId)) return undefined;
+  const columns = list(at(item, 'flexColumns')).map((column) => runsOf(at(column, 'musicResponsiveListItemFlexColumnRenderer', 'text', 'runs')));
+  const title = (columns[0] ?? []).map((run) => run.text).join('').trim();
+  if (!title) return undefined;
+  const credited = (columns[1] ?? []).filter((run) => run.page === 'MUSIC_PAGE_TYPE_ARTIST' || run.page === 'MUSIC_PAGE_TYPE_USER_CHANNEL');
+  const numbered = Number(str(at(item, 'index', 'runs', 0, 'text')));
+  return {
+    videoId,
+    number: Number.isInteger(numbered) && numbered > 0 ? numbered : position,
+    title,
+    artist: (columns[1] ?? []).map((run) => run.text).join('').trim(),
+    // A song with no artists of its own is by the album's, as in Zemer.
+    artistIds: credited.length > 0 ? [...new Set(credited.flatMap((run) => (run.id ? [run.id] : [])))] : albumArtistIds,
+  };
+}
+
+/** The continuation token at the end of a list of rows, if there are more. */
+const continuationOf = (rows: unknown[]): string | undefined =>
+  rows.map((row) => str(at(row, 'continuationItemRenderer', 'continuationEndpoint', 'continuationCommand', 'token'))).find((token) => token !== undefined);
+
+/** An album page: who made it, and its songs so far. `more` is where the rest is, when the page doesn't hold it all. */
+export function parseAlbumPage(response: unknown, browseId: string): { album: YouTubeAlbumPage; more?: string } | undefined {
+  const two = at(response, 'contents', 'twoColumnBrowseResultsRenderer');
+  const header = at(two, 'tabs', 0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents', 0, 'musicResponsiveHeaderRenderer');
+  const title = list(at(header, 'title', 'runs')).map((run) => str(at(run, 'text')) ?? '').join('').trim();
+  if (!title) return undefined;
+  const credit = runsOf(at(header, 'straplineTextOne', 'runs'));
+  const artistIds = [...new Set(credit.flatMap((run) => (run.id ? [run.id] : [])))];
+  const year = yearOf(runsOf(at(header, 'subtitle', 'runs')).map((run) => run.text));
+  const thumbnails = list(at(header, 'thumbnail', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails'));
+  const cover = str(at(thumbnails[thumbnails.length - 1], 'url'));
+  const shelf = at(two, 'secondaryContents', 'sectionListRenderer', 'contents', 0);
+  const rows = list(at(shelf, 'musicPlaylistShelfRenderer', 'contents') ?? at(shelf, 'musicShelfRenderer', 'contents'));
+  const tracks = rows.flatMap((row, i) => parseAlbumTrack(row, i + 1, artistIds) ?? []);
+  const more = continuationOf(rows);
+  return {
+    album: {
+      browseId,
+      title,
+      artist: credit.map((run) => run.text).join('').trim(),
+      artistIds,
+      ...(year !== undefined ? { year } : {}),
+      ...(cover ? { cover: largerCover(cover) } : {}),
+      tracks,
+    },
+    ...(more ? { more } : {}),
+  };
+}
+
 export class YouTubeMusic {
   readonly baseUrl: string;
   #origin: string;
@@ -232,6 +372,29 @@ export class YouTubeMusic {
     return parseSearch(response);
   }
 
+  /** Albums (and EPs and singles) matching a search, best match first. */
+  async searchAlbums(query: string): Promise<YouTubeAlbumHit[]> {
+    const response = await this.#post('search', WEB_REMIX, { query, params: ALBUM_FILTER });
+    return parseAlbumSearch(response);
+  }
+
+  /** An album's page: its title, artists, cover and every song on it, following the page's continuations. */
+  async album(browseId: string): Promise<YouTubeAlbumPage> {
+    if (!ALBUM_ID.test(browseId)) throw new YouTubeMusicError("that isn't an album I know");
+    const first = parseAlbumPage(await this.#post('browse', WEB_REMIX, { browseId }), browseId);
+    if (!first) throw new YouTubeMusicError("YouTube Music didn't have that album");
+    const { album } = first;
+    let more = first.more;
+    for (let pages = 1; more && pages < MAX_ALBUM_PAGES; pages += 1) {
+      const response = await this.#post('browse', WEB_REMIX, { continuation: more }, undefined, { continuation: more, ctoken: more });
+      const rows = list(at(response, 'onResponseReceivedActions', 0, 'appendContinuationItemsAction', 'continuationItems'));
+      const next = album.tracks.length;
+      album.tracks.push(...rows.flatMap((row, i) => parseAlbumTrack(row, next + i + 1, album.artistIds) ?? []));
+      more = continuationOf(rows);
+    }
+    return album;
+  }
+
   /** A link to download the song's audio from, as AAC (what Google Messages plays), asked for fresh if the last one is old. */
   stream(videoId: string): Promise<YouTubeStream> {
     const kept = this.#streams.get(videoId);
@@ -267,7 +430,7 @@ export class YouTubeMusic {
     }
   }
 
-  async #post(endpoint: string, client: InnerTubeClient, body: Record<string, unknown>, visitor?: string): Promise<unknown> {
+  async #post(endpoint: string, client: InnerTubeClient, body: Record<string, unknown>, visitor?: string, query: Record<string, string> = {}): Promise<unknown> {
     const context = {
       client: {
         clientName: client.name,
@@ -280,7 +443,7 @@ export class YouTubeMusic {
     };
     let res: Response;
     try {
-      res = await this.#fetch(`${this.#origin}${API_PATH}${endpoint}?prettyPrint=false`, {
+      res = await this.#fetch(`${this.#origin}${API_PATH}${endpoint}?${new URLSearchParams({ prettyPrint: 'false', ...query })}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -425,6 +588,7 @@ export function createYouTubeMusicSource(deps: YouTubeLookupDeps): TrackSource {
   };
   return {
     name: 'YouTube Music',
+    hint: "it only shows artists on Zemer's list",
     async lookup(query, limit) {
       const wanted = parseQuery(query);
       if (wanted.length === 0) return [];
@@ -482,11 +646,60 @@ export function resolvingYouTubeAudio(
   };
 }
 
-const REFUSALS: Record<Extract<Verdict, { ok: false }>['why'], string> = {
-  blocked: "Zemer's list blocks that song",
-  female: "it has a female singer, which I don't send",
-  'not on the list': "its artist isn't on Zemer's artist list",
-};
+/**
+ * Albums from YouTube Music, held to the same list as its songs: an album is offered, and opened, only when one of its
+ * artists is on Zemer's list and none is a woman; each song on it must pass as well (with the album's artists standing
+ * in for a song that names none), and one that doesn't is left out. The songs that stay are kept in the catalog with
+ * their artists' ids, so each is checked against the list again when it is sent.
+ */
+export function createYouTubeAlbumSource(deps: YouTubeLookupDeps): AlbumSource {
+  const note = (text: string): void => {
+    try {
+      deps.onNote?.(text);
+    } catch {
+      // a broken listener must not break a lookup
+    }
+  };
+  return {
+    name: 'YouTube Music',
+    hint: "it only shows artists on Zemer's list",
+    async search(query, limit) {
+      const wanted = parseQuery(query);
+      if (wanted.length === 0) return [];
+      await deps.whitelist.ready();
+      const hits = await deps.youTube.searchAlbums(wanted.join(' '));
+      const allowed = hits.filter((hit) => deps.whitelist.allows(hit.browseId, hit.artistIds));
+      note(`YouTube Music listed ${hits.length} album${hits.length === 1 ? '' : 's'}; ${allowed.length} by artists on Zemer's list, none female`);
+      return allowed.slice(0, limit).map((hit): Album => ({ id: hit.browseId, title: hit.title, artist: hit.artist, year: hit.year, cover: hit.cover }));
+    },
+    async open(id) {
+      await deps.whitelist.ready();
+      const page = await deps.youTube.album(id);
+      const verdict = deps.whitelist.verdict(id, page.artistIds);
+      if (!verdict.ok) throw new YouTubeMusicError(refusal(verdict.why, 'album'));
+      const songs: Array<{ number: number; track: Track }> = [];
+      for (const song of page.tracks) {
+        if (!deps.whitelist.allows(song.videoId, song.artistIds)) continue;
+        const track = deps.catalog.add({
+          title: song.title,
+          artist: song.artist || page.artist,
+          url: deps.youTube.trackUrl(song.videoId),
+          artistIds: song.artistIds,
+          ...(page.cover ? { cover: page.cover } : {}),
+        });
+        songs.push({ number: song.number, track });
+      }
+      const leftOut = page.tracks.length - songs.length;
+      note(`album "${page.title}": ${page.tracks.length} songs, ${songs.length} may be sent${leftOut > 0 ? `, ${leftOut} left out by Zemer's list` : ''}`);
+      if (songs.length === 0) throw new YouTubeMusicError(page.tracks.length === 0 ? 'it has no songs I can get' : "none of its songs pass Zemer's list");
+      return { album: { id, title: page.title, artist: page.artist, year: page.year, cover: page.cover }, songs, leftOut };
+    },
+  };
+}
+
+/** Why something was held back, in words for the chat; `what` is "song" or "album". */
+const refusal = (why: Extract<Verdict, { ok: false }>['why'], what: string): string =>
+  why === 'blocked' ? `Zemer's list blocks that ${what}` : why === 'female' ? "it has a female singer, which I don't send" : "its artist isn't on Zemer's artist list";
 
 /**
  * Checks a YouTube Music song against Zemer's list as it stands now, when it is about to be sent, not only when it was
@@ -511,7 +724,7 @@ export function youTubeGate(deps: {
     const ids = deps.catalog.artistIdsOf(url);
     if (!ids) return "it hasn't been checked against Zemer's artist list";
     const verdict = deps.whitelist.verdict(videoId, ids);
-    return verdict.ok ? undefined : REFUSALS[verdict.why];
+    return verdict.ok ? undefined : refusal(verdict.why, 'song');
   };
 }
 

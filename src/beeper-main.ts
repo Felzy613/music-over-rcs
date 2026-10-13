@@ -10,7 +10,7 @@ import { setUpLibrary } from './library/setup.ts';
 import { createRunner } from './runner.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat (your "message yourself" chat), through Beeper Desktop.
@@ -70,8 +70,10 @@ try {
     onSite: (ok, problem) => (ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.problem('site', problem ?? "music-table.com isn't answering.")),
     log,
   });
+  const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
+  const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
   const source = sourcesInOrder(songSourceOrder(), {
-    'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist }),
+    'youtube-music': youTubeSongs,
     'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
   });
   // A YouTube Music song is checked against the list as it stands when it is sent, not only when it was found.
@@ -83,6 +85,8 @@ try {
     browse: library.browse,
     follows: library.follows,
     ...(source ? { source } : {}),
+    ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
+    ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
   });
   const runner = createRunner({
     chat: beeper,

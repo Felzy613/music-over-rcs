@@ -26,6 +26,24 @@ You get two messages:
 - **A song it already knows by name comes back at once.** The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
 - **A letter off in `search` itself is fine** (`serach`, `seach`).
 
+## YouTube Music, and albums
+
+`search` answers from your catalog when it can and goes to YouTube Music (then music-table.com) when it can't. To look on YouTube Music **only**, whatever your catalog holds, start with `youtube` (or `yt`):
+
+```text
+youtube lipa vnusni
+```
+
+To get a whole album, start with `album`:
+
+```text
+album yu di kenst
+```
+
+An album that the words name outright is sent at once; otherwise you get the albums that fit, one message each, and a 👍 on one sends it (`all` doesn't send every album). You get its cover and a line (`11 songs, about 70 MB`), then **one zip file** with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds about 100 MB (`MAX_DOWNLOAD_MB`); a bigger album arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
+
+Everything from YouTube Music is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out of the zip ("1 left out").
+
 ## Lists
 
 When several songs fit, it asks which one. Each option is **its own message**, so you can tap 👍 on the one you want:
