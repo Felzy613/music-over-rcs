@@ -1,10 +1,10 @@
 # YouTube Music
 
-When your catalog has no match, the bot looks on YouTube Music first, then on [music-table.com](music-table.md). It uses YouTube Music's own app API (InnerTube), the way the [Zemer](https://github.com/ZemerTeam/zemer-app) Android app does, which is built on [Metrolist](https://github.com/MetrolistGroup/Metrolist), and it filters what it finds with Zemer's own artist list, with female singers excluded. The code is `src/sources/youtube-music.ts` and `src/sources/zemer-whitelist.ts`.
+A `search` asks YouTube Music first, and looks on [music-table.com](music-table.md) (your catalog, then the site) only when YouTube Music has nothing that fits. It uses YouTube Music's own app API (InnerTube), the way the [Zemer](https://github.com/ZemerTeam/zemer-app) Android app does, which is built on [Metrolist](https://github.com/MetrolistGroup/Metrolist), and it filters what it finds with Zemer's own artist list, with female singers excluded. The code is `src/sources/youtube-music.ts` and `src/sources/zemer-whitelist.ts`.
 
 ## Searching it alone, and albums
 
-- **`youtube` (or `yt`) and a song** asks YouTube Music only. `search` asks your catalog first and only goes further when the catalog has no clear answer, which is right for songs you've had before but not when you want YouTube Music's version.
+- **`youtube` (or `yt`) and a song** asks YouTube Music only. `search` also asks YouTube Music first, but takes only songs that have **every** word you typed (an apostrophe or a small typo forgiven), because YouTube Music will always hand back its twenty nearest songs, and a near miss ("higale na" is not "Hava Nagila") should not hide the right song on music-table.com. `youtube` takes YouTube Music's answer as it is, in its order, with nothing to fall back on.
 - **`album` and a name** searches YouTube Music's albums (`search` with Zemer's album filter), keeps the ones by artists on the list, and opens the one you pick: the album page gives its artists, cover and every song in order (a long album's later pages are followed). Each song must pass the list on its own, with the album's artists standing in for a song that names none, as in Zemer. The songs that pass are kept in the catalog with their artists' ids, so each is checked again against the current list just before the zip is made.
 - **The zip** is made by the runner (`src/runner.ts`) from the album's songs, downloaded a few at a time, and `src/library/zip.ts` (a small writer: files stored as they are, since audio doesn't compress, UTF-8 names so Hebrew titles survive). It is sent as an attachment (`m.file`), named `Artist - Album.zip`, with the songs inside as `01 Title.m4a`. Over `MAX_DOWNLOAD_MB` it is split into parts at song boundaries.
 - **Not checked:** an album that comes in several pages on YouTube Music's side (more songs than one response holds; the largest album I tried, 29 songs, came in one) is followed by its continuation links, which is covered by tests but I haven't seen one live. The zip as an attachment through the Google Messages bridge hasn't been tried on a phone either.
@@ -48,7 +48,7 @@ The file is the AAC audio exactly as YouTube serves it: a fragmented MP4 (`audio
 ## Turning it off, and the order
 
 - `YOUTUBE_MUSIC=off` stops all use of it (and of Zemer's list). Songs already in the catalog from YouTube Music then can't be sent.
-- `SONG_SOURCES=music-table,youtube-music` asks music-table.com first. The default is `youtube-music,music-table`. Whichever is asked first answers if it finds anything; the other is only asked when it finds nothing or can't be reached. A song your catalog already has is sent from the catalog without asking either.
+- `SONG_SOURCES=music-table,youtube-music` asks music-table.com first. The default is `youtube-music,music-table`. YouTube Music, when it is first, is asked before the catalog. Whichever is asked first answers if it finds anything that fits; the other (and, after YouTube Music, your catalog) is only used when it finds nothing, or can't be reached. With music-table.com first, your catalog is looked in before YouTube Music is asked.
 
 ## It can break
 

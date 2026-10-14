@@ -1,9 +1,10 @@
 import { tooBig, type AudioCheck } from '../audio-check.ts';
 import { AudioFetchError, fetchAudio, type DownloadedAudio } from '../audio-fetch.ts';
-import { SourceError, type Album, type AlbumSource, type TrackSource } from '../bot.ts';
+import { SourceError, type Album, type AlbumSource, type LookupOptions, type TrackSource } from '../bot.ts';
 import type { NewTrack } from '../catalog.ts';
 import { parseQuery } from '../query.ts';
 import type { Track } from '../types.ts';
+import { fitsAll, rankSongs } from './relevance.ts';
 import type { Verdict, ZemerWhitelist } from './zemer-whitelist.ts';
 
 // YouTube Music through its InnerTube API, the way the Zemer app does it (github.com/ZemerTeam/zemer-app, itself built
@@ -589,14 +590,18 @@ export function createYouTubeMusicSource(deps: YouTubeLookupDeps): TrackSource {
   return {
     name: 'YouTube Music',
     hint: "it only shows artists on Zemer's list",
-    async lookup(query, limit) {
+    async lookup(query, limit, options?: LookupOptions) {
       const wanted = parseQuery(query);
       if (wanted.length === 0) return [];
       await deps.whitelist.ready();
       const hits = await deps.youTube.search(wanted.join(' '));
       const allowed = hits.filter((hit) => deps.whitelist.allows(hit.videoId, hit.artistIds));
       note(`YouTube Music listed ${hits.length} song${hits.length === 1 ? '' : 's'}; ${allowed.length} by artists on Zemer's list, none female`);
-      return allowed.slice(0, limit).map((hit) =>
+      // YouTube Music answers any words with its twenty nearest songs. Asked first, with something else to fall back on,
+      // only those that have every one of the words count, best first; asked alone, its own order is kept.
+      const fitting = options?.relevant ? rankSongs(allowed.filter((hit) => fitsAll(hit, wanted)), wanted, limit) : allowed;
+      if (options?.relevant) note(`${fitting.length} of those fit the words`);
+      return fitting.slice(0, limit).map((hit) =>
         deps.catalog.add({
           title: hit.title,
           artist: hit.artist,

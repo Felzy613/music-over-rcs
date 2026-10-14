@@ -22,13 +22,13 @@ You get two messages:
 - **Apostrophes are optional.** `search lipa vnusni` finds "V’Nusni", `search uvtuvcha` finds "U’v’tuvcha HaGadol", and `search v'nusni` works too.
 - **Typos are fine.** `search yoely wiess shabos`, `search lipa shmeltzer vnusni` (the site writes "Schmeltzer"), `search avrohom fried` ("Avraham"), `search shlomo daskal` ("Shloime") and `search mordechai ben dovid` all work. The bot learns the site's spelling from the titles around your other words.
 - **Extra words are fine.** `... by Yoely Weiss` is understood, and in a longer request one stray word (an `mp3` at the end, say) is forgiven.
-- **Where songs come from.** When the catalog has no match, the bot looks on YouTube Music, and then on music-table.com if YouTube Music finds nothing ([YouTube Music](youtube-music.md), `SONG_SOURCES`). A YouTube Music song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
-- **A song it already knows by name comes back at once.** The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
+- **Where songs come from.** `search` asks **YouTube Music first**. If it has a song that fits every word you typed (and its artist is on Zemer's list), that is the answer. If not, the bot looks on music-table.com: your catalog first, then the site ([YouTube Music](youtube-music.md), `SONG_SOURCES`). A YouTube Music song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
+- **A song it already knows by name comes back at once** (when YouTube Music has nothing for it). The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
 - **A letter off in `search` itself is fine** (`serach`, `seach`).
 
 ## YouTube Music, and albums
 
-`search` answers from your catalog when it can and goes to YouTube Music (then music-table.com) when it can't. To look on YouTube Music **only**, whatever your catalog holds, start with `youtube` (or `yt`):
+`search` asks YouTube Music first and music-table.com second. To look on YouTube Music **only**, with no falling back and in YouTube Music's own order, start with `youtube` (or `yt`):
 
 ```text
 youtube lipa vnusni

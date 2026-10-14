@@ -1,4 +1,4 @@
-import { SourceError, type TrackSource } from '../bot.ts';
+import { SourceError, type LookupOptions, type TrackSource } from '../bot.ts';
 
 /** The places a song can be looked up, by the names SONG_SOURCES uses. */
 export const SONG_SOURCES = ['youtube-music', 'music-table'] as const;
@@ -23,11 +23,11 @@ export function combineSources(sources: TrackSource[]): TrackSource | undefined 
   if (sources.length === 1) return sources[0];
   return {
     name: sources.map((source) => source.name).join(' and '),
-    async lookup(query, limit) {
+    async lookup(query, limit, options?: LookupOptions) {
       const failures: string[] = [];
       for (const source of sources) {
         try {
-          const found = await source.lookup(query, limit);
+          const found = await source.lookup(query, limit, options);
           if (found.length > 0) return found;
         } catch (err) {
           if (!(err instanceof SourceError)) throw err;
@@ -44,4 +44,18 @@ export function combineSources(sources: TrackSource[]): TrackSource | undefined 
 /** The sources that are on, in the order SONG_SOURCES gives. */
 export function sourcesInOrder(order: SongSourceName[], available: Partial<Record<SongSourceName, TrackSource | undefined>>): TrackSource | undefined {
   return combineSources(order.flatMap((name) => available[name] ?? []));
+}
+
+/**
+ * The sources arranged for the bot. YouTube Music, when SONG_SOURCES puts it first (the default), is asked before the
+ * catalog (`first`), so a search finds it there before anything stored from music-table.com; the others follow the
+ * catalog as one `source`. With music-table.com first, nothing is asked before the catalog, as it always was.
+ */
+export function arrangeSources(
+  order: SongSourceName[],
+  available: Partial<Record<SongSourceName, TrackSource | undefined>>,
+): { first?: TrackSource; source?: TrackSource } {
+  const leader = order[0] === 'youtube-music' ? available['youtube-music'] : undefined;
+  const source = sourcesInOrder(leader ? order.slice(1) : order, available);
+  return { ...(leader ? { first: leader } : {}), ...(source ? { source } : {}) };
 }
