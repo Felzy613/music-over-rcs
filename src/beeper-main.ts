@@ -9,7 +9,7 @@ import { loadBeeperConfig } from './config.ts';
 import { setUpLibrary } from './library/setup.ts';
 import { createRunner } from './runner.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
-import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
+import { arrangeSources, songSourceOrder } from './sources/songs.ts';
 import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
@@ -27,8 +27,8 @@ try {
 
   // This machine downloads the file, so private addresses (a NAS, say) are fine and any audio format will do.
   const catalog = new Catalog(config.dbPath);
-  // When the catalog has no match the bot looks on YouTube Music and music-table.com (YOUTUBE_MUSIC=off and
-  // MUSIC_TABLE=off turn them off; SONG_SOURCES sets which is asked first).
+  // A search asks YouTube Music first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
+  // SONG_SOURCES sets which is asked first).
   const musicTable = musicTableFromEnv();
   void musicTable?.warm();
   const youTube = youTubeMusicFromEnv();
@@ -72,7 +72,7 @@ try {
   });
   const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
   const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
-  const source = sourcesInOrder(songSourceOrder(), {
+  const { first, source } = arrangeSources(songSourceOrder(), {
     'youtube-music': youTubeSongs,
     'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
   });
@@ -84,6 +84,7 @@ try {
     onPlay: library.onPlay,
     browse: library.browse,
     follows: library.follows,
+    ...(first ? { first } : {}),
     ...(source ? { source } : {}),
     ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
     ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),

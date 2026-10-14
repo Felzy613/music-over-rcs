@@ -13,7 +13,7 @@ import { catalogFollows } from '../library/follows.ts';
 import { LibraryJobs } from '../library/jobs.ts';
 import { createRunner, type Runner } from '../runner.ts';
 import { createMusicTableSource, resolvingAudio, type MusicTable } from '../sources/music-table.ts';
-import { sourcesInOrder, songSourceOrder } from '../sources/songs.ts';
+import { arrangeSources, songSourceOrder } from '../sources/songs.ts';
 import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, type YouTubeMusic } from '../sources/youtube-music.ts';
 import type { ZemerWhitelist } from '../sources/zemer-whitelist.ts';
 import { SimulatedChat } from './chat.ts';
@@ -127,7 +127,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
   const onNote = (note: string): void => trace.add({ label: 'lookup', detail: note, tone: 'note' });
   const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist, onNote }) : undefined;
   const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist, onNote }) : undefined;
-  const source = sourcesInOrder(songSourceOrder(), {
+  const { first, source } = arrangeSources(songSourceOrder(), {
     'youtube-music': youTubeSongs,
     'music-table': musicTable && createMusicTableSource({ musicTable, catalog, onNote }),
   });
@@ -147,6 +147,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     onPlay: (track) => catalog.recordPlay(track.id),
     browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined),
     follows: catalogFollows(catalog),
+    ...(first ? { first } : {}),
     ...(source ? { source } : {}),
     ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
     ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),

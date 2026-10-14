@@ -18,7 +18,7 @@ Every message starts with a command, so a song's name is never taken for one.
 | --- | --- |
 | `search` and a song, like `search yoely weiss shabbos` | The song: its cover with its name drawn on, then the audio file. Typos and missing apostrophes are fine (`search yoely wiess shabos`, `search lipa vnusni` for "V’Nusni"). |
 | `search` and an artist, like `search shwekey` or `search avraham fried` | Their releases, newest first, ten at a time (an album is one entry) |
-| `youtube` and a song, like `youtube lipa vnusni` (also `yt`) | The same, but looked up on YouTube Music alone, without looking in your catalog first |
+| `youtube` and a song, like `youtube lipa vnusni` (also `yt`) | The same, but on YouTube Music alone: no falling back to music-table.com, and YouTube Music's own ranking (`search` only takes songs that have all your words) |
 | `album` and a name, like `album yu di kenst` or `album michoel schnitzler` | The album: one match is sent at once, several are listed to pick from with 👍. You get **all of it as one zip** (`01 Title.m4a`, `02 …`), with the cover first. |
 | `trending` | What's popular on music-table.com right now |
 | `new` | The newest releases |

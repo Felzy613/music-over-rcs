@@ -21,11 +21,20 @@ export class SourceError extends Error {
  * Somewhere to look when the catalog has no match. It returns tracks that are already stored in the catalog,
  * so choices and replies work the same as for any other track.
  */
+export interface LookupOptions {
+  /**
+   * Keep only songs that fit the request's words (apostrophes and a typo or two forgiven), best first. For a source
+   * that returns loosely related songs and is asked first, so that what it hands back really answers the request and
+   * the next source is asked when nothing does.
+   */
+  relevant?: boolean;
+}
+
 export interface TrackSource {
   name: string;
   /** Said when a search on this source alone finds nothing: why that can be ("it only shows artists on Zemer's list"). */
   hint?: string;
-  lookup(query: string, limit: number): Promise<Track[]>;
+  lookup(query: string, limit: number, options?: LookupOptions): Promise<Track[]>;
 }
 
 /** An album a source offers. `id` is whatever the source needs to open it again. */
@@ -58,6 +67,11 @@ export interface BotDeps {
   };
   checkAudio(url: string): Promise<AudioCheck>;
   source?: TrackSource;
+  /**
+   * A source asked before the catalog (YouTube Music, by default): what it finds with "search" is the answer, and only
+   * when it finds nothing, or can't be reached, are the catalog and `source` (music-table.com) looked in.
+   */
+  first?: TrackSource;
   /** One source asked on its own, by "youtube …": the catalog is skipped. */
   youtube?: TrackSource;
   /** Albums, by "album …": found by name and sent as a ZIP. */
@@ -434,6 +448,17 @@ export function createBot(deps: BotDeps): Bot {
     if (tokens.every((token) => token.length < 2)) {
       return [say(`Text "search" and ${deps.browse ? 'a song or an artist, like "search lipa vnusni"' : 'a song name, like "search blue horizon night owls"'}.`)];
     }
+    // The first source is asked before the catalog; what it finds that fits the words is the answer.
+    const failures: string[] = [];
+    if (deps.first) {
+      try {
+        const found = await deps.first.lookup(raw, MAX_CHOICES, { relevant: true });
+        if (found.length > 0) return pickFrom(found, tokens);
+      } catch (err) {
+        if (!(err instanceof SourceError)) throw err;
+        failures.push(`${deps.first.name}: ${err.message}`);
+      }
+    }
     const local = deps.catalog.search(raw, MAX_CHOICES);
     // Naming exactly one song the catalog has is answered at once, without asking anyone else.
     const named = local.filter((track) => namesSong(track, tokens));
@@ -451,11 +476,16 @@ export function createBot(deps: BotDeps): Bot {
         found = merge(await deps.source.lookup(raw, MAX_CHOICES), local, MAX_CHOICES);
       } catch (err) {
         if (!(err instanceof SourceError)) throw err;
-        if (local.length === 0) return [say(`I couldn't search ${deps.source.name}: ${err.message}.`)];
+        failures.push(`${deps.source.name}: ${err.message}`);
+        if (local.length === 0) {
+          // With one source down, the one that was asked says why; with both, each does.
+          return [say(failures.length === 1 ? `I couldn't search ${deps.source.name}: ${err.message}.` : `I couldn't search ${[deps.first!.name, deps.source.name].join(' or ')}: ${failures.join('; ')}.`)];
+        }
       }
     }
     if (found.length === 0) {
-      const also = deps.source ? ` (I looked on ${deps.source.name} too)` : '';
+      const asked = [deps.first?.name, deps.source?.name].filter((name): name is string => name !== undefined);
+      const also = asked.length > 0 ? ` (I looked on ${asked.join(' and ')} too)` : '';
       return [say(`No match for "${raw}"${also}. Try the artist and title, or fewer words.`)];
     }
     return pickFrom(found, tokens);

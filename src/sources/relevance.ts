@@ -94,6 +94,19 @@ function closeness(token: string, words: string[]): number {
 }
 
 /**
+ * True when every word of the request is in the song's title or artist, an apostrophe or a typo forgiven. Stricter than
+ * `rankSongs`, which lets a request of three or more words miss one: for a source asked first, a song that misses a word
+ * is a different song ("higale na" is not "Hava Nagila"), and the next source should get to answer.
+ */
+export function fitsAll(song: { title: string; artist: string }, wanted: string[]): boolean {
+  const tokens = wanted.map(fold);
+  if (tokens.length === 0) return false;
+  const title = searchWords(fold(song.title));
+  const artist = searchWords(fold(song.artist));
+  return tokens.every((token) => closeness(token, title) > 0 || closeness(token, artist) > 0);
+}
+
+/**
  * The songs that fit the words, best first: the looser search for when the exact one finds nothing. Apostrophes and
  * spaces may be left out or put in ("vnusni" finds "V’Nusni"), a longer word may be a letter or two off ("shmeltzer"
  * finds "Schmeltzer"), and, as on the site, a request of three or more words may miss one when no song has them all.

@@ -33,7 +33,7 @@ Settings come from environment variables, or from a `.env` file in the project f
 | `YOUTUBE_MUSIC` | on | `off` stops all use of YouTube Music. See [YouTube Music](youtube-music.md). |
 | `YOUTUBE_MUSIC_URL` | `https://music.youtube.com` | Where the YouTube Music lookups go; only the tests change it. |
 | `ZEMER_CONTENT_URL` | `https://content.zemer.io` | Where Zemer's artist list is read from; only the tests change it. |
-| `SONG_SOURCES` | `youtube-music,music-table` | Which sources a search asks when the catalog has no match, in order; the first to find anything answers. `music-table,youtube-music` asks the site first. |
+| `SONG_SOURCES` | `youtube-music,music-table` | Which source a search asks first. With `youtube-music` first (the default) it is asked before your catalog, and music-table.com (the catalog, then the site) is used when it finds nothing that fits; the first to find anything answers. `music-table,youtube-music` asks the site first. |
 | `MUSIC_TABLE` | on | `off` stops all use of music-table.com: lookups, sync, daily message. |
 | `MUSIC_TABLE_URL` | `https://www.music-table.com` | Where the site lookups go; only the tests change it. |
 | `DIGEST_TIME` | `09:00` | When the daily new-music message goes out, 24-hour, in this Mac's time. `off` for none. |
