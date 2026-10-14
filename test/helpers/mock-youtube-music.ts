@@ -70,6 +70,11 @@ export interface MockYouTubeMusic extends Listening {
   retiredVersions: Set<string>;
   /** The next media requests answered 403, however many are asked. */
   failMedia: number;
+  /**
+   * The next links the player hands out are "walled", like roughly one in seven of the real ones: the media server answers
+   * the first megabyte and then 403 to anything that reaches past it, which needs a token no client here can make.
+   */
+  wallNext: number;
   failSearch: boolean;
   bytes(videoId: string): Buffer;
   reset(): void;
@@ -187,6 +192,7 @@ export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum
     firstAcceptedVisitor: 1,
     retiredVersions: new Set(),
     failMedia: 0,
+    wallNext: 0,
     failSearch: false,
     bytes: (videoId) => bytesFor(byId.get(videoId)!),
     reset() {
@@ -198,6 +204,7 @@ export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum
       mock.firstAcceptedVisitor = 1;
       mock.retiredVersions = new Set();
       mock.failMedia = 0;
+      mock.wallNext = 0;
       mock.failSearch = false;
     },
   };
@@ -225,8 +232,17 @@ export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum
         return void res.end('403');
       }
       const data = bytesFor(song);
-      res.writeHead(206, { 'content-type': 'audio/mp4', 'content-length': data.length, 'content-range': `bytes 0-${data.length - 1}/${data.length}` });
-      return void res.end(data);
+      const asked = /^bytes=(\d+)-(\d*)$/.exec(range);
+      const start = asked ? Number(asked[1]) : 0;
+      const end = Math.min(data.length - 1, asked?.[2] ? Number(asked[2]) : data.length - 1);
+      // A walled link serves only what is inside the first megabyte.
+      if (url.searchParams.get('wall') === '1' && end >= 1024 * 1024) {
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        return void res.end();
+      }
+      const slice = data.subarray(start, end + 1);
+      res.writeHead(206, { 'content-type': 'audio/mp4', 'content-length': slice.length, 'content-range': `bytes ${start}-${end}/${data.length}` });
+      return void res.end(slice);
     }
 
     if (req.method !== 'POST' || !url.pathname.startsWith('/youtubei/v1/')) return json(404, { error: 'not found' });
@@ -328,7 +344,9 @@ export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum
       if (!song) return json(200, { playabilityStatus: { status: 'ERROR', reason: 'This video is unavailable' } });
       if (song.unplayable) return json(200, { playabilityStatus: { status: 'UNPLAYABLE', reason: song.unplayable } });
       const size = bytesFor(song).length;
-      const link = (itag: number) => song.mediaUrl ?? `${origin}/media/${song.videoId}/${itag}`;
+      const walled = mock.wallNext > 0;
+      if (walled) mock.wallNext -= 1;
+      const link = (itag: number) => song.mediaUrl ?? `${origin}/media/${song.videoId}/${itag}${walled ? '?wall=1' : ''}`;
       const aac = song.opusOnly
         ? []
         : [

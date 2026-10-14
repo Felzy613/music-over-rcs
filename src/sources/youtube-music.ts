@@ -32,6 +32,14 @@ const VIDEO_ID = /^[\w-]{11}$/;
 const ALBUM_ID = /^MPREb_[\w-]{4,40}$/;
 /** An album page names its songs a page at a time; this is more than any album has. */
 const MAX_ALBUM_PAGES = 10;
+/**
+ * The media server serves the first megabyte of any link, and for roughly one link in fifteen turns down everything that
+ * reaches further (those links want a token this client can't make; measured October 2026). Zemer checks each link for
+ * that before using it, and so does `YouTubeMusic`. A song this size or smaller is wholly inside and needs no check.
+ */
+const FREE_WINDOW_BYTES = 1024 * 1024;
+/** Sessions tried before giving up on a song (each with every client version). */
+const MAX_ROUNDS = 3;
 /** Where YouTube serves its media from. A link anywhere else is refused. */
 const MEDIA_HOSTS = ['googlevideo.com'];
 const MAX_STREAMS_KEPT = 100;
@@ -492,9 +500,10 @@ export class YouTubeMusic {
 
   async #resolve(videoId: string): Promise<YouTubeStream> {
     let problem = 'no client gave a link';
-    for (let round = 0; round < 2; round += 1) {
+    for (let round = 0; round < MAX_ROUNDS; round += 1) {
       const visitor = await this.#visitorId(round > 0);
       let botCheck = false;
+      let refused = false;
       for (const client of STREAM_CLIENTS) {
         let response: unknown;
         try {
@@ -512,15 +521,42 @@ export class YouTubeMusic {
           continue;
         }
         const stream = this.#pickAudio(response, client);
-        if (stream) {
+        if (stream && (await this.#acceptsWholeSong(stream))) {
           this.#keep(videoId, stream);
           return stream;
         }
-        problem = 'it has no AAC audio';
+        if (stream) {
+          problem = 'its link was refused';
+          refused = true; // each ask gives a new link, and most are fine
+        } else {
+          problem = 'it has no AAC audio';
+        }
       }
-      if (!botCheck) break; // the session id was refused; a new one is worth one more round
+      // A refused link is worth a fresh session and another round, up to MAX_ROUNDS; a refused session id, one more.
+      if (!refused && !(botCheck && round < 1)) break;
     }
     throw new YouTubeMusicError(`YouTube Music wouldn't give me that song (${problem})`);
+  }
+
+  /**
+   * Whether the media server will serve the whole song from this link. The request is the one the download will make
+   * (the whole file), and only its status is read: a walled link answers 403 at once, and the body is dropped unread. A
+   * smaller probe isn't a safe test, since a walled link serves small ranges (even past the first megabyte, up to about
+   * two). A song within the first megabyte needs no check, and a check that can't be made (the network) lets the link
+   * through: the download will say.
+   */
+  async #acceptsWholeSong(stream: YouTubeStream): Promise<boolean> {
+    if (stream.bytes <= FREE_WINDOW_BYTES + 1) return true;
+    try {
+      const res = await this.#fetch(stream.url, {
+        headers: { 'User-Agent': stream.userAgent, Range: 'bytes=0-' },
+        signal: AbortSignal.timeout(this.#timeout),
+      });
+      await res.body?.cancel().catch(() => {});
+      return res.ok;
+    } catch {
+      return true;
+    }
   }
 
   /** The best AAC audio in a player response: the highest bitrate with a ready-to-use link, never an auto-dubbed track. */
