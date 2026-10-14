@@ -15,4 +15,4 @@ npx wrangler deploy
 npx wrangler secret put EDGE_TOKEN
 ```
 
-`wrangler.jsonc` holds placeholders (`REPLACE-ME`); fill in your own and keep real values out of git. The secrets are `EDGE_TOKEN`, `RENDER_ADMIN_TOKEN` and, only if you use it, `NTFY_TOPIC`.
+`wrangler.jsonc` holds no personal values; everything specific to you is a secret, so nothing needs editing and nothing reaches git: `EDGE_TOKEN`, `RENDER_URL`, `RENDER_ADMIN_TOKEN`, `ALERT_FROM`, `ALERT_TO` and, only if you use ntfy.sh instead of email, `NTFY_TOPIC`. Set each with `npx wrangler secret put <NAME>`.

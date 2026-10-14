@@ -55,15 +55,19 @@ npx wrangler r2 bucket create mors-state
 
 Create an R2 API token with **Object Read & Write** on that bucket only (Cloudflare dashboard, R2, Manage API tokens). It gives you an access key id, a secret, and the bucket's S3 address, `https://<account id>.r2.cloudflarestorage.com`. You'll give these to Render in step 2.
 
-Edit `cloudflare/wrangler.jsonc`: `ALERT_FROM` is an address on your domain, `ALERT_TO` is your own address. Onboard the domain for Email Service and verify `ALERT_TO` as a destination address (dashboard, Email Service). Without a domain, delete the `send_email` block and set `NTFY_TOPIC` as a secret instead (install the ntfy app and subscribe to a topic nobody could guess).
+Onboard a domain for Email Service (Cloudflare dashboard, Compute, Email Service, Email Sending, *Onboard Domain*) and add your own address as a verified destination (Email Routing, Destination addresses). Without a domain, delete the `send_email` block in `cloudflare/wrangler.jsonc` and set an `NTFY_TOPIC` secret instead (install the ntfy app and subscribe to a topic nobody could guess).
 
 Make a long random token, deploy, and store the token:
 
 ```bash
-openssl rand -hex 32          # the shared token; keep it for step 2
+openssl rand -hex 32 > ~/.mors-edge-token && chmod 600 ~/.mors-edge-token     # the shared token, kept in a private file
 npx wrangler deploy
-npx wrangler secret put EDGE_TOKEN
+npx wrangler secret put EDGE_TOKEN < ~/.mors-edge-token
+npx wrangler secret put ALERT_FROM     # an address on your Email Service domain, e.g. alerts@yourdomain.com
+npx wrangler secret put ALERT_TO       # your own verified address
 ```
+
+Nothing personal goes in a file: the addresses and tokens are Worker secrets.
 
 Deploying prints the Worker's address, `https://mors-edge.<your-subdomain>.workers.dev`. It is deployed first because Render needs it, and it needs Render's address in turn; until you give it that (step 3) it checks nothing and emails nothing. Check it:
 
@@ -87,12 +91,10 @@ Let it deploy and watch the logs. A first build takes several minutes (it compil
 
 ### 3. Tell the Worker where Render is
 
-Set `RENDER_URL` in `wrangler.jsonc` to the service's address (`https://….onrender.com`), then:
-
 ```bash
 cd cloudflare
+npx wrangler secret put RENDER_URL             # the service's address, https://<name>.onrender.com
 npx wrangler secret put RENDER_ADMIN_TOKEN     # Render's ADMIN_TOKEN, from its environment page
-npx wrangler deploy
 ```
 
 The five-minute check starts. Look at both ends at once:

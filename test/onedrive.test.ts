@@ -220,6 +220,7 @@ describe('OneDrive', () => {
   test('is set up from ONEDRIVE_CLIENT_ID, and only when it is a client id', () => {
     const state = new Catalog(':memory:');
     assert.equal(oneDriveFromEnv({}, { state }), undefined);
+    for (const word of ['', '  ', 'none', 'None', 'off', 'no', '-']) assert.equal(oneDriveFromEnv({ ONEDRIVE_CLIENT_ID: word }, { state }), undefined, `"${word}" means off`);
     assert.ok(oneDriveFromEnv({ ONEDRIVE_CLIENT_ID: CLIENT }, { state }) instanceof OneDrive);
     assert.throws(() => oneDriveFromEnv({ ONEDRIVE_CLIENT_ID: 'my-secret-value' }, { state }), /Application \(client\) ID/);
   });

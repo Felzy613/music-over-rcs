@@ -1,21 +1,19 @@
 {
   // The Worker beside the bot: keeps the cloud host awake and watched, lends out the one-at-a-time lease, and emails alerts.
-  // See cloudflare/README.md for the setup. Nothing secret belongs in this file.
+  // See cloudflare/README.md and docs/cloud.md. Nothing personal or secret belongs in this file: those values are set as
+  // secrets, with `npx wrangler secret put <NAME>`, so they never reach git.
   "name": "mors-edge",
   "main": "index.ts",
   "compatibility_date": "2026-10-01",
   "triggers": { "crons": ["*/5 * * * *"] },
   "r2_buckets": [{ "binding": "STATE", "bucket_name": "mors-state" }],
-  // Email alerts. Needs a domain on Cloudflare DNS with Email Service set up; delete this block and set NTFY_TOPIC (a secret)
-  // to get alerts through ntfy.sh instead.
-  "send_email": [{ "name": "EMAIL" }],
-  "vars": {
-    "RENDER_URL": "https://REPLACE-ME.onrender.com",
-    "ALERT_FROM": "alerts@REPLACE-ME.example",
-    "ALERT_TO": "REPLACE-ME@example.com"
-  }
-  // Secrets, set with `npx wrangler secret put <NAME>`:
-  //   EDGE_TOKEN           shared with the bot (its EDGE_TOKEN setting) for /lease and /alert
-  //   RENDER_ADMIN_TOKEN   the bot's ADMIN_TOKEN, so the check can read its /status (optional)
-  //   NTFY_TOPIC           only when alerts go to ntfy.sh
+  // Email alerts. Needs a domain on Cloudflare DNS with Email Service set up; delete this block and set the NTFY_TOPIC
+  // secret instead to get alerts through ntfy.sh.
+  "send_email": [{ "name": "EMAIL" }]
+  // Secrets:
+  //   EDGE_TOKEN           shared with the host (its EDGE_TOKEN) for /lease and /alert
+  //   RENDER_URL           the Render service's address, https://<name>.onrender.com (until set, the Worker checks nothing)
+  //   RENDER_ADMIN_TOKEN   the host's ADMIN_TOKEN, so the check can read its /status (optional)
+  //   ALERT_FROM, ALERT_TO an address on your Email Service domain, and your own verified address
+  //   NTFY_TOPIC           only when alerts go to ntfy.sh instead
 }

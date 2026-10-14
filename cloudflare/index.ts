@@ -20,8 +20,8 @@ export interface Env {
   EMAIL?: SendEmail;
   /** The shared secret the bot sends as `Authorization: Bearer …` to /lease and /alert. */
   EDGE_TOKEN: string;
-  /** The Render service's address (https://….onrender.com) and its ADMIN_TOKEN. */
-  RENDER_URL: string;
+  /** The Render service's address (https://….onrender.com), once there is one, and its ADMIN_TOKEN. */
+  RENDER_URL?: string;
   RENDER_ADMIN_TOKEN?: string;
   /** Where alerts are emailed from (an address on a domain onboarded to Email Service) and to (a verified destination). */
   ALERT_FROM?: string;
@@ -116,7 +116,7 @@ export async function runScheduled(env: Env, now: number = Date.now(), doFetch: 
   // Nothing to watch yet: not an outage, and nothing to email about.
   if (!renderConfigured(env)) return { failures: 0 };
   return runWatchdog({
-    renderUrl: env.RENDER_URL.replace(/\/+$/, ''),
+    renderUrl: (env.RENDER_URL ?? '').replace(/\/+$/, ''),
     adminToken: env.RENDER_ADMIN_TOKEN,
     fetch: doFetch,
     now,

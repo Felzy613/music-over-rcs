@@ -344,7 +344,8 @@ export class OneDrive {
  */
 export function oneDriveFromEnv(env: NodeJS.ProcessEnv, deps: { state: StateStore; fetch?: typeof fetch; log?: (line: string) => void }): OneDrive | undefined {
   const clientId = env.ONEDRIVE_CLIENT_ID?.trim();
-  if (!clientId) return undefined;
+  // Empty, or a word that means "not yet" (a host's settings page wants something typed in the box), is off.
+  if (!clientId || /^(none|off|no|false|0|-|n\/a)$/i.test(clientId)) return undefined;
   if (!/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error(`ONEDRIVE_CLIENT_ID should be the app's "Application (client) ID", a long id like 0a1b2c3d-… (got "${clientId}")`);
   return new OneDrive({ clientId, state: deps.state, ...(env.ONEDRIVE_SCOPE?.trim() ? { scope: env.ONEDRIVE_SCOPE.trim() } : {}), ...(env.ONEDRIVE_LOGIN_URL?.trim() ? { loginUrl: env.ONEDRIVE_LOGIN_URL.trim().replace(/\/+$/, '') } : {}), ...(env.ONEDRIVE_GRAPH_URL?.trim() ? { graphUrl: env.ONEDRIVE_GRAPH_URL.trim().replace(/\/+$/, '') } : {}), ...(deps.fetch ? { fetch: deps.fetch } : {}), ...(deps.log ? { log: deps.log } : {}) });
 }
