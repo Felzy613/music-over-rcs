@@ -47,6 +47,8 @@ export interface MatrixClientOptions {
   token: string;
   homeserver?: string;
   fetch?: typeof fetch;
+  /** Told how many bytes each file uploaded to the homeserver came to (songs and pictures to send), for keeping count. */
+  onUpload?: (bytes: number) => void;
 }
 
 type Json = Record<string, unknown>;
@@ -277,6 +279,7 @@ export class MatrixClient {
   #since: string | undefined;
   #userId: string | undefined;
   #sent = new Set<string>();
+  #onUpload: ((bytes: number) => void) | undefined;
   /** The bridge passes reactions on, so a 👍 on a song in a list can get it. */
   readonly reactions = true;
 
@@ -284,6 +287,7 @@ export class MatrixClient {
     this.#base = (options.homeserver ?? DEFAULT_HOMESERVER).replace(/\/+$/, '');
     this.#token = options.token;
     this.#fetch = options.fetch ?? fetch;
+    this.#onUpload = options.onUpload;
   }
 
   /** Signs in with a password and returns an access token. The password is sent once and never stored. */
@@ -456,6 +460,11 @@ export class MatrixClient {
     });
     const url = asString(upload.content_uri);
     if (!url) throw new MatrixError('The homeserver did not return a content_uri for the upload', 0, '', '');
+    try {
+      this.#onUpload?.(file.bytes);
+    } catch {
+      // counting is a nicety
+    }
     return this.#sendMessage(roomID, {
       msgtype,
       body: file.fileName,

@@ -261,6 +261,31 @@ describe('bridgeRestarter', () => {
     assert.equal(bridgeRestarter({}, { platform: 'linux', uid: 501, exec }), undefined);
     assert.equal(bridgeRestarter({}, { platform: 'darwin', uid: undefined, exec }), undefined);
   });
+
+  test("on a server (BRIDGE_PIDFILE) the restart is a SIGTERM to the process the supervisor started, on any platform", async () => {
+    const signals: Array<[number, string]> = [];
+    const kill = (pid: number, signal: NodeJS.Signals) => void signals.push([pid, signal]);
+    const restart = bridgeRestarter({ BRIDGE_PIDFILE: '/run/mors/bridge.pid' }, { platform: 'linux', uid: 0, kill, readPid: async () => '4242\n' });
+    assert.ok(restart);
+    await restart();
+    assert.deepEqual(signals, [[4242, 'SIGTERM']]);
+  });
+
+  test('a pid file that holds nothing usable is an error, not a signal to the wrong process', async () => {
+    const signals: number[] = [];
+    const kill = (pid: number) => void signals.push(pid);
+    for (const contents of ['', 'abc', '0', '1', '-5']) {
+      const restart = bridgeRestarter({ BRIDGE_PIDFILE: '/run/mors/bridge.pid' }, { platform: 'linux', kill, readPid: async () => contents });
+      await assert.rejects(() => restart!(), /does not hold a process id/);
+    }
+    const missing = bridgeRestarter({ BRIDGE_PIDFILE: '/no/such/file.pid' }, { platform: 'linux', kill });
+    await assert.rejects(() => missing!(), /ENOENT/);
+    assert.deepEqual(signals, []);
+  });
+
+  test('BRIDGE_AUTO_RESTART=off still turns the pid-file restart off', () => {
+    assert.equal(bridgeRestarter({ BRIDGE_PIDFILE: '/run/mors/bridge.pid', BRIDGE_AUTO_RESTART: 'off' }, { platform: 'linux' }), undefined);
+  });
 });
 
 describe("the bridge's delivery notices", () => {

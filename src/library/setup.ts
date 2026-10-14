@@ -13,6 +13,7 @@ import type { CoverPicture } from './id3.ts';
 import { createPictures, type Picture, type PreparedPicture } from './images.ts';
 import { LibraryJobs, type DailyTime } from './jobs.ts';
 import { catalogNaming, namedFetch } from './naming.ts';
+import { SongArchive, type Drive } from '../archive/archiver.ts';
 
 /** Songs aren't kept on this Mac when that would leave its disk with less free than this (they're still sent). */
 const MIN_FREE_BYTES = 5 * 1024 ** 3;
@@ -38,6 +39,12 @@ export interface LibraryOptions {
   quiet?: { from: DailyTime; to: DailyTime } | undefined;
   /** Told whether the site answers (for alerts on the Mac). */
   onSite?: (ok: boolean, problem?: string) => void;
+  /** A cloud folder (OneDrive) every song sent is also saved to, in the background, sorted and tagged. */
+  cloudFolder?: Drive | undefined;
+  /** The most to save to it in a calendar month, in bytes (it shares the host's outbound traffic with the songs sent). Undefined for no limit. */
+  cloudMonthlyBytes?: number | undefined;
+  /** Told when saving to it starts failing (with what is wrong) and when it works again (undefined). */
+  onCloudFolder?: ((problem: string | undefined, needsLogin: boolean) => void) | undefined;
   log: (line: string) => void;
 }
 
@@ -47,6 +54,8 @@ export interface Library {
   fetchAudio(url: string, title?: string): Promise<DownloadedAudio>;
   /** Album art ready to send: a song's card with its name drawn on, or the daily collage. */
   prepareImage(picture: Picture): Promise<PreparedPicture>;
+  /** The background saving of sent songs to the cloud folder, when there is one. */
+  archive: SongArchive | undefined;
   onPlay(track: Track): void;
   /** Lists: trending, new, artists, holidays. */
   browse: Browse;
@@ -79,18 +88,40 @@ export function setUpLibrary(options: LibraryOptions): Library {
           minFreeBytes: MIN_FREE_BYTES,
         })
       : undefined;
+  const archive = options.cloudFolder
+    ? new SongArchive({
+        drive: options.cloudFolder,
+        state: catalog,
+        placeOf: naming.placeOf,
+        tagsOf: naming.tagsOf,
+        fetchCover: coverFetcher(),
+        monthlyBudgetBytes: options.cloudMonthlyBytes,
+        onProblem: options.onCloudFolder,
+        log,
+      })
+    : undefined;
+  const named = namedFetch(cache ? cachedFetch(cache, audio.fetchAudio, log) : audio.fetchAudio, naming.fileNameOf);
   let jobs: LibraryJobs | undefined;
   const at = options.digestAt;
   const parts = [
     musicTable ? (at ? `daily new-music message at ${String(at.hour).padStart(2, '0')}:${String(at.minute).padStart(2, '0')}` : 'daily message off') : '',
     cache ? (limited ? `up to ${options.prefetchMb} MB of songs kept ready` : 'songs kept ready, no size limit') : 'no songs kept ready',
     cache ? `sorted by artist and album${cache.archiveDir ? ` in ${cache.archiveDir} whenever it's there` : ''}` : '',
+    archive ? (options.cloudFolder?.connected() ? 'songs sent are saved to OneDrive' : 'OneDrive is set up but not signed in') : '',
   ].filter(Boolean);
 
   return {
     checkAudio: cache ? cachedCheck(cache, audio.checkAudio) : audio.checkAudio,
-    fetchAudio: namedFetch(cache ? cachedFetch(cache, audio.fetchAudio, log) : audio.fetchAudio, naming.fileNameOf),
+    // A song fetched to be sent is also offered to the cloud folder; that happens in the background, after this returns.
+    fetchAudio: archive
+      ? async (url, title) => {
+          const song = await named(url, title);
+          archive.offer(url, song);
+          return song;
+        }
+      : named,
     prepareImage: createPictures({ log }),
+    archive,
     onPlay: (track) => catalog.recordPlay(track.id),
     browse: catalogBrowse(catalog, undefined, categories),
     follows: catalogFollows(catalog),

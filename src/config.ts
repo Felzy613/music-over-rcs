@@ -103,6 +103,8 @@ interface ChatSettings {
   quiet: { from: DailyTime; to: DailyTime } | undefined;
   /** The least time between two songs sent, in ms, so the phone has sent one before the next arrives. */
   songGapMs: number;
+  /** Songs downloading at once, ahead of their turn. Left out for the runner's own default. */
+  downloadsAhead?: number;
 }
 
 function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: string[]): ChatSettings {
@@ -124,6 +126,11 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   if (archiveDir instanceof Error) problems.push(archiveDir.message);
   const songGapMs = parseSongGap(env.SONG_GAP_SECONDS);
   if (songGapMs instanceof Error) problems.push(songGapMs.message);
+  const aheadText = env.DOWNLOADS_AHEAD?.trim();
+  const downloadsAhead = aheadText ? Number(aheadText) : undefined;
+  if (downloadsAhead !== undefined && !(Number.isInteger(downloadsAhead) && downloadsAhead >= 1 && downloadsAhead <= 10)) {
+    problems.push(`DOWNLOADS_AHEAD must be a whole number from 1 to 10 (got "${aheadText}")`);
+  }
   return {
     pollMs,
     maxDownloadMb,
@@ -133,6 +140,7 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
     archiveDir: archiveDir instanceof Error ? undefined : archiveDir,
     quiet: quiet instanceof Error ? undefined : quiet,
     songGapMs: songGapMs instanceof Error ? 0 : songGapMs,
+    ...(downloadsAhead !== undefined && downloadsAhead >= 1 && downloadsAhead <= 10 ? { downloadsAhead } : {}),
   };
 }
 
@@ -157,6 +165,18 @@ export function parsePrefetchMb(raw: string | undefined): number | Error {
   const mb = Number(text);
   if (!(Number.isFinite(mb) && mb >= 0)) return new Error(`PREFETCH_MB must be "unlimited" (the default), a number of MB, or 0 for none (got "${raw}")`);
   return mb;
+}
+
+/**
+ * How much may be saved to the cloud folder (OneDrive) in a calendar month, in bytes: ONEDRIVE_MAX_MB_PER_MONTH, 1500 MB unless set,
+ * or "unlimited". A cloud host's plan allows only so much outbound traffic, and an upload counts like a song sent.
+ */
+export function parseCloudBudget(raw: string | undefined): number | undefined | Error {
+  const text = raw?.trim().toLowerCase() || '1500';
+  if (text === 'unlimited') return undefined;
+  const mb = Number(text);
+  if (!(Number.isFinite(mb) && mb >= 0)) return new Error(`ONEDRIVE_MAX_MB_PER_MONTH must be a number of MB or "unlimited" (got "${raw}")`);
+  return Math.round(mb * 1024 * 1024);
 }
 
 /** The folder kept songs move into (SONGS_ARCHIVE_DIR): a full path, or one starting with ~/. Nothing when unset. */

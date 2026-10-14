@@ -3,10 +3,10 @@ import { after, before, beforeEach, describe, test } from 'node:test';
 import { checkAudio } from '../src/audio-check.ts';
 import { AudioFetchError, fetchAudio } from '../src/audio-fetch.ts';
 import { createBot, HELP_TEXT } from '../src/bot.ts';
-import { Catalog } from '../src/catalog.ts';
+import { Catalog, resumeIn } from '../src/catalog.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
 import type { Picture, PreparedPicture } from '../src/library/images.ts';
-import { createRunner, type PendingChoices } from '../src/runner.ts';
+import { createRunner, type PendingChoices, type ResumeStore } from '../src/runner.ts';
 import type { Reply } from '../src/types.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
 import { startMusicHost, type MusicHost } from './helpers/music-host.ts';
@@ -32,7 +32,7 @@ describe('runner over Matrix (the bridge case)', () => {
 
   beforeEach(() => mock.reset());
 
-  function makeRunner(options: { now?: () => number; typingRefreshMs?: number; fetchDelayMs?: number } = {}) {
+  function makeRunner(options: { now?: () => number; typingRefreshMs?: number; fetchDelayMs?: number; resume?: ResumeStore; catchUpMs?: number } = {}) {
     const logs: string[] = [];
     const matrix = new MatrixClient({ token: mock.token, homeserver: mock.url });
     const bot = createBot({
@@ -51,6 +51,8 @@ describe('runner over Matrix (the bridge case)', () => {
       log: (line) => logs.push(line),
       ...(options.now ? { now: options.now } : {}),
       ...(options.typingRefreshMs ? { typingRefreshMs: options.typingRefreshMs } : {}),
+      ...(options.resume ? { resume: options.resume } : {}),
+      ...(options.catchUpMs ? { catchUpMs: options.catchUpMs } : {}),
     });
     return { runner, logs };
   }
@@ -63,6 +65,82 @@ describe('runner over Matrix (the bridge case)', () => {
     await runner.prime();
     await runner.tick();
     assert.deepEqual(mock.sent, []);
+  });
+
+  describe('a restart', () => {
+    // The mock stamps messages a little after this moment.
+    const BASE = 1_800_000_000_000;
+
+    test('first start with a resume point saved: old history is still not replayed, and a point is written', async () => {
+      const resume = resumeIn(catalog, 'test.resume.first');
+      typedOnPhone('search paper planes');
+      const { runner } = makeRunner({ resume });
+      await runner.prime();
+      await runner.tick();
+      assert.deepEqual(mock.sent, []);
+      assert.ok((resume.load()?.at ?? 0) >= BASE, 'a point is written even before the first request');
+    });
+
+    test('answers a request sent while the bot was down, once, and not what it had already answered', async () => {
+      const resume = resumeIn(catalog, 'test.resume.answers');
+      const before = makeRunner({ resume });
+      await before.runner.prime();
+      typedOnPhone('search paper planes');
+      await before.runner.tick();
+      assert.equal(mock.sent.length, 2);
+
+      // The bot goes down; a request is sent meanwhile; a new process starts with the saved point.
+      typedOnPhone('search blue horizon (live)');
+      const after = makeRunner({ resume });
+      await after.runner.prime();
+      assert.ok(after.logs.some((line) => /1 message arrived while the bot was down/.test(line)), after.logs.join('\n'));
+      await after.runner.tick();
+      assert.equal(mock.sent.length, 4, 'the new request was answered and the old one was not answered again');
+      assert.match(String((mock.sent[2]?.content as { body?: string }).body), /Blue Horizon \(Live\)/);
+
+      // And a third start finds nothing new.
+      const third = makeRunner({ resume });
+      await third.runner.prime();
+      await third.runner.tick();
+      assert.equal(mock.sent.length, 4);
+    });
+
+    test('leaves alone a request older than the catch-up window', async () => {
+      const resume = resumeIn(catalog, 'test.resume.old');
+      const before = makeRunner({ resume });
+      await before.runner.prime();
+      typedOnPhone('search paper planes');
+      const sentBefore = mock.sent.length;
+      const after = makeRunner({ resume, catchUpMs: 60_000, now: () => BASE + 3 * 60 * 60_000 });
+      await after.runner.prime();
+      await after.runner.tick();
+      assert.equal(mock.sent.length, sentBefore);
+    });
+
+    test('keeps what arrived while down when the first poll after the restart fails', async () => {
+      const resume = resumeIn(catalog, 'test.resume.failing');
+      const before = makeRunner({ resume });
+      await before.runner.prime();
+      typedOnPhone('search paper planes');
+      const after = makeRunner({ resume });
+      await after.runner.prime();
+      mock.failSync = true;
+      await after.runner.tick();
+      assert.equal(mock.sent.length, 0);
+      mock.failSync = false;
+      await after.runner.tick();
+      assert.equal(mock.sent.length, 2);
+    });
+
+    test('without a resume store it starts from now, as before', async () => {
+      const before = makeRunner();
+      await before.runner.prime();
+      typedOnPhone('search paper planes');
+      const after = makeRunner();
+      await after.runner.prime();
+      await after.runner.tick();
+      assert.deepEqual(mock.sent, []);
+    });
   });
 
   test('answers a request typed on the phone with a caption and an audio message', async () => {

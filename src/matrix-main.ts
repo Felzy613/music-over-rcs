@@ -2,13 +2,16 @@ import './load-env.ts';
 import { checkAudio } from './audio-check.ts';
 import { fetchAudio } from './audio-fetch.ts';
 import { createBot } from './bot.ts';
-import { Catalog, choicesIn, linksIn } from './catalog.ts';
-import { Health, BridgeWatch, bridgeStatus, online } from './health.ts';
+import { Catalog, choicesIn, linksIn, resumeIn } from './catalog.ts';
+import { alertFromEnv, allNotify } from './alert.ts';
+import { Health, BridgeWatch, bridgeStatus, macNotify, online } from './health.ts';
 import { bridgeRestarter } from './bridge-restart.ts';
 import { loadExtensions, startExtensions, stopExtensions, type ExtensionChat } from './extensions.ts';
-import { loadMatrixConfig } from './config.ts';
+import { loadMatrixConfig, parseCloudBudget } from './config.ts';
 import { describeMatrixError, MatrixClient } from './matrix/client.ts';
 import { setUpLibrary } from './library/setup.ts';
+import { addSent } from './usage.ts';
+import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
@@ -24,13 +27,14 @@ try {
   homeserver = config.homeserver;
   const maxBytes = config.maxDownloadMb * 1024 * 1024;
 
-  const matrix = new MatrixClient({ token: config.token, homeserver: config.homeserver });
+  const catalog = new Catalog(config.dbPath);
+  // What goes out is counted (a cloud host's plan allows only so much a month; /status on the cloud host shows it).
+  const matrix = new MatrixClient({ token: config.token, homeserver: config.homeserver, onUpload: (bytes) => addSent(catalog, bytes) });
   const { userId } = await matrix.whoami();
   // The bridge invites you to each chat it creates; joining accepts the invite and does nothing if you're in already.
   await matrix.joinRoom(config.roomID);
 
   // This machine downloads the file, so private addresses (a NAS, say) are fine and any audio format will do.
-  const catalog = new Catalog(config.dbPath);
   // When the catalog has no match the bot looks on YouTube Music and music-table.com (YOUTUBE_MUSIC=off and
   // MUSIC_TABLE=off turn them off; SONG_SOURCES sets which is asked first).
   const musicTable = musicTableFromEnv();
@@ -50,7 +54,8 @@ try {
     { maxBytes },
   );
   // What's wrong, shown on the Mac: the chat can't carry news of its own breakdown.
-  const health = new Health({ log, save: (problems) => catalog.setState('health.problems', JSON.stringify(problems)) });
+  // On a server (ALERT_URL set) problems are also sent to the alert Worker, which emails them.
+  const health = new Health({ notify: allNotify(macNotify, alertFromEnv(process.env, log)), log, save: (problems) => catalog.setState('health.problems', JSON.stringify(problems)) });
   catalog.setState('health.problems', '[]');
   // Zemer's artist list is what YouTube Music songs are filtered by, and it changes through the day: kept current while the
   // bot runs, with a note on the Mac if it goes a day without updating (the last good list is used meanwhile).
@@ -60,12 +65,26 @@ try {
   });
   void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs`));
 
+  // With ONEDRIVE_CLIENT_ID set, every song sent is also saved to the owner's OneDrive (signed in on the setup page).
+  const oneDrive = oneDriveFromEnv(process.env, { state: catalog, log });
+  const cloudBudget = parseCloudBudget(process.env.ONEDRIVE_MAX_MB_PER_MONTH);
+  if (cloudBudget instanceof Error) throw cloudBudget;
   // Songs kept on disk (the most played, the newest, the most viewed), album art, and the daily new-music message.
   const library = setUpLibrary({
     catalog,
     musicTable,
     audio,
     dbPath: config.dbPath,
+    ...(oneDrive
+      ? {
+          cloudFolder: oneDrive,
+          cloudMonthlyBytes: cloudBudget,
+          onCloudFolder: (problem: string | undefined, needsLogin: boolean) =>
+            problem
+              ? health.problem('onedrive', `Songs are not being saved to OneDrive: ${problem}${needsLogin ? ' Open the setup page and sign in to OneDrive again.' : ''}`)
+              : health.ok('onedrive', 'Fixed: songs are being saved to OneDrive again.'),
+        }
+      : {}),
     digestAt: config.digestAt,
     prefetchMb: config.prefetchMb,
     archiveDir: config.archiveDir,
@@ -111,8 +130,11 @@ try {
     prepareImage,
     choices: choicesIn(catalog),
     links: linksIn(catalog),
+    // A restart (routine on a cloud host) answers what was sent while the bot was down instead of dropping it.
+    resume: resumeIn(catalog),
     pollMs: config.pollMs,
     songGapMs: config.songGapMs,
+    ...(config.downloadsAhead ? { downloadsAhead: config.downloadsAhead } : {}),
     onBridgeSendFailure: () => bridge.sendFailed(),
     ...(pictureTakers.length > 0 ? { onPicture: (picture: IncomingPicture) => pictureTakers.forEach((extension) => extension.onPicture!(picture)) } : {}),
     log,

@@ -1,0 +1,46 @@
+# The cloud host: Synapse, the Google Messages bridge, the bot and Litestream in one image (see docs/cloud.md).
+# Not built or run yet; the first build is the spike in the plan, and the pins below are the first thing to check.
+ARG PYTHON_VERSION=3.12
+ARG NODE_VERSION=24
+ARG SYNAPSE_VERSION=1.143.0
+# upstream main when the self-unpair fix landed (c1b622f); use a release once one includes it
+ARG BRIDGE_REF=186284e
+ARG LITESTREAM_VERSION=0.5.17
+
+# The bridge, from source with the pure-Go olm (no libolm to build), as on the Mac.
+FROM golang:1-bookworm AS bridge
+ARG BRIDGE_REF
+RUN git clone https://github.com/mautrix/gmessages /src \
+ && cd /src && git checkout "${BRIDGE_REF}" \
+ && go build -tags goolm -trimpath -ldflags "-s -w" -o /out/mautrix-gmessages ./cmd/mautrix-gmessages
+
+FROM python:${PYTHON_VERSION}-slim-bookworm AS synapse
+ARG SYNAPSE_VERSION
+# prometheus-client 0.24 broke Synapse 1.143.0; requests is for register_new_matrix_user
+RUN python -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir "matrix-synapse==${SYNAPSE_VERSION}" "prometheus-client<0.24" requests
+
+FROM node:${NODE_VERSION}-bookworm-slim AS node
+FROM litestream/litestream:${LITESTREAM_VERSION} AS litestream
+
+FROM python:${PYTHON_VERSION}-slim-bookworm
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates tini tzdata \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 1000 app \
+ && mkdir -p /data /run/mors /app \
+ && chown app:app /data /run/mors /app
+COPY --from=synapse /opt/venv /opt/venv
+COPY --from=bridge /out/mautrix-gmessages /usr/local/bin/mautrix-gmessages
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
+COPY deploy/cloud/litestream.yml /etc/litestream.yml
+WORKDIR /app
+COPY package.json ./
+COPY src ./src
+COPY deploy/cloud ./deploy/cloud
+USER app
+ENV PORT=8080 DATA_DIR=/data TZ=America/New_York NODE_ENV=production
+EXPOSE 8080
+ENTRYPOINT ["tini", "--"]
+CMD ["node", "--disable-warning=ExperimentalWarning", "deploy/cloud/entrypoint.ts"]

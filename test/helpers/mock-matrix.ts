@@ -67,7 +67,8 @@ export interface MockMatrix extends Listening {
 }
 
 /** A stand-in for a Matrix homeserver: login, whoami, sync, send, upload, join and createRoom. */
-export async function startMockMatrix(): Promise<MockMatrix> {
+export async function startMockMatrix(port = 0): Promise<MockMatrix> {
+  const listenHere: typeof listen = (listener) => listen(listener, port);
   const userId = '@me:localhost';
   const password = 'mock-password-for-tests';
   const token = 'syt_mock_token';
@@ -112,7 +113,7 @@ export async function startMockMatrix(): Promise<MockMatrix> {
     return event;
   };
 
-  const server = await listen(async (req, res) => {
+  const server = await listenHere(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://mock');
     const body = await readBuffer(req);
     requests.push({ method: req.method ?? '', path: url.pathname });
@@ -128,6 +129,9 @@ export async function startMockMatrix(): Promise<MockMatrix> {
       }
       return json(403, { errcode: 'M_FORBIDDEN', error: 'Invalid username or password' });
     }
+
+    // A real homeserver answers this without a token, which is how a starting host tells that it is up.
+    if (req.method === 'GET' && url.pathname === '/_matrix/client/versions') return json(200, { versions: ['v1.11'] });
 
     if (req.headers.authorization !== `Bearer ${token}`) {
       return json(401, { errcode: 'M_UNKNOWN_TOKEN', error: 'Unrecognised access token' });

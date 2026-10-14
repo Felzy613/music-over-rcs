@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+node_modules
+data
+keys
+extensions
+.claude
+test
+docs
+deploy/mac
+deploy/dell
+cloudflare
+*.db
+*.db-wal
+*.db-shm
+*.log

@@ -14,12 +14,16 @@ export const RELAY_MARK = '🤖';
 const isBotText = (text: string): boolean => text.startsWith(BOT_MARK) || text.startsWith(RELAY_MARK);
 
 const SEEN_LIMIT = 2000;
+/** Message ids kept in the resume point. */
+const RESUME_IDS = 200;
+/** After a restart, requests older than this are not answered. */
+const CATCH_UP_MS = 2 * 60 * 60_000;
 /**
  * In a chat with yourself, a phone can show one text twice (as sent and as received), and the bridge passes both on.
  * A request repeated word for word within this long is taken as an echo of the first, not a new request.
  */
 const REPEAT_WINDOW_MS = 20_000;
-/** Songs downloading at once, ahead of their turn to be sent. */
+/** Songs downloading at once, ahead of their turn to be sent (unless the runner is told another number). */
 const DOWNLOADS_AHEAD = 3;
 /** Covers being drawn at once, ahead of their turn. Each is a separate drawing process, so only a couple. */
 const PICTURES_AHEAD = 2;
@@ -111,6 +115,20 @@ export interface MessageLinks {
   lookup(messageId: string): string | undefined;
 }
 
+/** How far the runner got in the chat, so a restart answers what arrived while it was down instead of dropping it. */
+export interface ResumePoint {
+  /** When the newest message dealt with was sent (Unix ms). */
+  at: number;
+  /** The newest messages dealt with, so none is answered twice. */
+  ids: string[];
+}
+
+/** Where the resume point is kept beyond this process. */
+export interface ResumeStore {
+  load(): ResumePoint | undefined;
+  save(point: ResumePoint): void;
+}
+
 export interface RunnerOptions {
   chat: ChatClient;
   bot: Bot;
@@ -125,6 +143,12 @@ export interface RunnerOptions {
   choices?: ChoiceStore;
   /** Keeps which messages stand for which song. Without it, only this run's messages answer a 👍. */
   links?: MessageLinks;
+  /** Keeps how far the runner got. With it, a start answers requests that arrived while the bot was down; without, it starts from now. */
+  resume?: ResumeStore;
+  /** The oldest request still answered after a restart (default 2 hours): older ones are left alone. */
+  catchUpMs?: number;
+  /** Songs downloading at once, ahead of their turn (default 3). A small host holds each whole file in memory, so it sets fewer. */
+  downloadsAhead?: number;
   /** Circuit breaker: stop sending once this many messages went out in the last minute. */
   maxSendsPerMinute?: number;
   /**
@@ -145,7 +169,10 @@ export interface RunnerOptions {
 }
 
 export interface Runner {
-  /** Marks the chat's current messages as seen, so history is never replayed. */
+  /**
+   * Marks the chat's current messages as seen, so history is never replayed. With a resume point, messages sent after
+   * it (while the bot was down) are kept to be answered by the next tick instead.
+   */
   prime(): Promise<void>;
   /** Reads the chat once and answers any new requests. */
   tick(): Promise<void>;
@@ -168,8 +195,15 @@ export function createRunner(options: RunnerOptions): Runner {
   const typingRefreshMs = options.typingRefreshMs ?? 20_000;
   const maxSends = options.maxSendsPerMinute ?? 30;
   const songGapMs = options.songGapMs ?? 0;
+  const catchUpMs = options.catchUpMs ?? CATCH_UP_MS;
+  const downloadsAhead = Math.max(1, options.downloadsAhead ?? DOWNLOADS_AHEAD);
 
   const seen = new Set<string>();
+  /** Messages that arrived while the bot was down, answered by the first tick. */
+  const backlog: ChatMessage[] = [];
+  /** When the newest message dealt with was sent, and whether that has changed since the resume point was saved. */
+  let lastAt = 0;
+  let unsaved = false;
   const sendTimes: number[] = [];
   /** The list of options last offered. A pick keeps it, so another number from the same list works; a new search ends it. */
   let pending: PendingChoices | undefined;
@@ -311,7 +345,7 @@ export function createRunner(options: RunnerOptions): Runner {
     let started = 0;
     let sentSongs = 0;
     const startDownloads = (): void => {
-      while (started < songs.length && started - sentSongs < DOWNLOADS_AHEAD) {
+      while (started < songs.length && started - sentSongs < downloadsAhead) {
         const song = songs[started++]!;
         const file = options.fetchAudio(song.url, song.title);
         file.catch(() => {}); // handled when it's sent
@@ -502,8 +536,42 @@ export function createRunner(options: RunnerOptions): Runner {
     }
   }
 
+  /** Writes down how far the runner got. Called when nothing is half-answered, so a crash repeats work rather than losing it. */
+  function checkpoint(): void {
+    if (!options.resume || !unsaved) return;
+    unsaved = false;
+    try {
+      options.resume.save({ at: lastAt, ids: [...seen].slice(-RESUME_IDS) });
+    } catch (err) {
+      log(`could not keep where the bot got to: ${errorText(err)}`);
+    }
+  }
+
   async function prime(): Promise<void> {
-    for (const message of await chat.listMessages(chatID)) remember(message.id);
+    let point: ResumePoint | undefined;
+    try {
+      point = options.resume?.load();
+    } catch (err) {
+      log(`could not read where the bot got to: ${errorText(err)}`);
+    }
+    if (point) {
+      lastAt = point.at;
+      for (const id of point.ids) remember(id);
+    }
+    const listed = await chat.listMessages(chatID);
+    for (const message of listed) {
+      const at = Date.parse(message.timestamp);
+      // Sent after the last one dealt with, not dealt with, recent enough to still be wanted, and something the bot acts on
+      // (not its own earlier replies, which a restarted client reads back): it arrived while the bot was down.
+      const wanted = Boolean(message.reaction || message.picture || message.bridgeSendFailure) || shouldHandle(message);
+      if (point && wanted && !point.ids.includes(message.id) && at > point.at && now() - at <= catchUpMs) backlog.push(message);
+      else remember(message.id);
+      if (!point && at > lastAt) lastAt = at;
+    }
+    if (backlog.length > 0) log(`${backlog.length} message${backlog.length === 1 ? '' : 's'} arrived while the bot was down; answering ${backlog.length === 1 ? 'it' : 'them'} now`);
+    // The first run has no resume point yet; writing one now means a restart before the first request still has one.
+    if (!point) unsaved = true;
+    checkpoint();
   }
 
   /** Runs a job that sends on its own (an announcement), after whatever is under way, and makes polls wait for it. */
@@ -524,7 +592,9 @@ export function createRunner(options: RunnerOptions): Runner {
     if (current) return current;
     const run = (async () => {
       try {
-        const messages = await chat.listMessages(chatID);
+        const listed = await chat.listMessages(chatID);
+        // Read first: a poll that fails keeps the backlog for the next one.
+        const messages = [...backlog.splice(0), ...listed];
         failures = 0;
         options.onPoll?.(true, 0);
         // 👍s are held until a request that is not one (or the end of what was read), then answered together.
@@ -537,6 +607,9 @@ export function createRunner(options: RunnerOptions): Runner {
         for (const message of messages) {
           if (seen.has(message.id)) continue;
           remember(message.id);
+          const at = Date.parse(message.timestamp);
+          if (at > lastAt) lastAt = at;
+          unsaved = true;
           if (message.bridgeSendFailure) {
             log('the Google Messages bridge reported a message delivery failure');
             await options.onBridgeSendFailure?.();
@@ -561,8 +634,10 @@ export function createRunner(options: RunnerOptions): Runner {
           }
           await answerLikes();
           await handleMessage(message);
+          checkpoint();
         }
         await answerLikes();
+        checkpoint();
       } catch (err) {
         failures++;
         log(`poll failed (${failures} in a row): ${errorText(err)}`);

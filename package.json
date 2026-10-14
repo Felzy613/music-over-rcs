@@ -26,6 +26,7 @@
     "matrix-send": "node scripts/matrix-send.ts",
     "music-table": "node --disable-warning=ExperimentalWarning scripts/music-table.ts",
     "library": "node --disable-warning=ExperimentalWarning scripts/library.ts",
+    "cloud:check": "node --disable-warning=ExperimentalWarning scripts/cloud-check.ts",
     "mac:setup": "bash deploy/mac/setup.sh",
     "stack": "bash deploy/mac/stack",
     "homeserver": "bash deploy/mac/stack run synapse",

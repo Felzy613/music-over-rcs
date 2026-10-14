@@ -86,6 +86,7 @@ npm run stack -- enable-bot       # always on, starts at login
 | [music-table.com](docs/music-table.md) | How the site is used, how matching and spelling fixes work, how it behaves toward the site |
 | [The simulator](docs/simulator.md) | Trying the bot in a browser or a terminal |
 | [Configuration](docs/configuration.md) | Every setting in `.env` |
+| [Running it in the cloud](docs/cloud.md) | Moving the homeserver, bridge and bot off the Mac onto Render and Cloudflare, so a Mac that loses its internet doesn't stop it |
 | [Other routes](docs/other-routes.md) | Beeper, and an RCS for Business agent |
 | [Architecture](docs/architecture.md) | How the code fits together, the database, the background jobs, the tests |
 | [Privacy and security](docs/privacy-and-security.md) | What's stored where, what leaves your Mac, keeping secrets out of git |

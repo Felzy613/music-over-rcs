@@ -420,6 +420,34 @@ export class AudioCache {
   }
 }
 
+/**
+ * A downloaded song with its tags written in (and a cover, when it has none), to be kept somewhere other than this cache,
+ * such as a cloud folder. A song whose type can't be tagged, or whose tags can't be written, comes back as it was downloaded.
+ */
+export async function tagSong(
+  url: string,
+  downloaded: DownloadedAudio,
+  options: {
+    tagsOf?: ((url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined) | undefined;
+    fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
+  },
+): Promise<DownloadedAudio> {
+  if (!taggerFor(downloaded.mimeType)) return downloaded;
+  const data = new Uint8Array(await downloaded.data.arrayBuffer());
+  const retyped = asItIs(downloaded, data);
+  const audio = retyped === downloaded ? downloaded : { ...retyped, data: new Blob([data], { type: retyped.mimeType }) };
+  const tagger = taggerFor(audio.mimeType);
+  const tags = tagger && options.tagsOf?.(url, audio);
+  if (!tagger || !tags) return audio;
+  let written = tagger.write(data, tags);
+  if (!written) return audio;
+  if (tags.cover && options.fetchCover && !tagger.hasCover(written)) {
+    const cover = await options.fetchCover(tags.cover).catch(() => undefined);
+    if (cover) written = tagger.write(written, tags, cover) ?? written;
+  }
+  return { ...audio, data: new Blob([written], { type: audio.mimeType }), bytes: written.byteLength };
+}
+
 /** A song called an MP3 that's really something else (an M4A, say), typed and named as what it is. */
 function asItIs<T extends { fileName: string; mimeType: string }>(audio: T, data: Uint8Array): T {
   const actual = audioTypeOf(data);

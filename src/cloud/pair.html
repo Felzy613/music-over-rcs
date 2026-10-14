@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Music over RCS setup</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --fg: #1c1c1e; --muted: #6b6b70; --card: #fff; --line: #d8d8dc; --accent: #0b5fff; --ok: #1a7f37; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111113; --fg: #f2f2f4; --muted: #9a9aa2; --card: #1b1b1e; --line: #34343a; --accent: #6ea0ff; --ok: #4cc26a; --bad: #ff7b72; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  p { margin: 0 0 10px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; }
+  .muted { color: var(--muted); font-size: .92rem; }
+  .warn { border-left: 4px solid var(--bad); padding-left: 10px; }
+  textarea, input { width: 100%; font: inherit; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+  textarea { min-height: 110px; font: 13px/1.4 ui-monospace, monospace; }
+  button { font: inherit; padding: 10px 16px; margin-top: 8px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  pre { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; font: 13px/1.4 ui-monospace, monospace; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: .9rem; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  li { margin: 4px 0; }
+  code { font: 13px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Music over RCS: setup</h1>
+  <p class="muted">Links the bridge to your Google Messages and picks the chat the bot answers in. Only you can see this page.</p>
+
+  <section aria-labelledby="s-status">
+    <h2 id="s-status">Status</h2>
+    <p>Bridge: <span class="pill" id="bridge">checking…</span></p>
+    <p>Bot: <span class="pill" id="bot">checking…</span></p>
+    <p class="muted" id="problems"></p>
+  </section>
+
+  <section aria-labelledby="s-link">
+    <h2 id="s-link">1. Connect Google Messages</h2>
+    <ol>
+      <li>Press <b>Start login</b> below.</li>
+      <li>Open <b>messages.google.com/web</b> in a <b>private browser window</b>, with developer tools open on the Network tab, and begin signing in as the bridge's reply says.</li>
+      <li>Copy the request it names with <b>Copy as cURL</b> and paste it in the box. Press <b>Send pasted request</b>.</li>
+      <li>Tap the emoji the bridge shows in Google Messages on your phone.</li>
+    </ol>
+    <p class="warn muted">The pasted request holds your Google session cookies, as sensitive as your password. Paste it only here. It is deleted from the chat a minute after you send it; close the private window when you are done.</p>
+    <button id="start" type="button">Start login</button>
+    <textarea id="paste" spellcheck="false" autocomplete="off" aria-label="Pasted request" placeholder="Paste the copied cURL request here"></textarea>
+    <button id="send" type="button">Send pasted request</button>
+    <pre id="log" aria-live="polite">Nothing from the bridge yet.</pre>
+  </section>
+
+  <section aria-labelledby="s-room">
+    <h2 id="s-room">2. Choose your "message yourself" chat</h2>
+    <p class="muted">Text yourself once from your phone so the bridge knows the chat, then enter your number and press Find.</p>
+    <label for="phone" class="muted">Your phone number</label>
+    <input id="phone" inputmode="tel" autocomplete="off" placeholder="5551234567">
+    <button id="find" class="secondary" type="button">Find the chat</button>
+    <div id="rooms"></div>
+  </section>
+  <section aria-labelledby="s-od" id="onedrive" hidden>
+    <h2 id="s-od">3. Save songs to OneDrive</h2>
+    <p class="muted">Every song the bot sends is also saved, tagged and sorted as Artist / Album / 01 Title, in the app's own OneDrive folder (<code>Apps/…</code>). The bot cannot see the rest of your OneDrive.</p>
+    <p>OneDrive: <span class="pill" id="od-state">checking…</span></p>
+    <p class="muted" id="od-detail"></p>
+    <button id="od-connect" type="button">Sign in to OneDrive</button>
+    <pre id="od-code" hidden></pre>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const api = async (path, body) => {
+    const res = await fetch(path, body === undefined ? undefined : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
+  };
+  const pill = (el, text, good) => { el.textContent = text; el.className = 'pill ' + (good === undefined ? '' : good ? 'ok' : 'bad'); };
+
+  async function refresh() {
+    try {
+      const s = await api('/status');
+      const b = s.bridge || {};
+      pill($('bridge'), b.state ? String(b.state) : (b.error || 'not logged in'), b.state === 'CONNECTED');
+      pill($('bot'), s.phase === 'running' ? 'running' : s.phase === 'setup' ? (s.botEnabled ? 'waiting for a chat to be chosen' : 'switched off (BOT_ENABLED)') : String(s.phase), s.phase === 'running');
+      $('problems').textContent = (s.problems || []).map((p) => p.message).join(' ');
+    } catch (err) { pill($('bridge'), String(err.message), false); }
+    try {
+      const { lines } = await api('/pair/log');
+      if (lines.length) $('log').textContent = lines.map((l) => l.text).join('\n\n');
+    } catch { /* the homeserver may still be starting */ }
+  }
+
+  const busy = async (button, job) => { button.disabled = true; try { await job(); } catch (err) { alert(err.message); } finally { button.disabled = false; refresh(); } };
+  $('start').onclick = () => busy($('start'), () => api('/pair/send', { text: 'login google' }));
+  $('send').onclick = () => busy($('send'), async () => {
+    const text = $('paste').value.trim();
+    if (!text) throw new Error('Paste the copied request first.');
+    await api('/pair/send', { text });
+    $('paste').value = '';
+  });
+  $('find').onclick = () => busy($('find'), async () => {
+    const { rooms } = await api('/setup/rooms?phone=' + encodeURIComponent($('phone').value));
+    const box = $('rooms'); box.textContent = '';
+    if (!rooms.length) { box.textContent = 'No chat with that number yet. Text yourself once on your phone, wait a few seconds and try again.'; return; }
+    for (const room of rooms) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = 'Use ' + room;
+      button.onclick = () => busy(button, async () => { await api('/setup/room', { room }); box.textContent = 'Chosen. The bot starts answering in that chat.'; });
+      box.appendChild(button);
+    }
+  });
+  async function refreshOneDrive() {
+    try {
+      const o = await api('/onedrive/status');
+      $('onedrive').hidden = false;
+      const pending = o.login && o.login.state === 'pending';
+      pill($('od-state'), o.connected ? 'connected' : pending ? 'waiting for you to sign in' : 'not signed in', o.connected);
+      const parts = [];
+      if (o.connected) parts.push('Saved this month: ' + o.savedThisMonthMb + ' MB' + (o.monthlyLimitMb ? ' of ' + o.monthlyLimitMb + ' MB allowed.' : '.'));
+      if (o.error) parts.push('Last problem: ' + o.error);
+      if (o.login && o.login.state === 'failed') parts.push(o.login.error);
+      $('od-detail').textContent = parts.join(' ');
+      $('od-code').hidden = !pending;
+      if (pending) $('od-code').textContent = 'Open ' + o.login.verificationUri + ' on any device, enter the code ' + o.login.userCode + ', and approve. This page updates by itself.';
+      $('od-connect').textContent = o.connected ? 'Sign in again' : 'Sign in to OneDrive';
+    } catch { /* OneDrive is not set up on this host */ }
+  }
+  $('od-connect').onclick = () => busy($('od-connect'), async () => { await api('/onedrive/start', {}); await refreshOneDrive(); });
+  refresh(); refreshOneDrive(); setInterval(refresh, 4000); setInterval(refreshOneDrive, 4000);
+})();
+</script>
+</body>
+</html>

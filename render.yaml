@@ -1,0 +1,55 @@
+# Render Blueprint for the cloud host (docs/cloud.md). The free plan: the Cloudflare Worker's check every five minutes keeps
+# it awake, and the databases are backed up to R2, so its wiped disk doesn't matter.
+services:
+  - type: web
+    name: music-over-rcs
+    runtime: docker
+    plan: free
+    # Next to the R2 bucket (eastern North America).
+    region: ohio
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    # A deploy starts a new copy before stopping the old one; the lease makes the new one wait, but deploy by hand when
+    # you can watch (Manual Deploy), not on every push.
+    autoDeploy: false
+    envVars:
+      # Made once by Render and kept.
+      - key: SECRET_KEY
+        generateValue: true
+      - key: MATRIX_PASSWORD
+        generateValue: true
+      - key: ADMIN_TOKEN
+        generateValue: true
+      # Yours: the Worker's address and shared token, and the R2 bucket's S3 settings (docs/cloud.md, step 2).
+      - key: EDGE_URL
+        sync: false
+      - key: EDGE_TOKEN
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      # Saving every song sent to your OneDrive (docs/cloud.md, step 5): the Azure app's "Application (client) ID".
+      - key: ONEDRIVE_CLIENT_ID
+        sync: false
+      # Uploads use the same outbound traffic as songs sent; this much a month, then none until the next (MB, or "unlimited").
+      - key: ONEDRIVE_MAX_MB_PER_MONTH
+        value: "1500"
+      # Start with the bot off and the catalog import on; switch them (docs/cloud.md, step 7) once the chat is chosen.
+      - key: BOT_ENABLED
+        value: "off"
+      - key: ALLOW_IMPORT
+        value: "1"
+      - key: TZ
+        value: America/New_York
+      # Small-host settings: nothing is kept on a disk that is wiped, and one file at a time is held in memory.
+      - key: PREFETCH_MB
+        value: "0"
+      - key: MAX_DOWNLOAD_MB
+        value: "40"
+      - key: DOWNLOADS_AHEAD
+        value: "1"

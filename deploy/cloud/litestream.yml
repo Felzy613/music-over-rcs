@@ -1,0 +1,40 @@
+# Backs up the three SQLite databases to Cloudflare R2 and brings them back on the next start (see docs/cloud.md).
+# The settings come from the environment (R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY).
+#
+# sync-interval is every 60 s on purpose: the default of one second makes a request to R2 for every change, and the
+# homeserver writes all day, which would use up R2's free million writes a month in a few days.
+snapshot:
+  interval: 24h
+  retention: 72h
+
+dbs:
+  - path: /data/synapse/homeserver.db
+    replica:
+      type: s3
+      bucket: ${R2_BUCKET}
+      path: synapse
+      endpoint: ${R2_ENDPOINT}
+      region: auto
+      access-key-id: ${R2_ACCESS_KEY_ID}
+      secret-access-key: ${R2_SECRET_ACCESS_KEY}
+      sync-interval: 60s
+  - path: /data/gmessages/mautrix-gmessages.db
+    replica:
+      type: s3
+      bucket: ${R2_BUCKET}
+      path: gmessages
+      endpoint: ${R2_ENDPOINT}
+      region: auto
+      access-key-id: ${R2_ACCESS_KEY_ID}
+      secret-access-key: ${R2_SECRET_ACCESS_KEY}
+      sync-interval: 60s
+  - path: /data/catalog.db
+    replica:
+      type: s3
+      bucket: ${R2_BUCKET}
+      path: catalog
+      endpoint: ${R2_ENDPOINT}
+      region: auto
+      access-key-id: ${R2_ACCESS_KEY_ID}
+      secret-access-key: ${R2_SECRET_ACCESS_KEY}
+      sync-interval: 60s

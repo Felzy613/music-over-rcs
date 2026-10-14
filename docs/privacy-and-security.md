@@ -37,6 +37,17 @@ Keep the services folder private, and don't expose the homeserver's port to the 
 
 The bot sends as your Matrix account, and the bridge relays that as you on Google Messages. It only ever writes in the one room you configured (`MATRIX_ROOM_ID`), your chat with your own number, and the bridge's other rooms are never joined or read. Before setting the room, check that it's yours: `npm run matrix-rooms -- --phone <your number>`.
 
+## If you run it in the cloud
+
+[Running it in the cloud](cloud.md) moves the homeserver, the bridge and the bot onto Render, which changes what is stored where:
+
+- **Your Google Messages session** (the bridge's database) lives on the Render host and, because that database is backed up, in the R2 bucket. So do the homeserver's database (the messages of any chat that gets one, and the bot's own chat) and the bot's catalog. The bucket is private; keep its API token out of git and out of anything you share. The bridge makes no rooms for your other chats at login and does no backfill, so only chats that get a message while it runs are copied.
+- **OneDrive** (if you set it up): copies of the songs you request are saved to your OneDrive, in the app's own folder. The app's permission, `Files.ReadWrite.AppFolder`, lets it see only that folder, not the rest of your OneDrive. Its sign-in token (Microsoft's refresh token) is kept in the catalog, so it is on the host and, through the backup, in the private R2 bucket; revoke it any time at account.microsoft.com → Privacy → Apps and services.
+- **The pasted Google request** goes through the `/pair` page into the homeserver's chat with the bridge bot, and is deleted a minute later (the homeserver forgets the deleted text after an hour).
+- **Who can reach the host**: `/healthz` is open and says nothing. Everything else (`/status`, `/pair`, choosing the chat, the catalog upload) needs `ADMIN_TOKEN`, a long random value Render generates. The homeserver and bridge listen on 127.0.0.1 inside the container and are not reachable from outside.
+- **Secrets**: `SECRET_KEY`, `ADMIN_TOKEN`, the R2 keys and the Worker's `EDGE_TOKEN` are set as Render and Cloudflare secrets, not in files. Each process in the container gets only the ones it needs: the homeserver and bridge get none.
+- **Removing it**: delete the Render service, the Worker and the R2 bucket, and sign the bridge's session out in your Google account and in Google Messages on your phone.
+
 ## Removing everything
 
 ```bash

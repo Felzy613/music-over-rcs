@@ -8,9 +8,9 @@ export interface Listening {
 }
 
 /** Starts an HTTP server on a random local port. */
-export async function listen(listener: RequestListener): Promise<Listening> {
+export async function listen(listener: RequestListener, wantedPort = 0): Promise<Listening> {
   const server = createServer(listener);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(wantedPort, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,

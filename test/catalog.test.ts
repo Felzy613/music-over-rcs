@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -132,5 +132,87 @@ describe('Catalog persistence', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('Catalog.importFrom', () => {
+  function withFile<T>(run: (path: string) => T): T {
+    const dir = mkdtempSync(join(tmpdir(), 'catalog-import-'));
+    try {
+      return run(join(dir, 'old.db'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  function oldCatalog(path: string): void {
+    const old = new Catalog(path);
+    for (const track of SAMPLE) old.add(track);
+    old.recordPlay(2, new Date('2026-10-05T12:00:00Z'));
+    old.recordPlay(2, new Date('2026-10-06T12:00:00Z'));
+    old.follow(old.trackArtists(2)[0]!.id);
+    old.savePost({ slug: 'a-post', title: 'A post', category: 'Singles', publishedAt: '2026-10-04T00:00:00Z', views: 7, audioFiles: 1 });
+    old.setState('digest.last_date', '2026-10-06');
+    old.setState('chat.choices', '{"stale":true}');
+    old.setState('health.problems', '[{"key":"bridge"}]');
+    old.setState('matrix.token', 'secret');
+    old.linkMessage('$old-event', 'play:1');
+    old.close();
+  }
+
+  test('carries songs, plays, follows, posts and the daily-message state over, with the same ids', () => {
+    withFile((path) => {
+      oldCatalog(path);
+      const fresh = new Catalog(':memory:');
+      const counts = fresh.importFrom(path);
+      assert.equal(counts.tracks, SAMPLE.length);
+      assert.equal(counts.plays, 2);
+      assert.equal(counts.follows, 1);
+      assert.equal(counts.posts, 1);
+      assert.equal(fresh.count(), SAMPLE.length);
+      assert.equal(fresh.get(2)?.title, SAMPLE[1].title, 'ids are kept');
+      assert.deepEqual(fresh.mostPlayed(1).map((track) => [track.id, track.plays]), [[2, 2]]);
+      assert.equal(fresh.followed().length, 1);
+      assert.equal(fresh.sitePost('a-post')?.views, 7);
+      assert.equal(fresh.getState('digest.last_date'), '2026-10-06');
+      assert.deepEqual(titles(fresh.search(SAMPLE[0].title.split(' ')[0]!)).includes(SAMPLE[0].title), true, 'the search index was rebuilt by the import');
+      fresh.close();
+    });
+  });
+
+  test('leaves behind what belongs to the old chat and what is wrong right now', () => {
+    withFile((path) => {
+      oldCatalog(path);
+      const fresh = new Catalog(':memory:');
+      fresh.importFrom(path);
+      assert.equal(fresh.getState('chat.choices'), undefined);
+      assert.equal(fresh.getState('health.problems'), undefined);
+      assert.equal(fresh.getState('matrix.token'), undefined);
+      assert.equal(fresh.linkedPostback('$old-event'), undefined);
+      fresh.close();
+    });
+  });
+
+  test('refuses a catalog that already has songs, plays or follows, and changes nothing', () => {
+    withFile((path) => {
+      oldCatalog(path);
+      const busy = new Catalog(':memory:');
+      busy.add(SAMPLE[0]);
+      assert.throws(() => busy.importFrom(path), /only be imported into an empty one/);
+      assert.equal(busy.count(), 1);
+      busy.close();
+    });
+  });
+
+  test('a file that is not a catalog fails cleanly and leaves the target usable', () => {
+    withFile((path) => {
+      writeFileSync(path, 'this is not a database');
+      const fresh = new Catalog(':memory:');
+      assert.throws(() => fresh.importFrom(path));
+      assert.equal(fresh.isEmpty(), true);
+      fresh.add(SAMPLE[0]);
+      assert.equal(fresh.count(), 1, 'the target still works');
+      fresh.close();
+    });
   });
 });

@@ -5,7 +5,7 @@ import { artistKey, splitArtists } from './artists.ts';
 import { parseQuery } from './query.ts';
 import { allowedEdits, correctableEdits, editDistance, rankSongs } from './sources/relevance.ts';
 import type { SongFacts } from './library/naming.ts';
-import type { ChoiceStore, MessageLinks, PendingChoices } from './runner.ts';
+import type { ChoiceStore, MessageLinks, PendingChoices, ResumePoint, ResumeStore } from './runner.ts';
 import type { Track } from './types.ts';
 
 export interface NewTrack {
@@ -718,6 +718,56 @@ export class Catalog {
     this.#db.prepare('DELETE FROM audio_cache WHERE url = ?').run(url);
   }
 
+  /** Whether this catalog holds nothing a person or the bot has put there: no songs, plays or follows. */
+  isEmpty(): boolean {
+    return ['tracks', 'plays', 'follows'].every((table) => Number(this.#db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.n) === 0);
+  }
+
+  /**
+   * Copies another catalog file's records into this one, which must be empty: songs, artists, plays, follows, site posts and
+   * the bot's small facts (when the daily message last went out, …), keeping their ids so plays and follows still point at
+   * the right songs and artists. Left behind: the kept-songs index (those files are on another machine), which messages stand
+   * for which songs (they belong to the old chat), and what's wrong or on offer right now (`chat.*`, `health.*`, `matrix.*`).
+   * It all happens in one transaction, so a failure leaves this catalog as it was.
+   */
+  importFrom(path: string): Record<'tracks' | 'artists' | 'plays' | 'follows' | 'posts' | 'state', number> {
+    if (!this.isEmpty()) throw new Error('A catalog can only be imported into an empty one');
+    // Opening the other file with this class first brings an older one up to the current layout.
+    new Catalog(path).close();
+    this.#db.prepare('ATTACH DATABASE ? AS imported').run(path);
+    try {
+      const columnsOf = (schema: string, table: string): string[] =>
+        this.#db.prepare(`PRAGMA ${schema}.table_info(${table})`).all().map((column) => String(column.name));
+      const copy = (table: string, where = '', verb = 'INSERT'): number => {
+        const there = new Set(columnsOf('imported', table));
+        const columns = columnsOf('main', table).filter((column) => there.has(column));
+        const list = columns.map((column) => `"${column}"`).join(', ');
+        return Number(this.#db.prepare(`${verb} INTO main.${table} (${list}) SELECT ${list} FROM imported.${table} ${where}`).run().changes);
+      };
+      const counts = { tracks: 0, artists: 0, plays: 0, follows: 0, posts: 0, state: 0 };
+      this.#db.exec('BEGIN');
+      try {
+        // Songs before the plays and links that point at them; the full-text index follows by trigger.
+        counts.tracks = copy('tracks');
+        counts.artists = copy('artists');
+        // Any artist links the migration made for the (empty) tracks are replaced by the imported ones.
+        this.#db.exec('DELETE FROM artist_tracks');
+        copy('artist_tracks');
+        counts.plays = copy('plays');
+        counts.follows = copy('follows');
+        counts.posts = copy('site_posts');
+        counts.state = copy('state', "WHERE key NOT LIKE 'chat.%' AND key NOT LIKE 'health.%' AND key NOT LIKE 'matrix.%' AND key NOT LIKE 'instinct.%'", 'INSERT OR REPLACE');
+        this.#db.exec('COMMIT');
+      } catch (err) {
+        this.#db.exec('ROLLBACK');
+        throw err;
+      }
+      return counts;
+    } finally {
+      this.#db.exec('DETACH DATABASE imported');
+    }
+  }
+
   close(): void {
     this.#db.close();
   }
@@ -743,6 +793,28 @@ export function choicesIn(catalog: Pick<Catalog, 'getState' | 'setState'>, key =
     },
     save(choices) {
       catalog.setState(key, choices ? JSON.stringify(choices) : '');
+    },
+  };
+}
+
+/**
+ * How far the runner got in the chat, kept in the catalog's database so a restart answers what arrived while the bot was
+ * down. It lives in the same file as everything else the bot restores after a restart, so the two never disagree.
+ */
+export function resumeIn(catalog: Pick<Catalog, 'getState' | 'setState'>, key = 'chat.resume'): ResumeStore {
+  return {
+    load() {
+      const raw = catalog.getState(key);
+      if (!raw) return undefined;
+      try {
+        const value = JSON.parse(raw) as Partial<ResumePoint>;
+        return typeof value.at === 'number' && Array.isArray(value.ids) ? { at: value.at, ids: value.ids.filter((id): id is string => typeof id === 'string') } : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    save(point) {
+      catalog.setState(key, JSON.stringify(point));
     },
   };
 }
