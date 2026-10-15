@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { checkAudio } from '../src/audio-check.ts';
 import { fetchAudio } from '../src/audio-fetch.ts';
-import { createBot, SourceError } from '../src/bot.ts';
+import { createBot, SourceError, type AlbumSource } from '../src/bot.ts';
 import { Catalog } from '../src/catalog.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
 import { createRunner } from '../src/runner.ts';
@@ -62,6 +62,7 @@ const ALBUMS: MockAlbum[] = [
 const SONGS: MockSong[] = [
   ...ALBUMS.flatMap((album) => album.tracks.flatMap((track) => (track.videoId ? [{ videoId: track.videoId, title: track.title, artists: track.artists ?? album.artists }] : []))),
   { videoId: 'aaaaaaaaaa1', title: 'Blue Horizon', artists: [OWLS], duration: '3:05' },
+  { videoId: 'nightsongs1', title: 'Night Songs', artists: [OWLS], duration: '3:30' },
 ];
 
 const LISTED: MockArtist[] = [
@@ -198,7 +199,7 @@ describe('albums on YouTube Music', () => {
   });
 
   describe('from the bot', () => {
-    function setup(options: { albums?: boolean; catalog?: Catalog } = {}) {
+    function setup(options: { albums?: boolean | AlbumSource; catalog?: Catalog } = {}) {
       const catalog = options.catalog ?? new Catalog(':memory:');
       const youTube = client();
       const whitelist = new ZemerWhitelist({ baseUrl: zemer.url, state: catalog, checkEveryMs: 0, retryAfterMs: 0 });
@@ -211,7 +212,8 @@ describe('albums on YouTube Music', () => {
         catalog,
         checkAudio: gatedAudioCheck(youTubeGate({ youTube, whitelist, catalog }), audio.checkAudio),
         youtube: songs,
-        ...(options.albums === false ? {} : { albums: createYouTubeAlbumSource({ youTube, catalog, whitelist }) }),
+        first: songs,
+        ...(options.albums === false ? {} : { albums: typeof options.albums === 'object' ? options.albums : createYouTubeAlbumSource({ youTube, catalog, whitelist }) }),
       });
       return {
         catalog,
@@ -277,6 +279,84 @@ describe('albums on YouTube Music', () => {
       const again = await tap('album:MPREb_shabbuson01');
       assert.deepEqual(albumOf(again).songs.map((song) => song.url), [youTube.trackUrl('albumsong01'), youTube.trackUrl('albumsong04')]);
       assert.match(textOf(again[1]).text, /^2 songs, about \d+ MB; 2 left out\./);
+    });
+
+    test('a search whose words match an album says so, under the song it found, with the album’s 👍 on that line', async () => {
+      const { say, tap, youTube } = setup();
+      const replies = await say('search night songs');
+      assert.deepEqual(replies.find((reply) => reply.kind === 'audio'), { kind: 'audio', url: youTube.trackUrl('nightsongs1'), title: `${OWLS} — Night Songs` });
+      const notice = textOf(replies.at(-1));
+      assert.equal(notice.text, `💿 Also an album: ${OWLS} — Night Songs (2021). 👍 this, or text "album Night Songs", to get all of it as a zip.`);
+      assert.equal(notice.postback, 'album:MPREb_nightsongs3');
+      assert.deepEqual(albumOf(await tap(notice.postback!)).songs.map((song) => song.title), ['One', 'Two', 'Three']);
+    });
+
+    test('with no song by that name but an album, the album is the answer, as a list to pick from', async () => {
+      const { say } = setup();
+      const replies = await say('search shabbuson');
+      assert.equal(textOf(replies[0]).text, 'No song by that name, but there are albums:');
+      const lines = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined);
+      assert.deepEqual(lines.map((line) => [line.text, line.postback]), [
+        [`${MICHOEL} — Shabbuson (2022)`, 'album:MPREb_shabbuson01'],
+        [`${MICHOEL} — Shabbuson Live (2023)`, 'album:MPREb_shabbuson02'],
+      ]);
+      assert.equal(textOf(replies.at(-1)).text, 'Tap 👍 on one to get the whole album as a zip.');
+      assert.equal(textOf(replies.at(-1)).chips?.length, 2);
+      const one = await say('search shabbuson live');
+      assert.equal(textOf(one[0]).text, "No song by that name, but there's an album:");
+    });
+
+    test('an album the words name outright beats a song that only resembles them', async () => {
+      // The catalog's looser search finds "Shabbuson Medley" for "shabbuson", but that is not what was asked for.
+      const catalog = new Catalog(':memory:');
+      catalog.add({ title: 'Shabbuson Medley', artist: OWLS, url: 'https://www.music-table.com/post/shabbuson-medley#0' });
+      const { say } = setup({ catalog });
+      const replies = await say('search shabbuson');
+      assert.equal(textOf(replies[0]).text, "No song by that name, but there's an album:");
+      assert.deepEqual(
+        replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined).map((reply) => reply.text),
+        [`${MICHOEL} — Shabbuson (2022)`],
+        'only the album the words name, not "Shabbuson Live"',
+      );
+      assert.equal(replies.some((reply) => reply.kind === 'audio'), false);
+    });
+
+    test('a search that is only an artist’s name is not about any one album, so none is mentioned', async () => {
+      const { say } = setup();
+      const replies = await say('search michoel schnitzler');
+      assert.equal(replies.some((reply) => reply.kind === 'text' && reply.text.includes('💿')), false);
+      assert.equal(textOf(replies[0]).text, 'Which one?');
+    });
+
+    test('an album by a woman, or by an artist not on Zemer’s list, is never mentioned', async () => {
+      const { say } = setup();
+      for (const query of ['her album', 'strangers']) {
+        const replies = await say(`search ${query}`);
+        assert.equal(replies.length, 1, query);
+        assert.match(textOf(replies[0]).text, /^No match for/);
+      }
+    });
+
+    test('an album lookup that fails never spoils the search for songs', async () => {
+      const broken: AlbumSource = {
+        name: 'YouTube Music',
+        async search() {
+          throw new SourceError('down');
+        },
+        async open() {
+          throw new SourceError('down');
+        },
+      };
+      const { say } = setup({ albums: broken });
+      const replies = await say('search night songs');
+      assert.equal(replies.some((reply) => reply.kind === 'audio'), true);
+      assert.equal(replies.some((reply) => reply.kind === 'text' && reply.text.includes('💿')), false);
+    });
+
+    test('"youtube" mentions a matching album too', async () => {
+      const { say } = setup();
+      const replies = await say('youtube night songs');
+      assert.match(textOf(replies.at(-1)).text, /^💿 Also an album: The Night Owls — Night Songs \(2021\)/);
     });
 
     test('with YouTube Music off there are no albums, and it says so', async () => {
