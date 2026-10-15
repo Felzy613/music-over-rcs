@@ -106,6 +106,12 @@ export function fitsAll(song: { title: string; artist: string }, wanted: string[
   return tokens.every((token) => closeness(token, title) > 0 || closeness(token, artist) > 0);
 }
 
+/** True when at least one word of the request is in the title (an apostrophe or a typo forgiven): the request is about this title, not only its artist. */
+export function touchesTitle(song: { title: string }, wanted: string[]): boolean {
+  const title = searchWords(fold(song.title));
+  return wanted.map(fold).some((token) => closeness(token, title) > 0);
+}
+
 /**
  * The songs that fit the words, best first: the looser search for when the exact one finds nothing. Apostrophes and
  * spaces may be left out or put in ("vnusni" finds "V’Nusni"), a longer word may be a letter or two off ("shmeltzer"
