@@ -158,6 +158,19 @@ describe('the cloud web door', () => {
     assert.equal((await get('/onedrive/status', basic('open-sesame'))).status, 404, 'no OneDrive set up on this host');
   });
 
+  test('the test alert needs the password and the R2 settings, and leaves one alert', async () => {
+    const left: string[] = [];
+    const withAlerts = await serve(createCloudWeb({ ...deps(), testAlert: async () => void left.push('alert') }));
+    try {
+      assert.equal((await fetch(withAlerts.url + '/admin/test-alert', { method: 'POST' })).status, 401);
+      assert.equal((await fetch(withAlerts.url + '/admin/test-alert', { method: 'POST', headers: { authorization: basic('open-sesame') } })).status, 200);
+      assert.deepEqual(left, ['alert']);
+    } finally {
+      await withAlerts.close();
+    }
+    assert.equal((await post('/admin/test-alert', {})).status, 404, 'a host without the R2 settings has nowhere to leave it');
+  });
+
   test('passwords compare by value and are read from either header', () => {
     assert.equal(sameSecret('a', 'a'), true);
     assert.equal(sameSecret('a', 'b'), false);

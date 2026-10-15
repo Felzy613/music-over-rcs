@@ -1,10 +1,13 @@
+import type { S3 } from './s3.ts';
+
 /**
  * A lease: at most one running copy of the bot's host may own the Google Messages session and write the replicated
  * databases at a time. Render starts a new instance before it stops the old one on a deploy, and two bridges on one
  * Google login, or two writers on one replica, would unpair the phone or corrupt the backup. The newcomer waits here until
  * the old one lets go (it does on SIGTERM) or its lease runs out (it crashed).
  *
- * The record lives in one R2 object and is changed only with a compare-and-swap, so two callers can't both win.
+ * The record lives in one R2 object and is changed only with a compare-and-swap (R2's conditional writes), so two callers
+ * can't both win. The host reaches it through R2's S3 address, with the keys it has for the backups.
  */
 export interface LeaseRecord {
   holder: string;
@@ -26,19 +29,14 @@ export const MAX_TTL_SECONDS = 300;
 
 const clampTtl = (seconds: number | undefined): number => Math.min(MAX_TTL_SECONDS, Math.max(MIN_TTL_SECONDS, Math.round(seconds ?? 90)));
 
-/** The small part of an R2 bucket the lease uses. */
-export interface LeaseBucket {
-  get(key: string): Promise<{ etag: string; text(): Promise<string> } | null>;
-  put(key: string, value: string, options: { onlyIf: { etagMatches?: string; etagDoesNotMatch?: string } }): Promise<unknown | null>;
-}
-
-export function r2LeaseStore(bucket: LeaseBucket, key = 'lease.json'): LeaseStore {
+/** The lease record in the bucket (R2's S3 interface: write only if absent, or only if the ETag is still what was read). */
+export function s3LeaseStore(s3: Pick<S3, 'get' | 'put'>, key = 'lease.json'): LeaseStore {
   return {
     async read() {
-      const object = await bucket.get(key);
+      const object = await s3.get(key);
       if (!object) return undefined;
       try {
-        const value = JSON.parse(await object.text()) as Partial<LeaseRecord>;
+        const value = JSON.parse(object.text) as Partial<LeaseRecord>;
         if (typeof value.holder === 'string' && typeof value.expiresAt === 'number') return { record: { holder: value.holder, expiresAt: value.expiresAt }, version: object.etag };
       } catch {
         // a damaged record is treated as a lapsed lease below
@@ -46,8 +44,8 @@ export function r2LeaseStore(bucket: LeaseBucket, key = 'lease.json'): LeaseStor
       return { record: { holder: '', expiresAt: 0 }, version: object.etag };
     },
     async write(record, version) {
-      const result = await bucket.put(key, JSON.stringify(record), { onlyIf: version === undefined ? { etagDoesNotMatch: '*' } : { etagMatches: version } });
-      return result !== null;
+      const result = await s3.put(key, JSON.stringify(record), version === undefined ? { ifNoneMatch: '*' } : { ifMatch: version });
+      return result.ok;
     },
   };
 }

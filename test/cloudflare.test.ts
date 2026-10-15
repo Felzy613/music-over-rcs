@@ -1,142 +1,132 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { handleRequest, renderConfigured, runScheduled, sendAlert, type Env } from '../cloudflare/index.ts';
-import { acquire, release, renew, r2LeaseStore, type LeaseBucket } from '../cloudflare/lease.ts';
+import worker, { ALERT_MAX_AGE_MS, ALERTS_PER_ROUND, renderConfigured, runScheduled, sendAlert, sendOutbox, type Env } from '../cloudflare/index.ts';
 import { FAILURES_BEFORE_REPORT, NOT_RUNNING_REPORT_MS, REPORT_AGAIN_MS, runWatchdog, type WatchdogState } from '../cloudflare/watchdog.ts';
+import { FakeBucket } from './helpers/fake-bucket.ts';
 
-/** An R2 bucket with the compare-and-swap rules of the real one: a put whose condition fails returns null and changes nothing. */
-class FakeBucket implements LeaseBucket {
-  objects = new Map<string, { value: string; etag: string }>();
-  #version = 0;
-  async get(key: string) {
-    const object = this.objects.get(key);
-    return object ? { etag: object.etag, text: async () => object.value } : null;
-  }
-  async put(key: string, value: string, options?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } }) {
-    const current = this.objects.get(key);
-    const condition = options?.onlyIf;
-    if (condition?.etagMatches !== undefined && current?.etag !== condition.etagMatches) return null;
-    if (condition?.etagDoesNotMatch !== undefined && (condition.etagDoesNotMatch === '*' ? current !== undefined : current?.etag === condition.etagDoesNotMatch)) return null;
-    this.objects.set(key, { value, etag: `etag-${++this.#version}` });
-    return { key };
-  }
-}
+const T0 = 1_800_000_000_000;
+const MIN = 60_000;
 
-describe('the lease', () => {
-  const T0 = 1_800_000_000_000;
-
-  test('the first instance gets it; a second has to wait, and is told how long', async () => {
-    const store = r2LeaseStore(new FakeBucket());
-    const first = await acquire(store, 'old', 90, T0);
-    assert.deepEqual(first, { ok: true, expiresAt: T0 + 90_000 });
-    const second = await acquire(store, 'new', 90, T0 + 10_000);
-    assert.deepEqual(second, { ok: false, heldBy: 'old', retryInSeconds: 80 });
-  });
-
-  test('the holder can ask again and renew; renewing pushes the end back', async () => {
-    const store = r2LeaseStore(new FakeBucket());
-    await acquire(store, 'a', 60, T0);
-    assert.equal((await acquire(store, 'a', 60, T0 + 5_000)).ok, true);
-    assert.deepEqual(await renew(store, 'a', 60, T0 + 30_000), { ok: true, expiresAt: T0 + 90_000 });
-    assert.equal((await acquire(store, 'b', 60, T0 + 80_000)).ok, false, 'still held after the original end because it was renewed');
-  });
-
-  test('a lease that lapses (a crashed instance) is taken by the next one, and the old holder then cannot renew', async () => {
-    const store = r2LeaseStore(new FakeBucket());
-    await acquire(store, 'crashed', 30, T0);
-    const taken = await acquire(store, 'next', 30, T0 + 31_000);
-    assert.equal(taken.ok, true);
-    const late = await renew(store, 'crashed', 30, T0 + 32_000);
-    assert.deepEqual(late, { ok: false, heldBy: 'next', retryInSeconds: 0 });
-  });
-
-  test('releasing hands it over at once; releasing someone else’s lease does nothing', async () => {
-    const store = r2LeaseStore(new FakeBucket());
-    await acquire(store, 'old', 90, T0);
-    assert.deepEqual(await release(store, 'intruder'), { ok: true });
-    assert.equal((await acquire(store, 'new', 90, T0 + 1000)).ok, false, 'an intruder’s release changed nothing');
-    assert.deepEqual(await release(store, 'old'), { ok: true });
-    assert.equal((await acquire(store, 'new', 90, T0 + 2000)).ok, true);
-  });
-
-  test('two instances racing for a free lease: exactly one wins', async () => {
-    const store = r2LeaseStore(new FakeBucket());
-    const answers = await Promise.all(Array.from({ length: 8 }, (_, i) => acquire(store, `instance-${i}`, 60, T0)));
-    assert.equal(answers.filter((answer) => answer.ok).length, 1);
-  });
-
-  test('a race on a held-then-lapsed lease also has exactly one winner', async () => {
-    const bucket = new FakeBucket();
-    const store = r2LeaseStore(bucket);
-    await acquire(store, 'gone', 15, T0);
-    const answers = await Promise.all(['x', 'y', 'z'].map((holder) => acquire(store, holder, 60, T0 + 20_000)));
-    assert.equal(answers.filter((answer) => answer.ok).length, 1);
-  });
-
-  test('the time asked for is kept between 15 seconds and 5 minutes', async () => {
-    const store = r2LeaseStore(new FakeBucket());
-    assert.deepEqual(await acquire(store, 'a', 1, T0), { ok: true, expiresAt: T0 + 15_000 });
-    assert.deepEqual(await renew(store, 'a', 100_000, T0), { ok: true, expiresAt: T0 + 300_000 });
-  });
-
-  test('a damaged record counts as a lapsed lease, not a stuck one', async () => {
-    const bucket = new FakeBucket();
-    await bucket.put('lease.json', 'not json');
-    assert.equal((await acquire(r2LeaseStore(bucket), 'a', 60, T0)).ok, true);
-  });
-});
-
-describe('the Worker’s requests', () => {
-  const env = (extra: Partial<Env> = {}): Env => ({ STATE: new FakeBucket(), EDGE_TOKEN: 'edge-secret', RENDER_URL: 'https://mors.example', ...extra });
-  const call = (e: Env, path: string, body?: unknown, token: string | null = 'edge-secret', method = 'POST') =>
-    handleRequest(new Request(`https://edge.example${path}`, { method, headers: token ? { authorization: `Bearer ${token}` } : {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), e, 1_800_000_000_000);
-
-  test('/healthz is open; everything else needs the shared token', async () => {
-    const e = env();
-    assert.equal((await call(e, '/healthz', undefined, null, 'GET')).status, 200);
-    assert.equal((await call(e, '/lease/acquire', { holder: 'a' }, null)).status, 401);
-    assert.equal((await call(e, '/lease/acquire', { holder: 'a' }, 'wrong')).status, 401);
-    assert.equal((await call(e, '/alert', { message: 'x' }, 'edge-secret-longer')).status, 401);
-    assert.equal((await call(e, '/status', undefined, 'wrong', 'GET')).status, 401);
-  });
-
-  test('lease requests go through acquire, renew and release', async () => {
-    const e = env();
-    assert.deepEqual(await (await call(e, '/lease/acquire', { holder: 'a', ttlSeconds: 60 })).json(), { ok: true, expiresAt: 1_800_000_060_000 });
-    assert.deepEqual(await (await call(e, '/lease/acquire', { holder: 'b' })).json(), { ok: false, heldBy: 'a', retryInSeconds: 60 });
-    assert.equal(((await (await call(e, '/lease/renew', { holder: 'a' })).json()) as { ok: boolean }).ok, true);
-    assert.deepEqual(await (await call(e, '/lease/release', { holder: 'a' })).json(), { ok: true });
-    assert.equal(((await (await call(e, '/lease/acquire', { holder: 'b' })).json()) as { ok: boolean }).ok, true);
-    assert.equal((await call(e, '/lease/acquire', {})).status, 400);
-    assert.equal((await call(e, '/lease/nonsense', { holder: 'a' })).status, 404);
-  });
-
-  test('/alert sends an email with the title in the subject', async () => {
+describe('sending an alert', () => {
+  test('by email, with the title in the subject', async () => {
     const sent: unknown[] = [];
-    const e = env({ EMAIL: { send: async (message) => void sent.push(message) }, ALERT_FROM: 'alerts@d.example', ALERT_TO: 'me@d.example' });
-    const res = await call(e, '/alert', { title: 'The bridge is unlinked', message: 'Link it again.' });
-    assert.equal(res.status, 200);
+    const env: Env = { STATE: new FakeBucket().binding, EMAIL: { send: async (m) => void sent.push(m) }, ALERT_FROM: 'alerts@d.example', ALERT_TO: 'me@d.example' };
+    await sendAlert(env, 'The bridge is unlinked', 'Link it again.');
     assert.deepEqual(sent, [{ from: 'alerts@d.example', to: 'me@d.example', subject: '[Music over RCS] The bridge is unlinked', text: 'Link it again.' }]);
-    assert.equal((await call(e, '/alert', { title: 'x' })).status, 400, 'a message is required');
   });
 
-  test('with no email binding, alerts go to ntfy; with neither, the caller is told', async () => {
+  test('with no email binding, to ntfy; with neither, it says so', async () => {
     const posted: Array<{ url: string; title: string | null; body: string }> = [];
     const fakeFetch = (async (url: string, init?: RequestInit) => {
       posted.push({ url, title: new Headers(init?.headers).get('title'), body: String(init?.body) });
       return new Response('ok');
     }) as unknown as typeof fetch;
-    await sendAlert(env({ NTFY_TOPIC: 'my topic' }), 'Down', 'It is down', fakeFetch);
+    const base: Env = { STATE: new FakeBucket().binding };
+    await sendAlert({ ...base, NTFY_TOPIC: 'my topic' }, 'Down', 'It is down', fakeFetch);
     assert.deepEqual(posted, [{ url: 'https://ntfy.sh/my%20topic', title: 'Down', body: 'It is down' }]);
-    await assert.rejects(() => sendAlert(env(), 'x', 'y', fakeFetch), /no way to send alerts/);
-    assert.equal((await call(env(), '/alert', { message: 'y' })).status, 502);
+    await assert.rejects(() => sendAlert(base, 'x', 'y', fakeFetch), /no way to send alerts/);
+  });
+});
+
+describe('mailing what the bot left in the bucket', () => {
+  const emailEnv = (bucket: FakeBucket, sent: Array<{ subject: string; text: string }>): Env => ({
+    STATE: bucket.binding,
+    EMAIL: { send: async (m) => void sent.push({ subject: m.subject, text: m.text }) },
+    ALERT_FROM: 'alerts@d.example',
+    ALERT_TO: 'me@d.example',
+  });
+  const leave = (bucket: FakeBucket, name: string, alert: unknown) => void bucket.objects.set(`alerts/${name}.json`, { body: typeof alert === 'string' ? alert : JSON.stringify(alert), etag: `"${name}"` });
+
+  test('each alert is sent in order and removed once sent', async () => {
+    const bucket = new FakeBucket();
+    const sent: Array<{ subject: string; text: string }> = [];
+    leave(bucket, '2', { title: 'Second', message: 'two', at: T0 });
+    leave(bucket, '1', { title: 'First', message: 'one', at: T0 });
+    const result = await sendOutbox(emailEnv(bucket, sent), T0 + MIN);
+    assert.deepEqual(result, { sent: 2, waiting: 0, dropped: 0 });
+    assert.deepEqual(sent.map((m) => m.subject), ['[Music over RCS] First', '[Music over RCS] Second']);
+    assert.equal(bucket.objects.size, 0);
+  });
+
+  test('one that cannot be sent stays for the next round, and is dropped when a day old', async () => {
+    const bucket = new FakeBucket();
+    leave(bucket, '1', { title: 'T', message: 'm', at: T0 });
+    const noWay: Env = { STATE: bucket.binding };
+    assert.deepEqual(await sendOutbox(noWay, T0 + MIN), { sent: 0, waiting: 1, dropped: 0 });
+    assert.equal(bucket.objects.size, 1);
+    assert.deepEqual(await sendOutbox(noWay, T0 + ALERT_MAX_AGE_MS + MIN), { sent: 0, waiting: 0, dropped: 1 });
+    assert.equal(bucket.objects.size, 0);
+  });
+
+  test('an unreadable or empty one is removed, not retried for ever', async () => {
+    const bucket = new FakeBucket();
+    leave(bucket, '1', 'not json');
+    leave(bucket, '2', { title: 'no message', at: T0 });
+    const result = await sendOutbox(emailEnv(bucket, []), T0);
+    assert.deepEqual(result, { sent: 0, waiting: 0, dropped: 2 });
+    assert.equal(bucket.objects.size, 0);
+  });
+
+  test('a flood is mailed a few at a time', async () => {
+    const bucket = new FakeBucket();
+    const sent: Array<{ subject: string; text: string }> = [];
+    for (let i = 0; i < ALERTS_PER_ROUND + 4; i++) leave(bucket, String(i).padStart(3, '0'), { title: 'T', message: `m${i}`, at: T0 });
+    assert.deepEqual(await sendOutbox(emailEnv(bucket, sent), T0), { sent: ALERTS_PER_ROUND, waiting: 4, dropped: 0 });
+    assert.deepEqual(await sendOutbox(emailEnv(bucket, sent), T0 + 5 * MIN), { sent: 4, waiting: 0, dropped: 0 });
+  });
+
+  test('other things in the bucket are left alone', async () => {
+    const bucket = new FakeBucket();
+    await bucket.binding.put('lease.json', '{}');
+    await bucket.binding.put('watchdog.json', '{}');
+    await sendOutbox(emailEnv(bucket, []), T0);
+    assert.deepEqual([...bucket.objects.keys()].sort(), ['lease.json', 'watchdog.json']);
+  });
+});
+
+describe('the five-minute job', () => {
+  test('does nothing, and records nothing, to the host until RENDER_URL is a real address', async () => {
+    const bucket = new FakeBucket();
+    let asked = 0;
+    const counting = (async () => {
+      asked += 1;
+      throw new Error('should not be asked');
+    }) as unknown as typeof fetch;
+    for (const url of [undefined, 'https://REPLACE-ME.onrender.com', '', 'not a url']) {
+      const state = await runScheduled({ STATE: bucket.binding, ...(url === undefined ? {} : { RENDER_URL: url }) }, T0, counting);
+      assert.deepEqual(state, { failures: 0 });
+    }
+    assert.equal(asked, 0);
+    assert.equal(bucket.objects.size, 0);
+    assert.equal(renderConfigured({ STATE: bucket.binding, RENDER_URL: 'https://music-over-rcs.onrender.com' }), true);
+  });
+
+  test('mails the waiting alerts even before there is a host to watch', async () => {
+    const bucket = new FakeBucket();
+    const sent: unknown[] = [];
+    bucket.objects.set('alerts/1.json', { body: JSON.stringify({ title: 'T', message: 'hello', at: T0 }), etag: '"1"' });
+    await runScheduled({ STATE: bucket.binding, EMAIL: { send: async (m) => void sent.push(m) }, ALERT_FROM: 'a@d.example', ALERT_TO: 'me@d.example' }, T0);
+    assert.equal(sent.length, 1);
+  });
+
+  test('checks the host, keeps what it saw in the bucket, and survives having no way to send alerts', async () => {
+    const bucket = new FakeBucket();
+    const env: Env = { STATE: bucket.binding, RENDER_URL: 'https://mors.example/' };
+    const down = (async () => {
+      throw new Error('refused');
+    }) as unknown as typeof fetch;
+    for (let i = 0; i < FAILURES_BEFORE_REPORT; i++) await runScheduled(env, T0 + i * 5 * MIN, down);
+    const saved = JSON.parse(bucket.objects.get('watchdog.json')!.body) as WatchdogState;
+    assert.equal(saved.failures, FAILURES_BEFORE_REPORT);
+    assert.ok(saved.reportedAt, 'the outage was recorded as reported even though the alert could not be sent');
+  });
+
+  test('serves nothing: there is no way in', async () => {
+    assert.equal(await (await worker.fetch()).text(), 'ok');
   });
 });
 
 describe('the watchdog', () => {
-  const T0 = 1_800_000_000_000;
-  const MIN = 60_000;
-
   function setUp(options: { phase?: string } = {}) {
     const state = { host: 'up' as 'up' | 'down' | 'sick', phase: options.phase ?? 'running', now: T0, saved: undefined as WatchdogState | undefined };
     const alerts: Array<[string, string]> = [];
@@ -221,33 +211,5 @@ describe('the watchdog', () => {
     await w.at(50);
     assert.equal(w.alerts.length, 1);
     assert.equal(w.state.saved?.notRunningSince, undefined);
-  });
-
-  test('runScheduled does nothing, and sends nothing, until RENDER_URL is a real address', async () => {
-    const bucket = new FakeBucket();
-    let asked = 0;
-    const counting = (async () => {
-      asked += 1;
-      throw new Error('should not be asked');
-    }) as unknown as typeof fetch;
-    for (const url of ['https://REPLACE-ME.onrender.com', '', 'not a url']) {
-      const state = await runScheduled({ STATE: bucket, EDGE_TOKEN: 't', RENDER_URL: url }, T0, counting);
-      assert.deepEqual(state, { failures: 0 });
-    }
-    assert.equal(asked, 0);
-    assert.equal(bucket.objects.size, 0, 'nothing is recorded either');
-    assert.equal(renderConfigured({ STATE: bucket, EDGE_TOKEN: 't', RENDER_URL: 'https://music-over-rcs.onrender.com' }), true);
-  });
-
-  test('runScheduled keeps its state in the bucket and survives having no way to send alerts', async () => {
-    const bucket = new FakeBucket();
-    const e: Env = { STATE: bucket, EDGE_TOKEN: 't', RENDER_URL: 'https://mors.example/' };
-    const down = (async () => {
-      throw new Error('refused');
-    }) as unknown as typeof fetch;
-    for (let i = 0; i < FAILURES_BEFORE_REPORT; i++) await runScheduled(e, T0 + i * 5 * MIN, down);
-    const saved = JSON.parse((await (await bucket.get('watchdog.json'))!.text()) as string) as WatchdogState;
-    assert.equal(saved.failures, FAILURES_BEFORE_REPORT);
-    assert.ok(saved.reportedAt, 'the outage was recorded as reported even though the alert could not be sent');
   });
 });

@@ -1,5 +1,6 @@
 {
-  // The Worker beside the bot: keeps the cloud host awake and watched, lends out the one-at-a-time lease, and emails alerts.
+  // The Worker beside the bot: every five minutes it checks that the cloud host answers (which keeps Render's free service awake)
+  // and mails the alerts the bot has left in the bucket's alerts/ folder. It serves nothing: it has no way in, on purpose.
   // See cloudflare/README.md and docs/cloud.md. Nothing personal or secret belongs in this file: those values are set as
   // secrets, with `npx wrangler secret put <NAME>`, so they never reach git.
   "name": "mors-edge",
@@ -11,7 +12,6 @@
   // secret instead to get alerts through ntfy.sh.
   "send_email": [{ "name": "EMAIL" }]
   // Secrets:
-  //   EDGE_TOKEN           shared with the host (its EDGE_TOKEN) for /lease and /alert
   //   RENDER_URL           the Render service's address, https://<name>.onrender.com (until set, the Worker checks nothing)
   //   RENDER_ADMIN_TOKEN   the host's ADMIN_TOKEN, so the check can read its /status (optional)
   //   ALERT_FROM, ALERT_TO an address on your Email Service domain, and your own verified address

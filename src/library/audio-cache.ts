@@ -422,7 +422,8 @@ export class AudioCache {
 
 /**
  * A downloaded song with its tags written in (and a cover, when it has none), to be kept somewhere other than this cache,
- * such as a cloud folder. A song whose type can't be tagged, or whose tags can't be written, comes back as it was downloaded.
+ * such as a cloud folder. Handed back as bytes, not another Blob, so a big song is not copied once more than it must be.
+ * A song whose type can't be tagged, or whose tags can't be written, comes back as it was downloaded.
  */
 export async function tagSong(
   url: string,
@@ -431,21 +432,21 @@ export async function tagSong(
     tagsOf?: ((url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined) | undefined;
     fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
   },
-): Promise<DownloadedAudio> {
-  if (!taggerFor(downloaded.mimeType)) return downloaded;
+): Promise<{ data: Uint8Array; fileName: string; mimeType: string; bytes: number }> {
   const data = new Uint8Array(await downloaded.data.arrayBuffer());
-  const retyped = asItIs(downloaded, data);
-  const audio = retyped === downloaded ? downloaded : { ...retyped, data: new Blob([data], { type: retyped.mimeType }) };
+  const plain = { data, fileName: downloaded.fileName, mimeType: downloaded.mimeType, bytes: data.byteLength };
+  if (!taggerFor(downloaded.mimeType)) return plain;
+  const audio = asItIs(downloaded, data);
   const tagger = taggerFor(audio.mimeType);
   const tags = tagger && options.tagsOf?.(url, audio);
-  if (!tagger || !tags) return audio;
+  if (!tagger || !tags) return { ...plain, fileName: audio.fileName, mimeType: audio.mimeType };
   let written = tagger.write(data, tags);
-  if (!written) return audio;
+  if (!written) return { ...plain, fileName: audio.fileName, mimeType: audio.mimeType };
   if (tags.cover && options.fetchCover && !tagger.hasCover(written)) {
     const cover = await options.fetchCover(tags.cover).catch(() => undefined);
     if (cover) written = tagger.write(written, tags, cover) ?? written;
   }
-  return { ...audio, data: new Blob([written], { type: audio.mimeType }), bytes: written.byteLength };
+  return { data: written, fileName: audio.fileName, mimeType: audio.mimeType, bytes: written.byteLength };
 }
 
 /** A song called an MP3 that's really something else (an M4A, say), typed and named as what it is. */

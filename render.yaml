@@ -1,5 +1,6 @@
 # Render Blueprint for the cloud host (docs/cloud.md). The free plan: the Cloudflare Worker's check every five minutes keeps
-# it awake, and the databases are backed up to R2, so its wiped disk doesn't matter.
+# it awake, and the databases are backed up to R2, so its wiped disk doesn't matter. Create it in a Render workspace that has no
+# other always-on free service: the 750 free hours a month are shared by everything in a workspace.
 services:
   - type: web
     name: music-over-rcs
@@ -20,11 +21,7 @@ services:
         generateValue: true
       - key: ADMIN_TOKEN
         generateValue: true
-      # Yours: the Worker's address and shared token, and the R2 bucket's S3 settings (docs/cloud.md, step 2).
-      - key: EDGE_URL
-        sync: false
-      - key: EDGE_TOKEN
-        sync: false
+      # Yours: the R2 bucket's S3 settings, which also carry the lease and the alerts (docs/cloud.md, step 2).
       - key: R2_ENDPOINT
         sync: false
       - key: R2_BUCKET
@@ -50,6 +47,6 @@ services:
       - key: PREFETCH_MB
         value: "0"
       - key: MAX_DOWNLOAD_MB
-        value: "40"
+        value: "30"
       - key: DOWNLOADS_AHEAD
         value: "1"

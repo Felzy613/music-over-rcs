@@ -12,6 +12,7 @@ import { describeMatrixError, MatrixClient } from './matrix/client.ts';
 import { setUpLibrary } from './library/setup.ts';
 import { addSent } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
+import { memoryCheck } from './cloud/memory.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
@@ -79,6 +80,8 @@ try {
       ? {
           cloudFolder: oneDrive,
           cloudMonthlyBytes: cloudBudget,
+          // On a small cloud host the OneDrive copy of a big song waits for memory, or is skipped, rather than crowd out sending.
+          cloudMemory: memoryCheck(),
           onCloudFolder: (problem: string | undefined, needsLogin: boolean) =>
             problem
               ? health.problem('onedrive', `Songs are not being saved to OneDrive: ${problem}${needsLogin ? ' Open the setup page and sign in to OneDrive again.' : ''}`)

@@ -43,6 +43,8 @@ export interface LibraryOptions {
   cloudFolder?: Drive | undefined;
   /** The most to save to it in a calendar month, in bytes (it shares the host's outbound traffic with the songs sent). Undefined for no limit. */
   cloudMonthlyBytes?: number | undefined;
+  /** Where the host's memory stands, for holding back a song that would not fit (see SongArchive). Undefined for no limit. */
+  cloudMemory?: (() => { limit: number; used: number } | undefined) | undefined;
   /** Told when saving to it starts failing (with what is wrong) and when it works again (undefined). */
   onCloudFolder?: ((problem: string | undefined, needsLogin: boolean) => void) | undefined;
   log: (line: string) => void;
@@ -96,6 +98,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
         tagsOf: naming.tagsOf,
         fetchCover: coverFetcher(),
         monthlyBudgetBytes: options.cloudMonthlyBytes,
+        memory: options.cloudMemory,
         onProblem: options.onCloudFolder,
         log,
       })

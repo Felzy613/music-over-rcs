@@ -7,8 +7,6 @@ import type { ChildSpec, LeaseState } from '../src/cloud/supervise.ts';
 const ENV = {
   SECRET_KEY: 'a-master-secret-of-some-length',
   MATRIX_PASSWORD: 'account-password',
-  EDGE_URL: 'https://edge.example',
-  EDGE_TOKEN: 'edge-token',
   R2_ENDPOINT: 'https://acct.r2.cloudflarestorage.com',
   R2_BUCKET: 'mors-state',
   R2_ACCESS_KEY_ID: 'r2-id',
@@ -179,9 +177,10 @@ describe('the boot sequence', () => {
       assert.deepEqual(Object.keys(env(name)).filter((key) => /SECRET|TOKEN|PASSWORD|R2_/.test(key)), [], `${name} has no secrets`);
     }
     assert.equal(env('litestream').R2_SECRET_ACCESS_KEY, 'r2-secret');
+    assert.equal(env('litestream').R2_REGION, 'auto', 'R2 wants the region auto');
     assert.equal(env('litestream').MATRIX_PASSWORD, undefined);
     assert.equal(env('bot').SECRET_KEY, undefined, 'the bot cannot derive the homeserver’s secrets');
-    assert.equal(env('bot').R2_SECRET_ACCESS_KEY, undefined, 'nor reach the backup');
+    assert.equal(env('bot').R2_SECRET_ACCESS_KEY, 'r2-secret', 'but it keeps the bucket, where its alerts go for the Worker to mail');
     assert.equal(env('bot').MATRIX_PASSWORD, 'account-password');
     assert.equal(env('bot').ADMIN_TOKEN, 'admin-token');
     assert.equal(env('bot').CATALOG_DB, '/data/catalog.db');
@@ -190,19 +189,17 @@ describe('the boot sequence', () => {
     assert.equal(env('bridge').GOMEMLIMIT, '64MiB');
   });
 
-  test('the bot sends its alerts to the Worker that holds the lease, and its memory is capped', async () => {
+  test('the bot’s memory is capped, and the cap can be changed', async () => {
     const s = setUp();
     await boot(s.deps);
     const bot = s.specs.find((spec) => spec.name === 'bot')!;
-    assert.equal(bot.env!.ALERT_URL, 'https://edge.example/alert');
-    assert.equal(bot.env!.ALERT_TOKEN, 'edge-token');
-    assert.ok(bot.args.includes('--max-old-space-size=120'));
-    const custom = setUp({ env: { ALERT_URL: 'https://elsewhere.example/alert', ALERT_TOKEN: 'other', BOT_HEAP_MB: '90' } });
+  
+    assert.equal(bot.env!.MALLOC_MMAP_THRESHOLD_, '262144', 'big buffers go back to the system when freed');
+    assert.ok(bot.args.includes('--expose-gc'));
+    assert.ok(s.specs.find((spec) => spec.name === 'bot')!.args.includes('--max-old-space-size=120'));
+    const custom = setUp({ env: { BOT_HEAP_MB: '90' } });
     await boot(custom.deps);
-    const customBot = custom.specs.find((spec) => spec.name === 'bot')!;
-    assert.equal(customBot.env!.ALERT_URL, 'https://elsewhere.example/alert');
-    assert.equal(customBot.env!.ALERT_TOKEN, 'other');
-    assert.ok(customBot.args.includes('--max-old-space-size=90'));
+    assert.ok(custom.specs.find((spec) => spec.name === 'bot')!.args.includes('--max-old-space-size=90'));
   });
 
   test('without backup settings it says so loudly and runs no replicator', async () => {
@@ -214,9 +211,9 @@ describe('the boot sequence', () => {
   });
 
   test('without a lease service it still starts, with a warning', async () => {
-    const s = setUp({ lease: false, env: { EDGE_URL: undefined, EDGE_TOKEN: undefined } });
+    const s = setUp({ lease: false });
     await boot(s.deps);
-    assert.ok(s.events.some((event) => /no lease service/.test(event)));
+    assert.ok(s.events.some((event) => /NO LEASE/.test(event)));
     assert.ok(s.events.includes('supervisor.start'));
   });
 
@@ -270,7 +267,6 @@ describe('the host settings', () => {
   test('reports every problem at once', () => {
     assert.throws(() => readCloudConfig({}), /SECRET_KEY is not set[\s\S]*MATRIX_PASSWORD is not set/);
     assert.throws(() => readCloudConfig({ SECRET_KEY: 'short', MATRIX_PASSWORD: 'x' }), /at least 16 characters/);
-    assert.throws(() => readCloudConfig({ ...ENV, EDGE_TOKEN: undefined } as never), /EDGE_URL and EDGE_TOKEN go together/);
   });
 
   test('has defaults for a container, and takes the instance name from Render', () => {
@@ -279,7 +275,6 @@ describe('the host settings', () => {
     assert.equal(config.serverName, 'localhost');
     assert.equal(config.user, 'me');
     assert.equal(config.holder, 'srv-abc-12345');
-    assert.equal(config.edge, undefined);
     assert.equal(config.backup, false);
     assert.match(readCloudConfig({ SECRET_KEY: ENV.SECRET_KEY, MATRIX_PASSWORD: 'x' }).holder, /-[0-9a-f]{6}$/);
   });

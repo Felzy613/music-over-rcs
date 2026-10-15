@@ -245,7 +245,7 @@ export class OneDrive {
   }
 
   /** Saves a file at a path in the app folder, making the folders on the way. Replaces a file of the same name. */
-  async upload(path: string, data: Blob): Promise<void> {
+  async upload(path: string, data: Uint8Array): Promise<void> {
     try {
       await this.#uploadOnce(path, data);
     } catch (err) {
@@ -256,10 +256,10 @@ export class OneDrive {
     }
   }
 
-  async #uploadOnce(path: string, data: Blob): Promise<void> {
+  async #uploadOnce(path: string, data: Uint8Array): Promise<void> {
     const target = `${this.#graphUrl}/me/drive/special/approot:/${graphPath(path)}:`;
-    if (data.size <= SIMPLE_BYTES) {
-      const res = await this.#graph(`${target}/content?@microsoft.graph.conflictBehavior=replace`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: data });
+    if (data.byteLength <= SIMPLE_BYTES) {
+      const res = await this.#graph(`${target}/content?@microsoft.graph.conflictBehavior=replace`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: data as never });
       if (!res.ok) return this.#fail(res, 'a file');
       await res.body?.cancel().catch(() => {});
       return;
@@ -272,22 +272,22 @@ export class OneDrive {
     if (!created.ok) return this.#fail(created, 'an upload');
     const uploadUrl = ((await created.json()) as { uploadUrl?: string }).uploadUrl;
     if (!uploadUrl) throw new OneDriveError('OneDrive gave no address to upload to');
-    for (let offset = 0; offset < data.size; ) {
-      const end = Math.min(offset + CHUNK_BYTES, data.size);
+    for (let offset = 0; offset < data.byteLength; ) {
+      const end = Math.min(offset + CHUNK_BYTES, data.byteLength);
       offset = await this.#putChunk(uploadUrl, data, offset, end);
     }
   }
 
   /** Sends one range of a file, retrying a failed or dropped request; returns where the next range starts. */
-  async #putChunk(uploadUrl: string, data: Blob, start: number, end: number): Promise<number> {
+  async #putChunk(uploadUrl: string, data: Uint8Array, start: number, end: number): Promise<number> {
     for (let attempt = 0; ; attempt++) {
       let res: Response | undefined;
       try {
         // No Authorization header here: the upload address already carries its authorization, and a token on it is refused.
         res = await this.#fetch(uploadUrl, {
           method: 'PUT',
-          headers: { 'content-range': `bytes ${start}-${end - 1}/${data.size}` },
-          body: data.slice(start, end),
+          headers: { 'content-range': `bytes ${start}-${end - 1}/${data.byteLength}` },
+          body: data.subarray(start, end) as never,
           signal: AbortSignal.timeout(180_000),
         });
       } catch (err) {
@@ -297,7 +297,7 @@ export class OneDrive {
       }
       if (res.status === 200 || res.status === 201) {
         await res.body?.cancel().catch(() => {});
-        return data.size;
+        return data.byteLength;
       }
       if (res.status === 202) {
         await res.body?.cancel().catch(() => {});
@@ -309,7 +309,7 @@ export class OneDrive {
         const status = await this.#fetch(uploadUrl, { signal: AbortSignal.timeout(30_000) });
         const next = ((await status.json().catch(() => ({}))) as { nextExpectedRanges?: string[] }).nextExpectedRanges?.[0];
         const resumeAt = Number(/^(\d+)-/.exec(next ?? '')?.[1]);
-        if (Number.isFinite(resumeAt) && resumeAt > start) return Math.min(resumeAt, data.size);
+        if (Number.isFinite(resumeAt) && resumeAt > start) return Math.min(resumeAt, data.byteLength);
         throw new OneDriveError('OneDrive and the bot disagree about how much of the file has arrived', { status: 416 });
       }
       if (res.status >= 500 && attempt < MAX_RETRIES) {

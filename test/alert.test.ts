@@ -1,47 +1,41 @@
 import assert from 'node:assert/strict';
-import { after, describe, test } from 'node:test';
-import { alertFromEnv, allNotify, remoteNotify } from '../src/alert.ts';
+import { describe, test } from 'node:test';
+import { alertFromEnv, allNotify, outboxNotify } from '../src/alert.ts';
 import { Health } from '../src/health.ts';
-import { listen, readText, type Listening } from './helpers/servers.ts';
+import { FakeBucket } from './helpers/fake-bucket.ts';
 
-describe('alerts to the Worker', () => {
-  const servers: Listening[] = [];
-  after(async () => {
-    await Promise.all(servers.map((server) => server.close()));
+describe('alerts left for the Worker', () => {
+  test('each problem becomes a file in alerts/, oldest first by name, holding the title, message and time', async () => {
+    const bucket = new FakeBucket();
+    let at = 1_800_000_000_000;
+    let n = 0;
+    const notify = outboxNotify({ s3: bucket.s3, now: () => at++, random: () => `r${n++}` });
+    await notify('Music over RCS', 'The bridge is unlinked.');
+    await notify('Music over RCS', 'Fixed: it is linked again.');
+    const keys = await bucket.s3.list('alerts/');
+    assert.deepEqual(keys, ['alerts/01800000000000-r0.json', 'alerts/01800000000001-r1.json']);
+    assert.deepEqual(JSON.parse(bucket.objects.get(keys[0]!)!.body), { title: 'Music over RCS', message: 'The bridge is unlinked.', at: 1_800_000_000_000 });
   });
 
-  async function alertServer(status = 200) {
-    const received: Array<{ method: string; path: string; authorization: string | undefined; body: unknown }> = [];
-    const server = await listen(async (req, res) => {
-      received.push({ method: req.method ?? '', path: req.url ?? '', authorization: req.headers.authorization, body: JSON.parse(await readText(req)) });
-      res.writeHead(status).end('{}');
-    });
-    servers.push(server);
-    return { server, received };
-  }
-
-  test('posts the title and message with the bearer token', async () => {
-    const { server, received } = await alertServer();
-    await remoteNotify({ url: `${server.url}/alert`, token: 'secret' })('Music over RCS', 'The bridge is unlinked.');
-    assert.deepEqual(received, [{ method: 'POST', path: '/alert', authorization: 'Bearer secret', body: { title: 'Music over RCS', message: 'The bridge is unlinked.' } }]);
-  });
-
-  test('never throws: an unreachable or unhappy Worker is only logged', async () => {
+  test('never throws: a bucket that refuses is only logged', async () => {
     const logs: string[] = [];
-    await remoteNotify({ url: 'http://127.0.0.1:1/alert', token: 't', log: (line) => logs.push(line) })('a', 'b');
-    const { server } = await alertServer(500);
-    await remoteNotify({ url: `${server.url}/alert`, token: 't', log: (line) => logs.push(line) })('a', 'b');
-    assert.equal(logs.length, 2);
-    assert.match(logs[0]!, /could not send an alert/);
-    assert.match(logs[1]!, /HTTP 500/);
+    const notify = outboxNotify({
+      s3: {
+        put: async () => {
+          throw new Error('R2 refused writing alerts/x (HTTP 403)');
+        },
+      },
+      log: (line) => logs.push(line),
+    });
+    await notify('a', 'b');
+    assert.match(logs[0]!, /could not leave an alert for the Worker: R2 refused writing/);
   });
 
-  test('reads ALERT_URL and ALERT_TOKEN; nothing when unset; a clear error when wrong', () => {
+  test('is on when the four R2 settings are there, and off when they are not (the Mac)', () => {
+    const all = { R2_ENDPOINT: 'https://a.r2.cloudflarestorage.com', R2_BUCKET: 'b', R2_ACCESS_KEY_ID: 'i', R2_SECRET_ACCESS_KEY: 's' };
+    assert.equal(typeof alertFromEnv(all), 'function');
     assert.equal(alertFromEnv({}), undefined);
-    assert.equal(typeof alertFromEnv({ ALERT_URL: 'https://edge.example/alert', ALERT_TOKEN: 'x' }), 'function');
-    assert.throws(() => alertFromEnv({ ALERT_URL: 'not a url', ALERT_TOKEN: 'x' }), /ALERT_URL is not a valid URL/);
-    assert.throws(() => alertFromEnv({ ALERT_URL: 'ftp://edge.example/alert', ALERT_TOKEN: 'x' }), /must be http\(s\)/);
-    assert.throws(() => alertFromEnv({ ALERT_URL: 'https://edge.example/alert' }), /ALERT_TOKEN is not/);
+    assert.equal(alertFromEnv({ ...all, R2_BUCKET: '' }), undefined);
   });
 
   test('allNotify tells every sink even when one fails', async () => {
@@ -57,15 +51,14 @@ describe('alerts to the Worker', () => {
     assert.deepEqual(told, ['hello']);
   });
 
-  test('a Health problem and its recovery both reach the Worker', async () => {
-    const { server, received } = await alertServer();
-    const health = new Health({ notify: remoteNotify({ url: `${server.url}/alert`, token: 'k' }) });
+  test('a Health problem and its recovery both reach the bucket', async () => {
+    const bucket = new FakeBucket();
+    let at = 1_800_000_000_000;
+    const health = new Health({ notify: outboxNotify({ s3: bucket.s3, now: () => at++ }) });
     health.problem('bridge', 'Google Messages unlinked the bridge.');
     health.ok('bridge', 'Fixed: the bridge is connected again.');
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.deepEqual(
-      received.map((r) => (r.body as { message: string }).message),
-      ['Google Messages unlinked the bridge.', 'Fixed: the bridge is connected again.'],
-    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const messages = [...bucket.objects.values()].map((o) => (JSON.parse(o.body) as { message: string }).message);
+    assert.deepEqual(messages, ['Google Messages unlinked the bridge.', 'Fixed: the bridge is connected again.']);
   });
 });

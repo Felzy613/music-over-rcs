@@ -1,9 +1,10 @@
 import '../src/load-env.ts';
 import { checkCloud } from '../src/cloud/check.ts';
 
-// Looks at the Cloudflare Worker and the Render host from the outside and says what is right and what to do about what isn't.
-//   EDGE_TOKEN=… ADMIN_TOKEN=… npm run cloud:check -- --worker https://mors-edge.<you>.workers.dev --render https://<name>.onrender.com [--alert]
-// The tokens come from the environment (not the command line, where they would stay in your shell history).
+// Looks at the Render host from the outside (it reports what it sees of the lease, the Cloudflare Worker and the alerts) and
+// says what is right and what to do about what isn't.
+//   ADMIN_TOKEN=… npm run cloud:check -- --render https://<name>.onrender.com [--alert]
+// The password comes from the environment (not the command line, where it would stay in your shell history).
 const args = process.argv.slice(2);
 const value = (name: string): string | undefined => {
   const at = args.indexOf(name);
@@ -11,9 +12,7 @@ const value = (name: string): string | undefined => {
 };
 
 const results = await checkCloud({
-  worker: value('--worker') ?? process.env.WORKER_URL,
   render: value('--render') ?? process.env.RENDER_URL,
-  edgeToken: process.env.EDGE_TOKEN,
   adminToken: process.env.ADMIN_TOKEN,
   sendTestAlert: args.includes('--alert'),
 });

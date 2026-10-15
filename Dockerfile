@@ -43,4 +43,5 @@ USER app
 ENV PORT=8080 DATA_DIR=/data TZ=America/New_York NODE_ENV=production
 EXPOSE 8080
 ENTRYPOINT ["tini", "--"]
-CMD ["node", "--disable-warning=ExperimentalWarning", "deploy/cloud/entrypoint.ts"]
+# The supervisor does little; its memory is kept small, for the bot and the homeserver.
+CMD ["node", "--disable-warning=ExperimentalWarning", "--max-old-space-size=32", "--max-semi-space-size=1", "deploy/cloud/entrypoint.ts"]

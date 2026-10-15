@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import { acquire, type LeaseStore } from '../src/cloud/lease.ts';
 import { LeaseClient, Supervisor, type ChildSpec, type RunningChild, type Spawn } from '../src/cloud/supervise.ts';
+import { memoryLeaseStore } from './helpers/memory-lease.ts';
 
 /** Processes that exist only as far as the test says: it decides when each one ends. */
 class FakeProcesses {
@@ -157,53 +159,68 @@ describe('the supervisor', () => {
 });
 
 describe('the lease client', () => {
-  function service(answers: Array<{ ok: boolean; heldBy?: string; retryInSeconds?: number } | Error | number>) {
-    const calls: Array<{ url: string; body: unknown; authorization: string | null }> = [];
-    const fakeFetch = (async (url: string, init?: RequestInit) => {
-      calls.push({ url, body: JSON.parse(String(init?.body)), authorization: new Headers(init?.headers).get('authorization') });
-      const next = answers.shift() ?? { ok: true };
-      if (next instanceof Error) throw next;
-      if (typeof next === 'number') return new Response('nope', { status: next });
-      return Response.json(next);
-    }) as unknown as typeof fetch;
-    return { calls, client: new LeaseClient({ url: 'https://edge.example/', token: 'tok', holder: 'host-1', ttlSeconds: 60, fetch: fakeFetch }) };
+  function setUp() {
+    const store = memoryLeaseStore();
+    let clock = 1_800_000_000_000;
+    const client = new LeaseClient({ store, holder: 'host-1', ttlSeconds: 60, now: () => clock });
+    return { store, client, advance: (ms: number) => void (clock += ms), at: () => clock };
   }
 
-  test('asks with its name and the shared token', async () => {
-    const { client, calls } = service([{ ok: true }]);
+  test('takes the lease when it is free', async () => {
+    const { client, store, at } = setUp();
     await client.acquire({ sleep: async () => {} });
-    assert.deepEqual(calls, [{ url: 'https://edge.example/lease/acquire', body: { holder: 'host-1', ttlSeconds: 60 }, authorization: 'Bearer tok' }]);
+    assert.deepEqual((await store.read())?.record, { holder: 'host-1', expiresAt: at() + 60_000 });
   });
 
   test('waits while another host holds it, for as long as it is told (2 to 15 seconds), and tries again', async () => {
-    const { client, calls } = service([{ ok: false, heldBy: 'old', retryInSeconds: 80 }, { ok: false, heldBy: 'old', retryInSeconds: 1 }, { ok: true }]);
+    const { client, store, at, advance } = setUp();
+    await acquire(store, 'old', 90, at());
     const waits: number[] = [];
     const logs: string[] = [];
-    await client.acquire({ sleep: async (ms) => void waits.push(ms), log: (line) => logs.push(line) });
-    assert.deepEqual(waits, [15_000, 2_000]);
-    assert.equal(calls.length, 3);
+    await client.acquire({
+      sleep: async (ms) => {
+        waits.push(ms);
+        if (waits.length === 2) advance(100_000); // the old host's lease runs out
+      },
+      log: (line) => logs.push(line),
+    });
+    assert.deepEqual(waits, [15_000, 15_000]);
     assert.ok(logs.some((line) => /old/.test(line)));
+    assert.equal((await store.read())?.record.holder, 'host-1');
   });
 
-  test('keeps trying through errors from the service, however many', async () => {
-    const { client, calls } = service([new Error('network down'), 502, new Error('timeout'), { ok: true }]);
+  test('keeps trying through errors from R2, however many', async () => {
+    let failures = 3;
+    const real = memoryLeaseStore();
+    const flaky: LeaseStore = {
+      read: async () => {
+        if (failures-- > 0) throw new Error('R2 refused reading lease.json (HTTP 503)');
+        return real.read();
+      },
+      write: (record, version) => real.write(record, version),
+    };
+    const client = new LeaseClient({ store: flaky, holder: 'host-1' });
     const waits: number[] = [];
     await client.acquire({ sleep: async (ms) => void waits.push(ms) });
-    assert.equal(calls.length, 4);
     assert.deepEqual(waits, [5000, 5000, 5000]);
   });
 
   test('renewing says ok, lost (another host has it) or unreachable (no answer, which is not the same)', async () => {
-    const { client } = service([{ ok: true }, { ok: false, heldBy: 'other' }, new Error('down'), 500]);
+    const { client, store, at, advance } = setUp();
+    await client.acquire({ sleep: async () => {} });
     assert.equal(await client.renew(), 'ok');
+    advance(120_000);
+    await acquire(store, 'other', 60, at());
     assert.equal(await client.renew(), 'lost');
-    assert.equal(await client.renew(), 'unreachable');
-    assert.equal(await client.renew(), 'unreachable');
+    const broken = new LeaseClient({ store: { read: async () => { throw new Error('down'); }, write: async () => false }, holder: 'host-1' });
+    assert.equal(await broken.renew(), 'unreachable');
   });
 
-  test('releasing never throws', async () => {
-    const { client, calls } = service([new Error('down')]);
+  test('releasing gives it back, and never throws', async () => {
+    const { client, store } = setUp();
+    await client.acquire({ sleep: async () => {} });
     await client.release();
-    assert.equal(calls[0]!.url, 'https://edge.example/lease/release');
+    assert.equal((await store.read())?.record.expiresAt, 0);
+    await new LeaseClient({ store: { read: async () => { throw new Error('down'); }, write: async () => false }, holder: 'x' }).release();
   });
 });

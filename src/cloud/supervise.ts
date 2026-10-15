@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { acquire, release, renew, type LeaseStore } from './lease.ts';
 
 /** One long-running process the host keeps going, like a launchd job with KeepAlive. */
 export interface ChildSpec {
@@ -165,35 +166,22 @@ export class Supervisor {
 
 export type LeaseState = 'ok' | 'lost' | 'unreachable';
 
-/** The client of the Worker's lease (cloudflare/lease.ts): at most one host runs at a time. */
+/** This host's hold on the lease (see lease.ts): at most one host runs at a time. */
 export class LeaseClient {
-  #url: string;
-  #token: string;
+  #store: LeaseStore;
   #holder: string;
   #ttl: number;
-  #fetch: typeof fetch;
+  #now: () => number;
 
-  constructor(options: { url: string; token: string; holder: string; ttlSeconds?: number; fetch?: typeof fetch }) {
-    this.#url = options.url.replace(/\/+$/, '');
-    this.#token = options.token;
+  constructor(options: { store: LeaseStore; holder: string; ttlSeconds?: number; now?: () => number }) {
+    this.#store = options.store;
     this.#holder = options.holder;
     this.#ttl = options.ttlSeconds ?? 90;
-    this.#fetch = options.fetch ?? fetch;
+    this.#now = options.now ?? Date.now;
   }
 
   get holder(): string {
     return this.#holder;
-  }
-
-  async #call(action: 'acquire' | 'renew' | 'release'): Promise<{ ok: boolean; heldBy?: string; retryInSeconds?: number }> {
-    const res = await this.#fetch(`${this.#url}/lease/${action}`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${this.#token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ holder: this.#holder, ttlSeconds: this.#ttl }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) throw new Error(`the lease service answered HTTP ${res.status}`);
-    return (await res.json()) as { ok: boolean; heldBy?: string; retryInSeconds?: number };
   }
 
   /** Waits until the lease is this host's, however long the old host takes to let go. */
@@ -202,25 +190,25 @@ export class LeaseClient {
     for (let waited = 0; ; ) {
       let wait = 5;
       try {
-        const answer = await this.#call('acquire');
+        const answer = await acquire(this.#store, this.#holder, this.#ttl, this.#now());
         if (answer.ok) {
           options.log?.(`took the lease as ${this.#holder}`);
           return;
         }
-        wait = Math.min(Math.max(answer.retryInSeconds ?? 5, 2), 15);
-        options.log?.(`another host (${answer.heldBy ?? 'unknown'}) holds the lease; waiting ${wait} s (${waited} s so far)`);
+        wait = Math.min(Math.max(answer.retryInSeconds, 2), 15);
+        options.log?.(`another host (${answer.heldBy || 'unknown'}) holds the lease; waiting ${wait} s (${waited} s so far)`);
       } catch (err) {
-        options.log?.(`could not reach the lease service: ${err instanceof Error ? err.message : String(err)}; trying again in ${wait} s`);
+        options.log?.(`could not reach the lease in R2: ${err instanceof Error ? err.message : String(err)}; trying again in ${wait} s`);
       }
       waited += wait;
       await sleep(wait * 1000);
     }
   }
 
-  /** Extends the lease. 'lost' means another host has it now, and this one must stop; 'unreachable' means only that the service didn't answer. */
+  /** Extends the lease. 'lost' means another host has it now, and this one must stop; 'unreachable' means only that R2 didn't answer. */
   async renew(): Promise<LeaseState> {
     try {
-      return (await this.#call('renew')).ok ? 'ok' : 'lost';
+      return (await renew(this.#store, this.#holder, this.#ttl, this.#now())).ok ? 'ok' : 'lost';
     } catch {
       return 'unreachable';
     }
@@ -228,7 +216,7 @@ export class LeaseClient {
 
   async release(): Promise<void> {
     try {
-      await this.#call('release');
+      await release(this.#store, this.#holder);
     } catch {
       // it lapses by itself in a minute or so
     }

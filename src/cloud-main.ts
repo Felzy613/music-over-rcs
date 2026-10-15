@@ -7,6 +7,8 @@ import { Pairing, selfChatRooms } from './cloud/pairing.ts';
 import { createCloudWeb } from './cloud/web.ts';
 import { bridgeStatus } from './health.ts';
 import { DEFAULT_HOMESERVER, MatrixClient } from './matrix/client.ts';
+import { outboxNotify } from './alert.ts';
+import { s3FromEnv } from './cloud/s3.ts';
 import { archivedThisMonth, sentThisMonth } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { parseCloudBudget } from './config.ts';
@@ -41,10 +43,27 @@ const oneDriveReport = (): Record<string, unknown> => ({
   monthlyLimitMb: cloudBudget instanceof Error || cloudBudget === undefined ? null : Math.round(cloudBudget / 1048576),
 });
 
+// The bucket the lease, the alerts and the Worker's notes live in (the same one the databases are backed up to).
+const bucket = s3FromEnv(env);
+async function edgeReport(): Promise<Record<string, unknown> | undefined> {
+  if (!bucket) return undefined;
+  try {
+    const [lease, watch, waiting] = await Promise.all([bucket.get('lease.json'), bucket.get('watchdog.json'), bucket.list('alerts/')]);
+    return {
+      lease: lease ? JSON.parse(lease.text) : null,
+      watchdog: watch ? ((JSON.parse(watch.text) as { lastCheck?: unknown }).lastCheck ?? null) : null,
+      alertsWaiting: waiting.length,
+    };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 const page = readFileSync(new URL('./cloud/pair.html', import.meta.url), 'utf8');
 const web = createCloudWeb({
   adminToken: env.ADMIN_TOKEN?.trim() || undefined,
   pageHtml: page,
+  testAlert: bucket ? () => outboxNotify({ s3: bucket, log })('Test alert', 'This is a test from npm run cloud:check. If you can read it, alerts work.') : undefined,
   oneDrive: oneDrive ? { status: oneDriveReport, start: async () => ({ ...(await oneDrive.startLogin()) }) } : undefined,
   async status() {
     const bridge = session
@@ -68,6 +87,7 @@ const web = createCloudWeb({
       tracks: catalog.count(),
       sentThisMonthMb: Math.round(sentThisMonth(catalog) / 1048576),
       ...(oneDrive ? { oneDrive: oneDriveReport() } : {}),
+      ...(bucket ? { edge: await edgeReport() } : {}),
     };
   },
   pair: {

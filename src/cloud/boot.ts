@@ -14,9 +14,8 @@ export interface CloudConfig {
   serverName: string;
   user: string;
   password: string;
-  edge: { url: string; token: string } | undefined;
   holder: string;
-  /** Where the databases are backed up; without it nothing is, which is only for trying things out. */
+  /** Where the databases are backed up, and the lease and alerts are kept (R2); without it none of that happens, which is only for trying things out. */
   backup: boolean;
   runDir: string;
   appDir: string;
@@ -37,9 +36,6 @@ export function readCloudConfig(env: NodeJS.ProcessEnv): CloudConfig {
   const master = need('SECRET_KEY');
   if (master && master.length < 16) problems.push('SECRET_KEY must be at least 16 characters');
   const password = need('MATRIX_PASSWORD');
-  const edgeUrl = env.EDGE_URL?.trim();
-  const edgeToken = env.EDGE_TOKEN?.trim();
-  if (Boolean(edgeUrl) !== Boolean(edgeToken)) problems.push('EDGE_URL and EDGE_TOKEN go together: set both or neither');
   const port = (name: string, fallback: number): number => {
     const value = Number(env[name]?.trim() || fallback);
     if (!(Number.isInteger(value) && value >= 1 && value <= 65535)) problems.push(`${name} must be a port number (got "${env[name]}")`);
@@ -55,7 +51,6 @@ export function readCloudConfig(env: NodeJS.ProcessEnv): CloudConfig {
     serverName: env.SERVER_NAME?.trim() || 'localhost',
     user: env.MATRIX_USER?.trim() || 'me',
     password,
-    edge: edgeUrl && edgeToken ? { url: edgeUrl, token: edgeToken } : undefined,
     holder: env.INSTANCE_ID?.trim() || env.RENDER_INSTANCE_ID?.trim() || `${hostname()}-${randomBytes(3).toString('hex')}`,
     backup,
     runDir: env.RUN_DIR?.trim() || '/run/mors',
@@ -124,7 +119,7 @@ export async function boot(deps: BootDeps): Promise<Booted> {
 
   // 1. Nothing else happens until no other host can be using Google's session or writing the backup.
   if (deps.lease) await deps.lease.acquire({ log });
-  else log('no lease service is set up (EDGE_URL): only run one copy of this host at a time');
+  else log('NO LEASE (it needs the R2 settings): only run one copy of this host at a time');
 
   const shutdown = async (): Promise<void> => {
     if (stopped) return;
@@ -173,19 +168,20 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     //    Each process gets only the secrets it needs: the homeserver and the bridge get none.
     const base = pick(deps.env, ['PATH', 'HOME', 'TZ', 'LANG', 'LC_ALL']);
     const botEnv: NodeJS.ProcessEnv = { ...deps.env, MATRIX_HOMESERVER: HOMESERVER, BRIDGE_URL: BRIDGE, MATRIX_USER: config.user, CATALOG_DB: paths.catalog, BRIDGE_DB: paths.bridgeDb, BRIDGE_PIDFILE: join(config.runDir, 'bridge.pid'), PREFETCH_MB: deps.env.PREFETCH_MB ?? '0' };
-    for (const name of ['SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) delete botEnv[name];
-    // Problems are emailed through the same Worker that holds the lease, unless another place is named.
-    if (config.edge) {
-      botEnv.ALERT_URL ??= `${config.edge.url.replace(/\/+$/, '')}/alert`;
-      botEnv.ALERT_TOKEN ??= config.edge.token;
-    }
+    // The bot's share of the 512 MB: what is left after the homeserver, bridge, replicator and this supervisor (see SongArchive).
+    botEnv.BOT_MEMORY_MB ??= '220';
+    // Big buffers (a song) go straight back to the system when freed, so the bot's memory use follows what it really holds.
+    botEnv.MALLOC_ARENA_MAX ??= '2';
+    botEnv.MALLOC_MMAP_THRESHOLD_ ??= '262144';
+    // The bot can't derive the homeserver's secrets. It keeps the R2 settings: its alerts go into the bucket for the Worker to mail.
+    delete botEnv.SECRET_KEY;
     const specs: ChildSpec[] = [
       ...(config.backup
-        ? [{ name: 'litestream', command: config.bins.litestream, args: ['replicate', '-config', config.litestreamConfig], env: { ...base, ...pick(deps.env, ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) }, stopRank: 4 } satisfies ChildSpec]
+        ? [{ name: 'litestream', command: config.bins.litestream, args: ['replicate', '-config', config.litestreamConfig], env: { ...base, ...pick(deps.env, ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']), R2_REGION: deps.env.R2_REGION?.trim() || 'auto' }, stopRank: 4 } satisfies ChildSpec]
         : []),
       { name: 'synapse', command: config.bins.python, args: ['-m', 'synapse.app.homeserver', '-c', paths.synapseConfig], cwd: paths.synapseDir, env: { ...base, PYTHONUNBUFFERED: '1' }, stopRank: 3 },
       { name: 'bridge', command: config.bins.bridge, args: ['-c', paths.bridgeConfig], cwd: paths.bridgeDir, env: { ...base, GOMEMLIMIT: deps.env.GOMEMLIMIT ?? '64MiB' }, ready: homeserverUp, pidFile: join(config.runDir, 'bridge.pid'), stopRank: 2 },
-      { name: 'bot', command: config.bins.node, args: ['--disable-warning=ExperimentalWarning', `--max-old-space-size=${deps.env.BOT_HEAP_MB ?? '120'}`, join(config.appDir, 'src', 'cloud-main.ts')], cwd: config.appDir, env: botEnv, stopRank: 1 },
+      { name: 'bot', command: config.bins.node, args: ['--disable-warning=ExperimentalWarning', '--expose-gc', `--max-old-space-size=${deps.env.BOT_HEAP_MB ?? '120'}`, join(config.appDir, 'src', 'cloud-main.ts')], cwd: config.appDir, env: botEnv, stopRank: 1 },
     ];
     deps.supervisor.start(specs);
 

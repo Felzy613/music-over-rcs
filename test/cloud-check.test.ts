@@ -2,104 +2,26 @@ import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, describe, test } from 'node:test';
-import { handleRequest, runScheduled, type Env } from '../cloudflare/index.ts';
 import { checkCloud, type CheckResult } from '../src/cloud/check.ts';
 import { createCloudWeb } from '../src/cloud/web.ts';
 
-/** An R2 bucket with compare-and-swap, enough for the lease and the watchdog's record. */
-class Bucket {
-  objects = new Map<string, { value: string; etag: string }>();
-  n = 0;
-  async get(key: string) {
-    const o = this.objects.get(key);
-    return o ? { etag: o.etag, text: async () => o.value } : null;
-  }
-  async put(key: string, value: string, options?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } }) {
-    const cur = this.objects.get(key);
-    const c = options?.onlyIf;
-    if (c?.etagMatches !== undefined && cur?.etag !== c.etagMatches) return null;
-    if (c?.etagDoesNotMatch !== undefined && (c.etagDoesNotMatch === '*' ? cur !== undefined : cur?.etag === c.etagDoesNotMatch)) return null;
-    this.objects.set(key, { value, etag: `e${++this.n}` });
-    return {};
-  }
-}
-
+const NOW = 1_800_000_000_000;
 const byName = (results: CheckResult[], name: string): CheckResult => {
   const found = results.find((r) => r.name === name);
   assert.ok(found, `no result named "${name}" in:\n${results.map((r) => r.name).join('\n')}`);
   return found;
 };
 
-describe('the Worker checks', () => {
-  function worker(env: Partial<Env> = {}) {
-    const full: Env = { STATE: new Bucket(), EDGE_TOKEN: 'edge-secret', RENDER_URL: 'https://REPLACE-ME.onrender.com', ...env };
-    const sent: unknown[] = [];
-    if (!('EMAIL' in env) && env.NTFY_TOPIC === undefined) {
-      full.EMAIL = { send: async (m) => void sent.push(m) };
-      full.ALERT_FROM = 'alerts@d.example';
-      full.ALERT_TO = 'me@d.example';
-    }
-    const fakeFetch = (async (url: string, init?: RequestInit) => handleRequest(new Request(url, init), full)) as unknown as typeof fetch;
-    return { env: full, fakeFetch, sent };
-  }
-
-  test('a working Worker passes everything, and the test email is sent when asked', async () => {
-    const w = worker();
-    const results = await checkCloud({ worker: 'https://edge.test/', edgeToken: 'edge-secret', sendTestAlert: true, fetch: w.fakeFetch });
-    for (const name of ['The Worker answers', 'The Worker accepts the shared token', 'The Worker refuses a wrong token', 'The lease works', 'A test alert is sent']) assert.equal(byName(results, name).ok, true, name);
-    assert.equal(w.sent.length, 1);
-    assert.match(byName(results, 'The lease works').detail, /taken and given back/);
-    // The lease was given back, not left held.
-    const again = await checkCloud({ worker: 'https://edge.test', edgeToken: 'edge-secret', fetch: w.fakeFetch });
-    assert.match(byName(again, 'The lease works').detail, /taken and given back/);
-  });
-
-  test('not yet watching the host says what to set; once a check has run it passes', async () => {
-    const w = worker({ RENDER_URL: 'https://mors.example', RENDER_ADMIN_TOKEN: 'admin' });
-    const before = byName(await checkCloud({ worker: 'https://edge.test', edgeToken: 'edge-secret', fetch: w.fakeFetch }), 'The Worker is watching the host');
-    assert.equal(before.ok, false);
-    assert.match(before.fix!, /RENDER_URL/);
-    await runScheduled(w.env, Date.now(), (async (url: string) => (String(url).endsWith('/healthz') ? new Response('ok') : Response.json({ phase: 'running' }))) as unknown as typeof fetch);
-    const after = byName(await checkCloud({ worker: 'https://edge.test', edgeToken: 'edge-secret', fetch: w.fakeFetch }), 'The Worker is watching the host');
-    assert.equal(after.ok, true);
-    assert.match(after.detail, /bot phase "running"/);
-  });
-
-  test('a wrong shared token is named as the problem, with the command that fixes it', async () => {
-    const w = worker();
-    const results = await checkCloud({ worker: 'https://edge.test', edgeToken: 'a-different-token', fetch: w.fakeFetch });
-    const token = byName(results, 'The Worker accepts the shared token');
-    assert.equal(token.ok, false);
-    assert.match(token.fix!, /wrangler secret put EDGE_TOKEN/);
-    assert.ok(!results.some((r) => r.name === 'The lease works'), 'nothing else is tried with a token that is refused');
-  });
-
-  test('a missing token, an unreachable Worker and a Worker with no way to send email each say what to do', async () => {
-    const w = worker();
-    assert.match(byName(await checkCloud({ worker: 'https://edge.test', fetch: w.fakeFetch }), 'The Worker accepts the shared token').fix!, /EDGE_TOKEN=/);
-    const down = (async () => {
-      throw new Error('getaddrinfo ENOTFOUND edge.test');
-    }) as unknown as typeof fetch;
-    const unreachable = byName(await checkCloud({ worker: 'https://edge.test', edgeToken: 'x', fetch: down }), 'The Worker answers');
-    assert.equal(unreachable.ok, false);
-    assert.match(unreachable.fix!, /wrangler deploy/);
-    const noMail = worker({ EMAIL: undefined as never });
-    noMail.env.EMAIL = undefined;
-    const alert = byName(await checkCloud({ worker: 'https://edge.test', edgeToken: 'edge-secret', sendTestAlert: true, fetch: noMail.fakeFetch }), 'A test alert is sent');
-    assert.equal(alert.ok, false);
-    assert.match(alert.fix!, /ALERT_FROM and ALERT_TO|NTFY_TOPIC/);
-  });
-});
-
-describe('the Render host checks', () => {
+describe('the host checks', () => {
   const servers: Server[] = [];
+  const alerts: string[] = [];
   after(() => {
     for (const s of servers) {
       s.close();
       s.closeAllConnections();
     }
   });
-  async function host(status: Record<string, unknown>) {
+  async function host(status: Record<string, unknown>, options: { withAlerts?: boolean } = {}) {
     const server = createCloudWeb({
       adminToken: 'admin-secret',
       pageHtml: '',
@@ -109,39 +31,66 @@ describe('the Render host checks', () => {
       setRoom: () => {},
       canImport: () => false,
       importCatalog: () => ({}),
+      ...(options.withAlerts ? { testAlert: async () => void alerts.push('test') } : {}),
     });
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   }
-  const RUNNING = { phase: 'running', botEnabled: true, uptimeSeconds: 600, memoryMb: 300, room: '!r:localhost', bridge: { state: 'CONNECTED' }, problems: [], sentThisMonthMb: 120, oneDrive: { connected: true, savedThisMonthMb: 90, monthlyLimitMb: 1500 } };
+  const EDGE = { lease: { holder: 'srv-abc', expiresAt: NOW + 60_000 }, watchdog: { at: NOW - 2 * 60_000, ok: true, detail: 'up' }, alertsWaiting: 0 };
+  const RUNNING = { phase: 'running', botEnabled: true, uptimeSeconds: 600, memoryMb: 300, room: '!r:localhost', bridge: { state: 'CONNECTED' }, problems: [], sentThisMonthMb: 120, oneDrive: { connected: true, savedThisMonthMb: 90, monthlyLimitMb: 1500 }, edge: EDGE };
+  const check = async (status: Record<string, unknown>, extra: Parameters<typeof checkCloud>[0] = {}) => checkCloud({ render: await host(status), adminToken: 'admin-secret', now: () => NOW, ...extra });
 
-  test('a host that is up, linked and answering passes every check', async () => {
-    const results = await checkCloud({ render: await host(RUNNING), adminToken: 'admin-secret' });
+  test('a host that is up, linked, answering, backed up and watched passes every check', async () => {
+    const results = await check(RUNNING);
     assert.deepEqual(results.filter((r) => !r.ok), []);
+    assert.match(byName(results, 'This host holds the lease').detail, /held by srv-abc/);
+    assert.match(byName(results, 'The Worker is watching the host').detail, /2 min ago, found it up/);
     assert.match(byName(results, 'Songs are saved to OneDrive').detail, /90 MB saved this month of 1500 MB allowed/);
   });
 
   test('each stage of setup says what is next', async () => {
-    const waiting = await checkCloud({ render: await host({ ...RUNNING, phase: 'setup', room: null, bridge: { state: undefined, error: 'no login' } }), adminToken: 'admin-secret' });
+    const waiting = await check({ ...RUNNING, phase: 'setup', room: null, bridge: { state: undefined, error: 'no login' } });
     assert.match(byName(waiting, 'Google Messages is linked').fix!, /\/pair/);
     assert.match(byName(waiting, 'The bot is answering texts').fix!, /choose your "message yourself" chat/);
+    assert.match(byName(await check({ ...RUNNING, phase: 'setup', botEnabled: false }), 'The bot is answering texts').fix!, /BOT_ENABLED/);
+    assert.match(byName(await check({ ...RUNNING, phase: 'starting' }), 'The bot is answering texts').fix!, /still starting/);
+    assert.match(byName(await check({ ...RUNNING, oneDrive: { connected: false } }), 'Songs are saved to OneDrive').fix!, /Sign in to OneDrive/);
+  });
 
-    const off = await checkCloud({ render: await host({ ...RUNNING, phase: 'setup', botEnabled: false }), adminToken: 'admin-secret' });
-    assert.match(byName(off, 'The bot is answering texts').fix!, /BOT_ENABLED/);
+  test('R2 trouble, a lapsed lease, a Worker that has not checked and alerts stuck in the bucket each say what to do', async () => {
+    assert.match(byName(await check({ ...RUNNING, edge: undefined }), 'Backups, the lease and alerts (R2)').fix!, /R2_ENDPOINT/);
+    const refused = byName(await check({ ...RUNNING, edge: { error: 'R2 refused listing alerts/ (HTTP 403 AccessDenied)' } }), 'Backups, the lease and alerts (R2)');
+    assert.equal(refused.ok, false);
+    assert.match(refused.fix!, /Object Read & Write/);
 
-    const starting = await checkCloud({ render: await host({ ...RUNNING, phase: 'starting' }), adminToken: 'admin-secret' });
-    assert.match(byName(starting, 'The bot is answering texts').fix!, /still starting/);
+    const lapsed = byName(await check({ ...RUNNING, edge: { ...EDGE, lease: { holder: 'srv-abc', expiresAt: NOW - 1000 } } }), 'This host holds the lease');
+    assert.equal(lapsed.ok, false);
+    assert.match(lapsed.detail, /lapsed/);
 
-    const unsigned = await checkCloud({ render: await host({ ...RUNNING, oneDrive: { connected: false } }), adminToken: 'admin-secret' });
-    assert.match(byName(unsigned, 'Songs are saved to OneDrive').fix!, /Sign in to OneDrive/);
+    const never = byName(await check({ ...RUNNING, edge: { ...EDGE, watchdog: null } }), 'The Worker is watching the host');
+    assert.match(never.fix!, /wrangler secret put RENDER_URL/);
+    const stale = byName(await check({ ...RUNNING, edge: { ...EDGE, watchdog: { at: NOW - 40 * 60_000, ok: true, detail: 'up' } } }), 'The Worker is watching the host');
+    assert.equal(stale.ok, false, 'a check from forty minutes ago means the Worker has stopped');
+
+    const stuck = byName(await check({ ...RUNNING, edge: { ...EDGE, alertsWaiting: 3 } }), 'No alerts stuck waiting');
+    assert.equal(stuck.ok, false);
+    assert.match(stuck.fix!, /ALERT_FROM and ALERT_TO/);
   });
 
   test('problems the bot reports, a nearly full memory and a nearly used-up month are all shown', async () => {
-    const results = await checkCloud({ render: await host({ ...RUNNING, memoryMb: 500, sentThisMonthMb: 4000, problems: [{ key: 'bridge', message: 'Google Messages unlinked the bridge.' }] }), adminToken: 'admin-secret' });
+    const results = await check({ ...RUNNING, memoryMb: 500, sentThisMonthMb: 4000, problems: [{ key: 'bridge', message: 'Google Messages unlinked the bridge.' }] });
     assert.equal(byName(results, 'Memory is within the free plan').ok, false);
     assert.equal(byName(results, 'Outbound traffic this month').ok, false);
     assert.match(byName(results, 'No problems reported').detail, /unlinked the bridge/);
+  });
+
+  test('a test alert is left for the Worker when asked, and a host with nowhere to leave it says so', async () => {
+    const withAlerts = await checkCloud({ render: await host(RUNNING, { withAlerts: true }), adminToken: 'admin-secret', now: () => NOW, sendTestAlert: true });
+    assert.equal(byName(withAlerts, 'A test alert is left for the Worker').ok, true);
+    assert.deepEqual(alerts, ['test']);
+    const without = await checkCloud({ render: await host(RUNNING), adminToken: 'admin-secret', now: () => NOW, sendTestAlert: true });
+    assert.equal(byName(without, 'A test alert is left for the Worker').ok, false);
   });
 
   test('a wrong or missing admin password is told apart from a host that is down', async () => {

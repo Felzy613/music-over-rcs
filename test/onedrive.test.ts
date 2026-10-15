@@ -131,7 +131,7 @@ describe('OneDrive', () => {
     test('a small file goes in one request, to its place in the app folder, replacing one of the same name', async () => {
       const { drive } = await signedIn();
       mock.autoCreateFolders = true;
-      await drive.upload('Ishay Ribo/Singles/Derech.mp3', new Blob([Buffer.from('small song')]));
+      await drive.upload('Ishay Ribo/Singles/Derech.mp3', new Uint8Array(Buffer.from('small song')));
       assert.equal(mock.files.get('Ishay Ribo/Singles/Derech.mp3')?.toString(), 'small song');
       const put = mock.requests.find((r) => r.method === 'PUT')!;
       assert.match(put.path, /special\/approot:\/Ishay%20Ribo\/Singles\/Derech\.mp3:\/content\?@microsoft\.graph\.conflictBehavior=replace$/);
@@ -143,7 +143,7 @@ describe('OneDrive', () => {
       mock.autoCreateFolders = true;
       const song = Buffer.alloc(22 * MiB + 123);
       for (let i = 0; i < song.length; i += 4096) song[i] = i / 4096;
-      await drive.upload('A/B/big.mp3', new Blob([song]));
+      await drive.upload('A/B/big.mp3', new Uint8Array(song));
       assert.ok(mock.files.get('A/B/big.mp3')!.equals(song));
       const chunks = mock.requests.filter((r) => r.range);
       assert.deepEqual(chunks.map((r) => r.range), [`bytes 0-${10 * MiB - 1}/${song.length}`, `bytes ${10 * MiB}-${20 * MiB - 1}/${song.length}`, `bytes ${20 * MiB}-${song.length - 1}/${song.length}`]);
@@ -153,19 +153,19 @@ describe('OneDrive', () => {
 
     test('folders that do not exist yet are made, and the upload tried again', async () => {
       const { drive } = await signedIn();
-      await drive.upload('New Artist/New Album/01 Song.mp3', new Blob([Buffer.from('x')]));
+      await drive.upload('New Artist/New Album/01 Song.mp3', new Uint8Array(Buffer.from('x')));
       assert.ok(mock.folders.has('New Artist') && mock.folders.has('New Artist/New Album'));
       assert.equal(mock.files.get('New Artist/New Album/01 Song.mp3')?.toString(), 'x');
       // A second song in the same folders needs no folder requests.
       mock.requests.length = 0;
-      await drive.upload('New Artist/New Album/02 Song.mp3', new Blob([Buffer.from('y')]));
+      await drive.upload('New Artist/New Album/02 Song.mp3', new Uint8Array(Buffer.from('y')));
       assert.ok(!mock.requests.some((r) => r.path.endsWith('/children')));
     });
 
     test('a large file into a folder that does not exist yet also works', async () => {
       const { drive } = await signedIn();
       const song = Buffer.alloc(11 * MiB, 7);
-      await drive.upload('Z/Y/big.mp3', new Blob([song]));
+      await drive.upload('Z/Y/big.mp3', new Uint8Array(song));
       assert.ok(mock.files.get('Z/Y/big.mp3')!.equals(song));
     });
 
@@ -173,7 +173,7 @@ describe('OneDrive', () => {
       const { drive } = await signedIn();
       mock.autoCreateFolders = true;
       mock.expireAccessTokens();
-      await drive.upload('A/B/c.mp3', new Blob([Buffer.from('c')]));
+      await drive.upload('A/B/c.mp3', new Uint8Array(Buffer.from('c')));
       assert.equal(mock.files.get('A/B/c.mp3')?.toString(), 'c');
       assert.equal(mock.refreshesUsed, 1);
     });
@@ -182,7 +182,7 @@ describe('OneDrive', () => {
       const { drive, waits } = await signedIn();
       mock.autoCreateFolders = true;
       mock.throttle = 2;
-      await drive.upload('A/B/c.mp3', new Blob([Buffer.from('c')]));
+      await drive.upload('A/B/c.mp3', new Uint8Array(Buffer.from('c')));
       assert.deepEqual(waits.slice(-2), [3000, 3000]);
       assert.equal(mock.files.get('A/B/c.mp3')?.toString(), 'c');
     });
@@ -192,12 +192,12 @@ describe('OneDrive', () => {
       mock.autoCreateFolders = true;
       const song = Buffer.alloc(11 * MiB, 1);
       mock.failChunks = 2;
-      await drive.upload('A/B/retry.mp3', new Blob([song]));
+      await drive.upload('A/B/retry.mp3', new Uint8Array(song));
       assert.ok(mock.files.get('A/B/retry.mp3')!.equals(song));
       assert.deepEqual(waits.slice(-2), [1000, 2000], 'it waits longer each time');
 
       mock.failChunks = 99;
-      await assert.rejects(() => drive.upload('A/B/never.mp3', new Blob([song])), (err: unknown) => err instanceof OneDriveError && /HTTP 503/.test(err.message));
+      await assert.rejects(() => drive.upload('A/B/never.mp3', new Uint8Array(song)), (err: unknown) => err instanceof OneDriveError && /HTTP 503/.test(err.message));
       assert.ok(!mock.files.has('A/B/never.mp3'));
     });
 
@@ -205,7 +205,7 @@ describe('OneDrive', () => {
       const { drive } = await signedIn();
       mock.autoCreateFolders = true;
       assert.equal(await drive.exists('A/B/c.mp3'), false);
-      await drive.upload('A/B/c.mp3', new Blob([Buffer.from('c')]));
+      await drive.upload('A/B/c.mp3', new Uint8Array(Buffer.from('c')));
       assert.equal(await drive.exists('A/B/c.mp3'), true);
     });
 

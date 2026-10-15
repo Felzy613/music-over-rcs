@@ -30,6 +30,8 @@ export interface CloudDeps {
   importCatalog(path: string): Promise<Record<string, number>> | Record<string, number>;
   /** Saving songs to OneDrive, when it is set up (ONEDRIVE_CLIENT_ID): what to show, and starting a sign-in. */
   oneDrive?: { status(): Record<string, unknown>; start(): Promise<Record<string, unknown>> } | undefined;
+  /** Leaves a test alert for the Worker to mail (only when the R2 settings are there). */
+  testAlert?: (() => Promise<void>) | undefined;
   /** The /pair page. */
   pageHtml: string;
 }
@@ -125,6 +127,11 @@ export function createCloudWeb(deps: CloudDeps): Server {
         if (!deps.oneDrive) throw new HttpError(404, 'OneDrive is not set up (set ONEDRIVE_CLIENT_ID)');
         if (req.method === 'GET' && path === '/onedrive/status') return send(res, 200, deps.oneDrive.status());
         if (req.method === 'POST' && path === '/onedrive/start') return send(res, 200, await deps.oneDrive.start());
+      }
+      if (req.method === 'POST' && path === '/admin/test-alert') {
+        if (!deps.testAlert) throw new HttpError(404, 'alerts need the R2 settings (R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY)');
+        await deps.testAlert();
+        return send(res, 200, { ok: true });
       }
       if (req.method === 'GET' && path === '/setup/rooms') {
         const phone = (url.searchParams.get('phone') ?? '').replace(/\D/g, '');

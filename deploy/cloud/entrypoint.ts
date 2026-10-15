@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { boot, readCloudConfig, type Booted, type BootSys } from '../../src/cloud/boot.ts';
+import { s3LeaseStore } from '../../src/cloud/lease.ts';
+import { s3FromEnv } from '../../src/cloud/s3.ts';
 import { LeaseClient, Supervisor } from '../../src/cloud/supervise.ts';
 
 // The container's PID 1 work: see docs/cloud.md. It takes the lease, restores the databases, writes the settings and keeps
@@ -35,7 +37,8 @@ const sys: BootSys = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
-const lease = config.edge ? new LeaseClient({ url: config.edge.url, token: config.edge.token, holder: config.holder }) : undefined;
+const bucket = s3FromEnv(process.env);
+const lease = bucket ? new LeaseClient({ store: s3LeaseStore(bucket), holder: config.holder }) : undefined;
 // Render allows 30 s between SIGTERM and SIGKILL, and four processes are stopped one after another.
 const supervisor = new Supervisor({ log, graceMs: 6000 });
 
