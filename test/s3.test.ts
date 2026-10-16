@@ -99,6 +99,30 @@ describe('the bucket client', () => {
     assert.equal((await s3.get('lease.json'))?.text, 'two');
   });
 
+  test('a weak ETag from a compressing proxy is still usable in If-Match, and objects are asked for uncompressed', async () => {
+    const seen: Headers[] = [];
+    const lines: string[] = [];
+    // Behaves like a store behind a proxy that weakens ETags on responses it compressed: GET says W/"e1", the object's real ETag is "e1".
+    const weakFetch = (async (_url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seen.push(headers);
+      if (init?.method === 'PUT') {
+        return headers.get('if-match') === '"e1"' ? new Response('', { status: 200, headers: { etag: '"e2"' } }) : new Response('<Error><Code>PreconditionFailed</Code></Error>', { status: 412 });
+      }
+      return new Response('{}', { headers: { etag: 'W/"e1"' } });
+    }) as unknown as typeof fetch;
+    const s3 = new S3({ endpoint: 'https://acct.r2.cloudflarestorage.com', bucket: 'mors-state', accessKeyId: 'id', secretAccessKey: 'secret', fetch: weakFetch, log: (line) => lines.push(line) });
+    const read = await s3.get('lease.json');
+    assert.equal(read?.etag, '"e1"');
+    assert.equal(seen[0]!.get('accept-encoding'), 'identity');
+    assert.equal((await s3.put('lease.json', 'x', { ifMatch: 'W/"e1"' })).ok, true);
+    assert.equal(seen[1]!.get('if-match'), '"e1"');
+    assert.deepEqual(lines, []);
+    assert.deepEqual(await s3.put('lease.json', 'x', { ifMatch: '"old"' }), { ok: false });
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /lease\.json: the write was refused \(HTTP 412 PreconditionFailed; sent if-match: "old"\)/);
+  });
+
   test('sends path-style addresses, signed, with the body hash and the condition headers', async () => {
     const { s3, seen } = fakeStore();
     await s3.put('a b/c.json', 'x', { ifNoneMatch: '*' });

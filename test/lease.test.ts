@@ -63,6 +63,16 @@ describe('the lease', () => {
     });
   }
 
+  test('a lapsed lease that the store still refuses to update is reported as lapsed, not as held', async () => {
+    const real = memoryLeaseStore();
+    await acquire(real, 'old', 60, T0);
+    const refusing = { read: () => real.read(), write: async () => false };
+    const lapsed = await acquire(refusing, 'new', 60, T0 + 120_000);
+    assert.deepEqual(lapsed, { ok: false, heldBy: 'old', retryInSeconds: 5, lapsed: true });
+    const stillHeld = await acquire(refusing, 'new', 60, T0 + 10_000);
+    assert.deepEqual(stillHeld, { ok: false, heldBy: 'old', retryInSeconds: 50 });
+  });
+
   test('a damaged record in the bucket counts as a lapsed lease, not a stuck one', async () => {
     const bucket = new FakeBucket();
     await bucket.s3.put('lease.json', 'not json');

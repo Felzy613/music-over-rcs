@@ -189,6 +189,22 @@ describe('the lease client', () => {
     assert.equal((await store.read())?.record.holder, 'host-1');
   });
 
+  test('says so when the lease has run out but R2 will not take the update', async () => {
+    const real = memoryLeaseStore();
+    await acquire(real, 'old', 60, 0);
+    let refusals = 2;
+    const store: LeaseStore = {
+      read: () => real.read(),
+      write: async (record, version) => (refusals-- > 0 ? false : real.write(record, version)),
+    };
+    const logs: string[] = [];
+    const client = new LeaseClient({ store, holder: 'host-1', now: () => 3_600_000 });
+    await client.acquire({ sleep: async () => {}, log: (line) => logs.push(line) });
+    assert.equal(logs.filter((line) => /has run out but R2 refused the update/.test(line)).length, 2);
+    assert.equal(logs.some((line) => /another host/.test(line)), false);
+    assert.match(logs.at(-1)!, /took the lease as host-1/);
+  });
+
   test('keeps trying through errors from R2, however many', async () => {
     let failures = 3;
     const real = memoryLeaseStore();

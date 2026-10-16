@@ -196,7 +196,11 @@ export class LeaseClient {
           return;
         }
         wait = Math.min(Math.max(answer.retryInSeconds, 2), 15);
-        options.log?.(`another host (${answer.heldBy || 'unknown'}) holds the lease; waiting ${wait} s (${waited} s so far)`);
+        options.log?.(
+          answer.lapsed
+            ? `the lease (last held by ${answer.heldBy || 'unknown'}) has run out but R2 refused the update; trying again in ${wait} s (${waited} s so far)`
+            : `another host (${answer.heldBy || 'unknown'}) holds the lease; waiting ${wait} s (${waited} s so far)`,
+        );
       } catch (err) {
         options.log?.(`could not reach the lease in R2: ${err instanceof Error ? err.message : String(err)}; trying again in ${wait} s`);
       }

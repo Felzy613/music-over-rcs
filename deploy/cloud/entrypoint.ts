@@ -37,7 +37,7 @@ const sys: BootSys = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
-const bucket = s3FromEnv(process.env);
+const bucket = s3FromEnv(process.env, { log });
 const lease = bucket ? new LeaseClient({ store: s3LeaseStore(bucket), holder: config.holder }) : undefined;
 // Render allows 30 s between SIGTERM and SIGKILL, and four processes are stopped one after another.
 const supervisor = new Supervisor({ log, graceMs: 6000 });

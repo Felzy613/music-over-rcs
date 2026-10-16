@@ -22,7 +22,7 @@ export interface LeaseStore {
   write(record: LeaseRecord, version: string | undefined): Promise<boolean>;
 }
 
-export type LeaseAnswer = { ok: true; expiresAt: number } | { ok: false; heldBy: string; retryInSeconds: number };
+export type LeaseAnswer = { ok: true; expiresAt: number } | { ok: false; heldBy: string; retryInSeconds: number; /** True when the record has run out but the store still refused the update. */ lapsed?: boolean };
 
 export const MIN_TTL_SECONDS = 15;
 export const MAX_TTL_SECONDS = 300;
@@ -60,7 +60,7 @@ export async function acquire(store: LeaseStore, holder: string, ttlSeconds: num
   if (await store.write(record, current?.version)) return { ok: true, expiresAt: record.expiresAt };
   // Someone else wrote between the read and the write: they have it.
   const winner = await store.read();
-  return { ok: false, heldBy: winner?.record.holder ?? 'another instance', retryInSeconds: 5 };
+  return { ok: false, heldBy: winner?.record.holder ?? 'another instance', retryInSeconds: 5, ...(winner && winner.record.expiresAt <= now ? { lapsed: true } : {}) };
 }
 
 /** Extends the lease for its holder. Fails if it was lost (lapsed and taken by another). */

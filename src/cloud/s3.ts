@@ -65,6 +65,8 @@ export interface S3Options {
   region?: string;
   fetch?: typeof fetch;
   now?: () => Date;
+  /** Told, in a line, about a conditional write R2 refused (rare, and worth knowing the reason for). */
+  log?: (line: string) => void;
 }
 
 /** Only write if the object is as it was: a specific ETag, or `'*'`-style "does not exist yet". */
@@ -72,6 +74,9 @@ export interface WriteCondition {
   ifMatch?: string;
   ifNoneMatch?: '*';
 }
+
+/** An ETag for If-Match: a weak one (W/"x", which a proxy that compresses a response turns a strong one into) never matches there. */
+const strongETag = (etag: string): string => etag.replace(/^W\//, '');
 
 export class S3 {
   #options: S3Options;
@@ -91,7 +96,8 @@ export class S3 {
     const headers = signRequest({
       method,
       url,
-      headers: { 'x-amz-content-sha256': payloadHash, ...init.headers },
+      // identity: ask for the object as stored, so its ETag comes back strong and usable in If-Match.
+      headers: { 'x-amz-content-sha256': payloadHash, 'accept-encoding': 'identity', ...init.headers },
       sign: ['x-amz-content-sha256'],
       payloadHash,
       accessKeyId: this.#options.accessKeyId,
@@ -117,18 +123,19 @@ export class S3 {
       return undefined;
     }
     if (!res.ok) return this.#fail(res, `reading ${key}`);
-    return { text: await res.text(), etag: res.headers.get('etag') ?? '' };
+    return { text: await res.text(), etag: strongETag(res.headers.get('etag') ?? '') };
   }
 
   /** Writes an object. With a condition, returns false (and writes nothing) when it isn't met; otherwise true with the new ETag. */
   async put(key: string, body: string | Uint8Array, condition: WriteCondition = {}): Promise<{ ok: true; etag: string } | { ok: false }> {
     const headers: Record<string, string> = {};
-    if (condition.ifMatch !== undefined) headers['if-match'] = condition.ifMatch;
+    if (condition.ifMatch !== undefined) headers['if-match'] = strongETag(condition.ifMatch);
     if (condition.ifNoneMatch) headers['if-none-match'] = condition.ifNoneMatch;
     const res = await this.#send('PUT', key, { body, headers });
     // 412: the condition failed. 409: another write to the same object was in flight (R2's "conditional request conflict").
     if (res.status === 412 || res.status === 409) {
-      await res.body?.cancel().catch(() => {});
+      const code = /<Code>([^<]*)<\/Code>/.exec(await res.text().catch(() => ''))?.[1] ?? '';
+      this.#options.log?.(`[s3] ${key}: the write was refused (HTTP ${res.status}${code ? ` ${code}` : ''}; sent ${Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join(', ') || 'no condition'})`);
       return { ok: false };
     }
     if (!res.ok) return this.#fail(res, `writing ${key}`);
@@ -152,9 +159,9 @@ export class S3 {
 }
 
 /** The bucket named by R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY (and R2_REGION, default auto), or nothing when they aren't all set. */
-export function s3FromEnv(env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch } = {}): S3 | undefined {
+export function s3FromEnv(env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch; log?: (line: string) => void } = {}): S3 | undefined {
   const [endpoint, bucket, accessKeyId, secretAccessKey] = ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'].map((name) => env[name]?.trim());
   if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) return undefined;
   // R2 uses the region "auto"; another S3 server (a stand-in for trying things out) may want a named one.
-  return new S3({ endpoint, bucket, accessKeyId, secretAccessKey, region: env.R2_REGION?.trim() || 'auto', ...(options.fetch ? { fetch: options.fetch } : {}) });
+  return new S3({ endpoint, bucket, accessKeyId, secretAccessKey, region: env.R2_REGION?.trim() || 'auto', ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.log ? { log: options.log } : {}) });
 }
