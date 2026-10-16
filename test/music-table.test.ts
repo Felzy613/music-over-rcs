@@ -515,8 +515,10 @@ describe('looking things up on the site from the bot', () => {
     const replies = await ask('weiss');
     assert.deepEqual(
       replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : [])),
-      ['Yoely Weiss — Shabbos', "Yoely Weiss — Purim '26 & More", 'Mendy Weiss — One', 'Mendy Weiss — Two'],
+      ['Song: Shabbos', "Song: Purim '26 & More", 'Song: One', 'Song: Two'],
     );
+    const headings = replies.flatMap((reply) => (reply.kind === 'text' && !reply.postback ? [reply.text] : []));
+    assert.ok(headings.some((text) => /Yoely Weiss:/.test(text)) && headings.some((text) => /Mendy Weiss:/.test(text)), JSON.stringify(headings));
     const asked = textOf(replies.at(-1));
     assert.deepEqual(asked.chips?.map((chip) => chip.postback), ['play:1', 'play:2', 'play:3', 'play:4']);
     assert.deepEqual(await tap('play:4'), [
