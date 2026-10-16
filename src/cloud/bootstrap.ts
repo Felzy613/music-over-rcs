@@ -70,3 +70,26 @@ export async function ensureToken(options: {
   options.log?.(`signed in to the homeserver as ${userId}`);
   return { token: accessToken, userId };
 }
+
+/**
+ * ensureToken, but patient about the one thing that is expected on a first start: the account does not exist yet, because the host
+ * makes it as soon as the homeserver answers and the bot may ask first. Signing in is refused (403) until then, so it is tried again
+ * every few seconds, for about two minutes. A wrong password is refused the same way for ever, and so ends in the same error.
+ */
+export async function ensureTokenPatiently(
+  options: Parameters<typeof ensureToken>[0],
+  wait: { attempts?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void>; stopped?: () => boolean } = {},
+): ReturnType<typeof ensureToken> {
+  const attempts = wait.attempts ?? 40;
+  const sleep = wait.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await ensureToken(options);
+    } catch (err) {
+      const refused = err instanceof MatrixError && err.status === 403 && err.errcode === 'M_FORBIDDEN';
+      if (!refused || attempt >= attempts || wait.stopped?.()) throw err;
+      if (attempt === 1) options.log?.('the Matrix account does not exist yet (the host makes it as soon as the homeserver is up); trying again shortly');
+      await sleep(wait.intervalMs ?? 3000);
+    }
+  }
+}

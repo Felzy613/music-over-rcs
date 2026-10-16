@@ -2,7 +2,7 @@ import './load-env.ts';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { Catalog } from './catalog.ts';
-import { ensureToken, waitForHomeserver } from './cloud/bootstrap.ts';
+import { ensureTokenPatiently, waitForHomeserver } from './cloud/bootstrap.ts';
 import { Pairing, selfChatRooms } from './cloud/pairing.ts';
 import { createCloudWeb } from './cloud/web.ts';
 import { bridgeStatus } from './health.ts';
@@ -135,7 +135,7 @@ process.on('SIGINT', stop);
 
 try {
   await waitForHomeserver(homeserver, { log, stopped: () => stopping });
-  const { token, userId } = await ensureToken({ env, state: catalog, homeserver, log });
+  const { token, userId } = await ensureTokenPatiently({ env, state: catalog, homeserver, log }, { stopped: () => stopping });
   const matrix = new MatrixClient({ token, homeserver });
   session = { token, userId, pairing: new Pairing({ matrix, botId: `@gmessagesbot:${userId.slice(userId.indexOf(':') + 1)}`, userId, log }) };
   phase = 'setup';

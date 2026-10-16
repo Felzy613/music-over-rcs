@@ -19,7 +19,7 @@ const launchctl: Exec = (file, args) =>
  * (`stack stop`, or the bridge running in a terminal), so a bridge you stopped on purpose stays stopped.
  * BRIDGE_SERVICE names another launchd label.
  *
- * On a server there is no launchd: BRIDGE_PIDFILE names the file where the process supervisor (deploy/cloud/supervisor.mjs)
+ * On a server there is no launchd: BRIDGE_PIDFILE names the file where the process supervisor (src/cloud/supervise.ts, started by deploy/cloud/entrypoint.ts)
  * writes the bridge's process id, and the restart is a SIGTERM to it, which the supervisor answers by starting it again.
  */
 export function bridgeRestarter(

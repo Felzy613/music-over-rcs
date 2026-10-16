@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Catalog } from '../src/catalog.ts';
-import { ensureToken, waitForHomeserver } from '../src/cloud/bootstrap.ts';
+import { ensureToken, ensureTokenPatiently, waitForHomeserver } from '../src/cloud/bootstrap.ts';
 import { Pairing, selfChatRooms } from '../src/cloud/pairing.ts';
 import { createCloudWeb, passwordIn, sameSecret, type CloudDeps } from '../src/cloud/web.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
@@ -236,6 +236,33 @@ describe('starting up on a cloud host', () => {
     const catalog = new Catalog(':memory:');
     assert.equal((await ensureToken({ env: { MATRIX_ACCESS_TOKEN: mock.token }, state: catalog, homeserver: mock.url })).userId, mock.userId);
     await assert.rejects(() => ensureToken({ env: { MATRIX_ACCESS_TOKEN: 'syt_wrong', MATRIX_PASSWORD: mock.password }, state: catalog, homeserver: mock.url }), /not accepted/);
+  });
+
+  test('patiently: an account that does not exist yet is waited for, and signing in then works', async () => {
+    const catalog = new Catalog(':memory:');
+    let refusals = 2;
+    const waits: number[] = [];
+    const logs: string[] = [];
+    const flaky = (async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/login') && refusals-- > 0) return Response.json({ errcode: 'M_FORBIDDEN', error: 'Invalid username or password' }, { status: 403 });
+      return fetch(url, init);
+    }) as unknown as typeof fetch;
+    const result = await ensureTokenPatiently({ env: { MATRIX_PASSWORD: mock.password }, state: catalog, homeserver: mock.url, fetch: flaky, log: (line) => logs.push(line) }, { sleep: async (ms) => void waits.push(ms) });
+    assert.equal(result.token, mock.token);
+    assert.deepEqual(waits, [3000, 3000]);
+    assert.equal(logs.filter((line) => /does not exist yet/.test(line)).length, 1, 'said once, not at every try');
+  });
+
+  test('patiently: a password that is simply wrong ends in the same refusal after the allowed tries, and other errors are not retried', async () => {
+    const waits: number[] = [];
+    await assert.rejects(
+      () => ensureTokenPatiently({ env: { MATRIX_PASSWORD: 'nope' }, state: new Catalog(':memory:'), homeserver: mock.url }, { attempts: 3, sleep: async (ms) => void waits.push(ms) }),
+      /Invalid username or password/,
+    );
+    assert.equal(waits.length, 2);
+    waits.length = 0;
+    await assert.rejects(() => ensureTokenPatiently({ env: { MATRIX_ACCESS_TOKEN: 'syt_wrong' }, state: new Catalog(':memory:'), homeserver: mock.url }, { sleep: async (ms) => void waits.push(ms) }), /not accepted/);
+    assert.deepEqual(waits, [], 'a rejected token is not waited on');
   });
 
   test('with no token and no password it says what to set', async () => {
