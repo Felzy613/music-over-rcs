@@ -22,9 +22,29 @@ You get two messages:
 - **Apostrophes are optional.** `search lipa vnusni` finds "V’Nusni", `search uvtuvcha` finds "U’v’tuvcha HaGadol", and `search v'nusni` works too.
 - **Typos are fine.** `search yoely wiess shabos`, `search lipa shmeltzer vnusni` (the site writes "Schmeltzer"), `search avrohom fried` ("Avraham"), `search shlomo daskal` ("Shloime") and `search mordechai ben dovid` all work. The bot learns the site's spelling from the titles around your other words.
 - **Extra words are fine.** `... by Yoely Weiss` is understood, and in a longer request one stray word (an `mp3` at the end, say) is forgiven.
-- **Where songs come from.** When the catalog has no match, the bot looks on YouTube Music, and then on music-table.com if YouTube Music finds nothing ([YouTube Music](youtube-music.md), `SONG_SOURCES`). A YouTube Music song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
-- **A song it already knows by name comes back at once.** The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
+- **Where songs come from.** `search` asks **YouTube Music first**. If it has a song that fits every word you typed (and its artist is on Zemer's list), that is the answer. If not, the bot looks on music-table.com: your catalog first, then the site ([YouTube Music](youtube-music.md), `SONG_SOURCES`). A YouTube Music song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
+- **A song it already knows by name comes back at once** (when YouTube Music has nothing for it). The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
 - **A letter off in `search` itself is fine** (`serach`, `seach`).
+
+## YouTube Music, and albums
+
+`search` asks YouTube Music first and music-table.com second. To look on YouTube Music **only**, with no falling back and in YouTube Music's own order, start with `youtube` (or `yt`):
+
+```text
+youtube lipa vnusni
+```
+
+To get a whole album, start with `album`:
+
+```text
+album yu di kenst
+```
+
+An album that the words name outright is sent at once; otherwise you get the albums that fit, one message each, and a 👍 on one sends it (`all` doesn't send every album). You get its cover and a line (`11 songs, about 70 MB`), then **one zip file** with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds about 100 MB (`MAX_DOWNLOAD_MB`); a bigger album arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
+
+**A `search` tells you when your words match an album.** If you type an album's name, `search yu di kenst` says so instead of guessing at a song: "No song by that name, but there's an album: Michoel Schnitzler — Yu Di Kenst (2020)", and a 👍 on that line sends the whole album as a zip. If a song does have that name, you get the song and, under it, a line "💿 Also an album: …" with the same 👍. Typing only an artist's name doesn't mention albums (it isn't about any one of them). The album line follows the same rules as everything from YouTube Music: only artists on Zemer's list, no women.
+
+Everything from YouTube Music is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out of the zip ("1 left out").
 
 ## Lists
 

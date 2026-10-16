@@ -227,6 +227,69 @@ describe('YouTube Music streams', () => {
     assert.equal(youtube.mediaCalls.length, 2);
   });
 
+  describe('links the media server turns down past the first megabyte', () => {
+    // The real ones are about one in seven. A song has to be bigger than the first megabyte to meet the wall.
+    const BIG = 'bigsongggg1';
+    let big: MockYouTubeMusic;
+    before(async () => {
+      big = await startMockYouTubeMusic([{ videoId: BIG, title: 'A Long Song', artists: ['The Night Owls'], bytes: Buffer.alloc(2.5 * 1024 * 1024, 7) }]);
+    });
+    after(() => big.close());
+    beforeEach(() => big.reset());
+
+    test('a good link is tried with the very request the download makes, then the whole song downloads', async () => {
+      const youTube = new YouTubeMusic({ baseUrl: big.url });
+      const file = await youTube.download(youTube.trackUrl(BIG), 'A Long Song');
+      assert.equal(file.bytes, 2.5 * 1024 * 1024);
+      assert.deepEqual(big.mediaCalls.map((call) => call.range), ['bytes=0-', 'bytes=0-']);
+    });
+
+    test('a walled link serves small ranges, so a small probe would not have caught it', async () => {
+      big.wallNext = 1;
+      const youTube = new YouTubeMusic({ baseUrl: big.url });
+      const stream = await youTube.stream(BIG);
+      assert.equal(big.playerCalls.length, 2, 'the first link was turned down and a second asked for');
+      void stream;
+    });
+
+    test('a walled link is not used: the next one is asked for, and the song downloads', async () => {
+      big.wallNext = 2;
+      const youTube = new YouTubeMusic({ baseUrl: big.url });
+      const file = await youTube.download(youTube.trackUrl(BIG), 'A Long Song');
+      assert.equal(file.bytes, 2.5 * 1024 * 1024);
+      assert.deepEqual(big.playerCalls.map((call) => call.version), ['1.02', '1.03', '1.01'], 'a new link each time, from the next client version');
+      assert.equal(big.mediaCalls.length, 4, 'two walled links tried and turned down, then a good one tried and used');
+    });
+
+    test('after the client versions are used up it starts again with a fresh session', async () => {
+      big.wallNext = 4;
+      const youTube = new YouTubeMusic({ baseUrl: big.url });
+      await youTube.download(youTube.trackUrl(BIG));
+      assert.equal(big.visitorIds, 2, 'a second session was started');
+      assert.equal(big.playerCalls.length, 5);
+    });
+
+    test('says so, instead of a bare 403, when every link is turned down', async () => {
+      big.wallNext = 100;
+      const youTube = new YouTubeMusic({ baseUrl: big.url });
+      await assert.rejects(youTube.download(youTube.trackUrl(BIG)), (err) => err instanceof YouTubeMusicError && /wouldn't give me that song \(its link was refused\)/.test(err.message));
+      assert.ok(big.playerCalls.length <= 9, 'it gives up after a handful of tries');
+    });
+
+    test('a song that fits in the first megabyte needs no check', async () => {
+      const small = await startMockYouTubeMusic([{ videoId: 'smallsonggg', title: 'Short', artists: ['The Night Owls'] }]);
+      try {
+        small.wallNext = 5;
+        const youTube = new YouTubeMusic({ baseUrl: small.url });
+        await youTube.stream('smallsonggg');
+        assert.deepEqual(small.mediaCalls, []);
+        assert.equal(small.playerCalls.length, 1);
+      } finally {
+        await small.close();
+      }
+    });
+  });
+
   test('keeps to the size limit, and only downloads its own songs', async () => {
     const youTube = make();
     await assert.rejects(youTube.download(youTube.trackUrl('aaaaaaaaaa1'), undefined, { maxBytes: 100 }), (err) => err instanceof AudioFetchError && /limit/.test(err.message));
@@ -790,16 +853,20 @@ describe('Zemer’s artist list', () => {
     const list = make();
     await list.ready();
     const outcomes: Array<string | undefined> = [];
+    const until = async (done: () => boolean): Promise<void> => {
+      for (let waited = 0; !done() && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+    };
     const stop = list.watch((error) => outcomes.push(error), 20);
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    zemer.failing = new Set(['/whitelist/version']);
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    stop();
-    const seen = outcomes.length;
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.equal(outcomes.length, seen, 'stopped');
+    await until(() => outcomes.includes(undefined));
     assert.ok(outcomes.includes(undefined), 'it succeeded while the server was fine');
-    assert.ok(outcomes.some((outcome) => outcome === "Zemer's artist list answered HTTP 503"), 'and said so when it failed');
+    zemer.failing = new Set(['/whitelist/version']);
+    await until(() => outcomes.includes("Zemer's artist list answered HTTP 503"));
+    assert.ok(outcomes.includes("Zemer's artist list answered HTTP 503"), 'and said so when it failed');
+    stop();
+    await new Promise((resolve) => setTimeout(resolve, 60)); // a check already under way may still report
+    const seen = outcomes.length;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(outcomes.length, seen, 'stopped');
   });
 
   test('zemerWhitelistFromEnv can be pointed elsewhere', () => {

@@ -5,13 +5,13 @@ import { checkAudio, MAX_BYTES } from './audio-check.ts';
 import { createBot, joinLists } from './bot.ts';
 import { Catalog } from './catalog.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
-import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { arrangeSources, songSourceOrder } from './sources/songs.ts';
+import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 import type { Chip, Incoming, Reply } from './types.ts';
 
-// A local stand-in for Google Messages: same bot, no accounts, no network except the URL checks and, when the
-// catalog has no match, a look on YouTube Music and music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off stop that).
+// A local stand-in for Google Messages: same bot, no accounts, no network except the URL checks and the lookups (a
+// search asks YouTube Music, then the catalog and music-table.com; YOUTUBE_MUSIC=off and MUSIC_TABLE=off stop that).
 // It never downloads any audio.
 //   --offline  skip the URL checks and the YouTube Music and music-table.com lookups
 //   --demo     use three made-up tracks held in memory (implies --offline), to try it before you have a catalog
@@ -49,14 +49,19 @@ const checkLink = resolvingYouTubeAudio(
   ),
   { maxBytes: MAX_BYTES },
 ).checkAudio;
-const source = sourcesInOrder(songSourceOrder(), {
-  'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist }),
+const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
+const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
+const { first, source } = arrangeSources(songSourceOrder(), {
+  'youtube-music': youTubeSongs,
   'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
 });
 const bot = createBot({
   catalog,
   checkAudio: offline ? async () => ({ ok: true, type: 'audio/mpeg' }) : gatedAudioCheck(gate, checkLink),
+  ...(first ? { first } : {}),
   ...(source ? { source } : {}),
+  ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
+  ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
 });
 
 let chips: Chip[] = [];
@@ -68,6 +73,10 @@ function print(reply: Reply): void {
   }
   if (reply.kind === 'image') {
     console.log(`bot > [picture] ${reply.url}${reply.caption ? `\n      ${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}` : ''}`);
+    return;
+  }
+  if (reply.kind === 'album') {
+    console.log(`bot > [zip: ${reply.artist ? `${reply.artist} — ` : ''}${reply.title}, ${reply.songs.length} songs]`);
     return;
   }
   if (reply.kind === 'collage') {
@@ -85,8 +94,8 @@ const mode = demo
   ? 'demo: 3 made-up tracks'
   : `${catalog.count()} tracks in ${dbPath}${offline ? ', URL checks skipped' : ''}${youTube ? ', YouTube Music on' : ''}${musicTable ? ', music-table.com on' : ''}`;
 const intro = [`Local simulator (${mode})`];
-if (source) intro.push(`When the catalog has no match, the bot looks on ${source.name} and keeps what it finds.`);
-if (!demo && !source && catalog.count() === 0) {
+if (first || source) intro.push(`A search asks ${[first?.name, source ? `then ${source.name}` : ''].filter(Boolean).join(', ')}, and keeps what it finds.`);
+if (!demo && !first && !source && catalog.count() === 0) {
   intro.push('The catalog is empty, so every request will answer "No match".');
   intro.push('Add tracks first (see the README), or try the made-up catalog: npm run simulate -- --demo');
 }

@@ -1,6 +1,14 @@
 # YouTube Music
 
-When your catalog has no match, the bot looks on YouTube Music first, then on [music-table.com](music-table.md). It uses YouTube Music's own app API (InnerTube), the way the [Zemer](https://github.com/ZemerTeam/zemer-app) Android app does, which is built on [Metrolist](https://github.com/MetrolistGroup/Metrolist), and it filters what it finds with Zemer's own artist list, with female singers excluded. The code is `src/sources/youtube-music.ts` and `src/sources/zemer-whitelist.ts`.
+A `search` asks YouTube Music first, and looks on [music-table.com](music-table.md) (your catalog, then the site) only when YouTube Music has nothing that fits. It uses YouTube Music's own app API (InnerTube), the way the [Zemer](https://github.com/ZemerTeam/zemer-app) Android app does, which is built on [Metrolist](https://github.com/MetrolistGroup/Metrolist), and it filters what it finds with Zemer's own artist list, with female singers excluded. The code is `src/sources/youtube-music.ts` and `src/sources/zemer-whitelist.ts`.
+
+## Searching it alone, and albums
+
+- **`youtube` (or `yt`) and a song** asks YouTube Music only. `search` also asks YouTube Music first, but takes only songs that have **every** word you typed (an apostrophe or a small typo forgiven), because YouTube Music will always hand back its twenty nearest songs, and a near miss ("higale na" is not "Hava Nagila") should not hide the right song on music-table.com. `youtube` takes YouTube Music's answer as it is, in its order, with nothing to fall back on.
+- **A `search` (and a `youtube`) mentions albums.** It asks YouTube Music's albums at the same time as the songs, so it adds no waiting. An album counts when every word you typed is in its title or artist and at least one is in its title (typing only an artist's name is not about any one album). Under the song it found it adds a line, "💿 Also an album: …", whose 👍 sends the zip. When no song has the name you typed but an album does, the album is the answer; and when the words name an album outright (its whole title) and the songs found only resemble them, the album wins over those songs (live example: "yu di kenst" used to send an unrelated song). If the album lookup fails, the search carries on without it.
+- **`album` and a name** searches YouTube Music's albums (`search` with Zemer's album filter), keeps the ones by artists on the list, and opens the one you pick: the album page gives its artists, cover and every song in order (a long album's later pages are followed). Each song must pass the list on its own, with the album's artists standing in for a song that names none, as in Zemer. The songs that pass are kept in the catalog with their artists' ids, so each is checked again against the current list just before the zip is made.
+- **The zip** is made by the runner (`src/runner.ts`) from the album's songs, downloaded a few at a time, and `src/library/zip.ts` (a small writer: files stored as they are, since audio doesn't compress, UTF-8 names so Hebrew titles survive). It is sent as an attachment (`m.file`), named `Artist - Album.zip`, with the songs inside as `01 Title.m4a`. Over `MAX_DOWNLOAD_MB` it is split into parts at song boundaries.
+- **Not checked:** an album that comes in several pages on YouTube Music's side (more songs than one response holds; the largest album I tried, 29 songs, came in one) is followed by its continuation links, which is covered by tests but I haven't seen one live. The zip as an attachment through the Google Messages bridge hasn't been tried on a phone either.
 
 ## Zemer's artist list
 
@@ -25,6 +33,8 @@ Nothing from YouTube Music reaches the chat unless it passes Zemer's artist whit
 | Playing a song | `POST /youtubei/v1/player` as the `VISIONOS` client, version 1.02, then 1.03 and 1.01 if that one has been retired. This is the first fallback Zemer tries: its audio links come ready to use, with no signature to solve and no PoToken to mint. The best AAC stream is taken (itag 140, 128 kbps), never an Opus one, because Google Messages plays AAC. |
 | The file | A plain download from YouTube's media servers (`*.googlevideo.com`, https only), sent with the client's own User-Agent and `Range: bytes=0-`, which those servers insist on. |
 
+**Dead links, and the 403.** The media server serves the first megabyte of any link, but about one link in fifteen (measured October 2026) is "walled": it answers 403 to any request that reaches further, which is every whole-song download. Those links want a token this client can't make. So before a link is used, `YouTubeMusic` makes the very request the download will make (`Range: bytes=0-`), reads only its status and drops the body; a 403 means that link is discarded and a new one is asked for, from the next client version, then from a fresh session, up to nine tries. Songs of a megabyte or less are inside the free part and are not checked. Zemer does the same (it validates each stream and falls through to the next client). Only when every try is refused does the chat hear "YouTube Music wouldn't give me that song (its link was refused)".
+
 A song is stored in the catalog as `https://music.youtube.com/watch?v=<id>`, never as a stream link: those expire and belong to the connection that asked, so a fresh one is asked for when the song is checked or sent (and reused for 30 minutes, so checking and then sending asks once). If the media server turns a link down, one new link is asked for before giving up.
 
 ## What it doesn't use
@@ -41,7 +51,7 @@ The file is the AAC audio exactly as YouTube serves it: a fragmented MP4 (`audio
 ## Turning it off, and the order
 
 - `YOUTUBE_MUSIC=off` stops all use of it (and of Zemer's list). Songs already in the catalog from YouTube Music then can't be sent.
-- `SONG_SOURCES=music-table,youtube-music` asks music-table.com first. The default is `youtube-music,music-table`. Whichever is asked first answers if it finds anything; the other is only asked when it finds nothing or can't be reached. A song your catalog already has is sent from the catalog without asking either.
+- `SONG_SOURCES=music-table,youtube-music` asks music-table.com first. The default is `youtube-music,music-table`. YouTube Music, when it is first, is asked before the catalog. Whichever is asked first answers if it finds anything that fits; the other (and, after YouTube Music, your catalog) is only used when it finds nothing, or can't be reached. With music-table.com first, your catalog is looked in before YouTube Music is asked.
 
 ## It can break
 

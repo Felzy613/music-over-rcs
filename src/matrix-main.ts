@@ -16,8 +16,8 @@ import { memoryCheck } from './cloud/memory.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
-import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { arrangeSources, songSourceOrder } from './sources/songs.ts';
+import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat, through the mautrix-gmessages bridge and a Matrix room.
@@ -37,8 +37,8 @@ try {
   await matrix.joinRoom(config.roomID);
 
   // This machine downloads the file, so private addresses (a NAS, say) are fine and any audio format will do.
-  // When the catalog has no match the bot looks on YouTube Music and music-table.com (YOUTUBE_MUSIC=off and
-  // MUSIC_TABLE=off turn them off; SONG_SOURCES sets which is asked first).
+  // A search asks YouTube Music first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
+  // SONG_SOURCES sets which is asked first).
   const musicTable = musicTableFromEnv();
   void musicTable?.warm();
   const youTube = youTubeMusicFromEnv();
@@ -104,8 +104,10 @@ try {
   const assistant = extensions.find((extension) => extension.assistant)?.assistant;
   const pictureTakers = extensions.filter((extension) => extension.onPicture);
   const prepareImage = extensions.reduce((prepare, extension) => extension.pictures?.(prepare) ?? prepare, library.prepareImage);
-  const source = sourcesInOrder(songSourceOrder(), {
-    'youtube-music': youTube && whitelist && createYouTubeMusicSource({ youTube, catalog, whitelist }),
+  const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
+  const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
+  const { first, source } = arrangeSources(songSourceOrder(), {
+    'youtube-music': youTubeSongs,
     'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
   });
   // A YouTube Music song is checked against the list as it stands when it is sent, not only when it was found.
@@ -117,7 +119,10 @@ try {
     browse: library.browse,
     follows: library.follows,
     ...(assistant ? { assistant } : {}),
+    ...(first ? { first } : {}),
     ...(source ? { source } : {}),
+    ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
+    ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
   });
   const bridge = new BridgeWatch({
     health,
@@ -139,6 +144,7 @@ try {
     pollMs: config.pollMs,
     songGapMs: config.songGapMs,
     ...(config.downloadsAhead ? { downloadsAhead: config.downloadsAhead } : {}),
+    maxFileBytes: maxBytes,
     onBridgeSendFailure: () => bridge.sendFailed(),
     ...(pictureTakers.length > 0 ? { onPicture: (picture: IncomingPicture) => pictureTakers.forEach((extension) => extension.onPicture!(picture)) } : {}),
     log,

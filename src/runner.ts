@@ -2,7 +2,8 @@ import { AudioFetchError, type DownloadedAudio } from './audio-fetch.ts';
 import { ALL_WORDS, joinLists, type Bot } from './bot.ts';
 import type { DownloadedImage } from './image-fetch.ts';
 import type { Picture, PreparedPicture } from './library/images.ts';
-import type { Chip, Incoming, Reply } from './types.ts';
+import { createZip, zipEntryOverhead, zipName, zipSize } from './library/zip.ts';
+import type { AlbumSong, Chip, Incoming, Reply } from './types.ts';
 
 /**
  * Every message the bot writes starts with this. In a chat with yourself the bot's replies look like your own
@@ -32,6 +33,8 @@ const CHOICE_HINT = 'Reply with a number to choose.';
 const LIKE_HINT = 'To get a song from the list, tap 👍 on it.';
 /** How long a list of options stays pickable. The list is still on screen, so a 👍 or a number is still an answer to it. */
 const CHOICE_TTL_MS = 30 * 60_000;
+/** The most one file may weigh, unless told otherwise: Google Messages and the bridge take about 100 MB. */
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const ERROR_NOTICE = 'Something went wrong on my side. Please try again in a moment.';
 
 export const markBotText = (text: string): string => (isBotText(text) ? text : `${BOT_MARK} ${text}`);
@@ -80,6 +83,8 @@ export interface ChatClient {
   /** Sends a text; returns the message's id when the platform gives one (a 👍 on it can then be matched). */
   sendText(chatID: string, text: string): Promise<string | void>;
   sendAudio(chatID: string, audio: DownloadedAudio): Promise<string | void>;
+  /** Sends a file that isn't audio or a picture (an album's ZIP). Platforms that can't leave it out, and the songs go one by one. */
+  sendFile?(chatID: string, file: { data: Blob; fileName: string; mimeType: string; bytes: number }): Promise<string | void>;
   /** Sends a picture (album art). Platforms that can't leave it out, and pictures are skipped. */
   sendImage?(chatID: string, image: DownloadedImage): Promise<string | void>;
   /**
@@ -156,6 +161,8 @@ export interface RunnerOptions {
    * A song's card waits with it. 0, the default, sends them as fast as they're ready.
    */
   songGapMs?: number;
+  /** The most one file sent to the chat may weigh, in bytes; an album bigger than this goes as several ZIPs. Defaults to 100 MB. */
+  maxFileBytes?: number;
   /** Waits; tests pass one that doesn't. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -336,6 +343,85 @@ export function createRunner(options: RunnerOptions): Runner {
     return lastRequest !== undefined && lastRequest.text === normalize(message.text) && now() - lastRequest.at < REPEAT_WINDOW_MS;
   }
 
+  /**
+   * An album: its songs downloaded (a few at a time, in album order) and sent as one ZIP, named like the album, with each
+   * song "01 Title.m4a". A bigger album than a chat takes goes as several ZIPs, each saying which part it is. A chat that
+   * can't take a file gets the songs one by one instead. A song that can't be had is left out, and the chat is told.
+   */
+  async function sendAlbum(album: Extract<Reply, { kind: 'album' }>): Promise<void> {
+    const got: Array<{ song: AlbumSong; file: DownloadedAudio }> = [];
+    const missing: string[] = [];
+    const slots = new Array<DownloadedAudio | undefined>(album.songs.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (let i = next++; i < album.songs.length; i = next++) {
+        const song = album.songs[i]!;
+        try {
+          slots[i] = await options.fetchAudio(song.url, song.title);
+        } catch (err) {
+          log(`could not get ${song.title} ready: ${errorText(err)}`);
+          missing.push(song.title);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(DOWNLOADS_AHEAD, album.songs.length) }, worker));
+    album.songs.forEach((song, i) => slots[i] && got.push({ song, file: slots[i]! }));
+    const said = async (text: string): Promise<void> => {
+      if (allowSend()) await chat.sendText(chatID, markBotText(text));
+    };
+    if (got.length === 0) return said(`I couldn't get any of "${album.title}".`);
+
+    if (!chat.sendFile) {
+      for (const { song, file } of got) {
+        if (!allowSend()) return log(`send limit reached (${maxSends} a minute); dropping the rest of this album`);
+        await songTurn();
+        try {
+          await chat.sendAudio(chatID, file);
+          lastSongAt = now();
+          log(`-> audio ${song.title}`);
+        } catch (err) {
+          log(`could not send audio: ${errorText(err)}`);
+          missing.push(song.title);
+        }
+      }
+    } else {
+      const digits = Math.max(2, String(Math.max(...got.map(({ song }) => song.number))).length);
+      const entries = got.map(({ song, file }): { name: string; size: number } => {
+        const extension = /\.[a-z0-9]{2,5}$/i.exec(file.fileName)?.[0].toLowerCase() ?? '.audio';
+        return { name: zipName(`${String(song.number).padStart(digits, '0')} ${song.title}`) + extension, size: file.bytes };
+      });
+      // Pack in album order, a new ZIP whenever the next song would not fit in one file.
+      const limit = options.maxFileBytes ?? MAX_FILE_BYTES;
+      const parts: number[][] = [[]];
+      let used = zipSize([]);
+      entries.forEach((entry, i) => {
+        const cost = zipEntryOverhead(entry.name) + entry.size;
+        if (parts.at(-1)!.length > 0 && used + cost > limit) {
+          parts.push([]);
+          used = zipSize([]);
+        }
+        parts.at(-1)!.push(i);
+        used += cost;
+      });
+      const base = zipName(`${album.artist ? `${album.artist} - ` : ''}${album.title}`);
+      for (const [p, indexes] of parts.entries()) {
+        if (!allowSend()) return log(`send limit reached (${maxSends} a minute); dropping the rest of this album`);
+        await songTurn();
+        const data = createZip(await Promise.all(indexes.map(async (i) => ({ name: entries[i]!.name, data: new Uint8Array(await got[i]!.file.data.arrayBuffer()) }))));
+        const fileName = `${base}${parts.length > 1 ? ` (part ${p + 1} of ${parts.length})` : ''}.zip`;
+        try {
+          await chat.sendFile(chatID, { data: new Blob([data], { type: 'application/zip' }), fileName, mimeType: 'application/zip', bytes: data.length });
+        } catch (err) {
+          log(`could not send the zip: ${errorText(err)}`);
+          return said(`I couldn't send "${album.title}" as a zip.`);
+        }
+        lastSongAt = now();
+        log(`-> zip ${fileName} (${indexes.length} songs, ${data.length} bytes)`);
+      }
+    }
+    if (missing.length > 0) await said(`I couldn't get ${missing.length === 1 ? 'one song' : `${missing.length} songs`} of "${album.title}": ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}.`);
+  }
+
   async function respond(answer: Reply[]): Promise<void> {
     const replies = chat.reactions ? answer : joinLists(answer);
     // Songs start downloading ahead of their turn, so a song gets ready while its picture is drawn and sent; at most
@@ -424,6 +510,8 @@ export function createRunner(options: RunnerOptions): Runner {
           sentPictures += 1;
           startPictures();
         }
+      } else if (reply.kind === 'album') {
+        await sendAlbum(reply);
       } else {
         if (reply.chips) setChoices({ chips: reply.chips, at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
         // Options need a word on how to pick one, unless the text already gives it.

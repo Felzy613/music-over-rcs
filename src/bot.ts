@@ -5,7 +5,7 @@ import { categoryFor } from './library/category-list.ts';
 import type { Follows } from './library/follows.ts';
 import { seasonOn } from './library/seasons.ts';
 import { parseQuery, tokenize } from './query.ts';
-import { editDistance, namesSong } from './sources/relevance.ts';
+import { editDistance, fitsAll, namesSong, touchesTitle } from './sources/relevance.ts';
 import { splitTitle } from './sources/titles.ts';
 import type { Chip, Incoming, Reply, Track } from './types.ts';
 
@@ -21,9 +21,41 @@ export class SourceError extends Error {
  * Somewhere to look when the catalog has no match. It returns tracks that are already stored in the catalog,
  * so choices and replies work the same as for any other track.
  */
+export interface LookupOptions {
+  /**
+   * Keep only songs that fit the request's words (apostrophes and a typo or two forgiven), best first. For a source
+   * that returns loosely related songs and is asked first, so that what it hands back really answers the request and
+   * the next source is asked when nothing does.
+   */
+  relevant?: boolean;
+}
+
 export interface TrackSource {
   name: string;
-  lookup(query: string, limit: number): Promise<Track[]>;
+  /** Said when a search on this source alone finds nothing: why that can be ("it only shows artists on Zemer's list"). */
+  hint?: string;
+  lookup(query: string, limit: number, options?: LookupOptions): Promise<Track[]>;
+}
+
+/** An album a source offers. `id` is whatever the source needs to open it again. */
+export interface Album {
+  id: string;
+  title: string;
+  artist: string;
+  year?: number | undefined;
+  cover?: string | undefined;
+}
+
+/** Somewhere to find albums, and open one into its songs. Like a TrackSource, it stores its songs in the catalog. */
+export interface AlbumSource {
+  name: string;
+  hint?: string;
+  search(query: string, limit: number): Promise<Album[]>;
+  /**
+   * The album's songs that may be sent, in album order with their numbers, and how many were left out. Rejects with a
+   * SourceError whose message says why when none of it may be sent.
+   */
+  open(id: string): Promise<{ album: Album; songs: Array<{ number: number; track: Track }>; leftOut: number }>;
 }
 
 export interface BotDeps {
@@ -35,6 +67,15 @@ export interface BotDeps {
   };
   checkAudio(url: string): Promise<AudioCheck>;
   source?: TrackSource;
+  /**
+   * A source asked before the catalog (YouTube Music, by default): what it finds with "search" is the answer, and only
+   * when it finds nothing, or can't be reached, are the catalog and `source` (music-table.com) looked in.
+   */
+  first?: TrackSource;
+  /** One source asked on its own, by "youtube …": the catalog is skipped. */
+  youtube?: TrackSource;
+  /** Albums, by "album …": found by name and sent as a ZIP. */
+  albums?: AlbumSource;
   /** Hears about every song about to be sent, so the most played ones can be kept ready. */
   onPlay?: (track: Track) => void;
   /** Lists to browse: "trending", "new", an artist's songs, holidays, and "more". */
@@ -74,6 +115,18 @@ const GREETINGS = new Set(['help', 'hi', 'hello', 'hey', 'start', 'menu', 'comma
  */
 const FIRST_WORD = /^\s*(\p{L}+)[\s:,-]*/u;
 const isSearch = (word: string): boolean => editDistance(word.toLowerCase(), 'search') <= 1;
+/** "youtube" (a letter off is fine), or its short forms: look on YouTube Music alone. */
+const isYouTube = (word: string): boolean => ['yt', 'ytm', 'ytmusic'].includes(word.toLowerCase()) || editDistance(word.toLowerCase(), 'youtube') <= 1;
+/** "album" or "albums". */
+const isAlbum = (word: string): boolean => ['album', 'albums'].includes(word.toLowerCase());
+/** Songs checked at once before an album goes out; each is a request to the source, so only a few. */
+const ALBUM_CHECKS_AT_ONCE = 4;
+
+async function inBatches<T, R>(items: readonly T[], size: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size) out.push(...(await Promise.all(items.slice(i, i + size).map(run))));
+  return out;
+}
 
 /** What follows a message's first word when that word is `word` ("Jarvis, look at this" → "look at this"), else undefined. */
 export function afterWord(text: string, word: string): string | undefined {
@@ -88,6 +141,7 @@ export const HELP_TEXT =
 export const BROWSE_HELP_TEXT = [
   'Start each message with a command:',
   '"search" and a song or an artist, like "search lipa vnusni".',
+  '"youtube" and a song looks only on YouTube Music; "album" and a name finds an album and sends all of it as a zip.',
   '"trending", "new", "chanukah", "purim", "wedding" or "vocal" for lists, "more" for the next ones, and "all" for every song on a list.',
   '"follow" and an artist to get their new songs as soon as they\'re out ("unfollow", "following").',
   'Tap 👍 on a song in a list to get it.',
@@ -394,14 +448,37 @@ export function createBot(deps: BotDeps): Bot {
     if (tokens.every((token) => token.length < 2)) {
       return [say(`Text "search" and ${deps.browse ? 'a song or an artist, like "search lipa vnusni"' : 'a song name, like "search blue horizon night owls"'}.`)];
     }
+    const albums = albumsFor(raw, tokens); // asked now, alongside the songs, so it costs no extra waiting
+    const { replies, found, named } = await searchSongs(raw, tokens);
+    return withAlbums(replies, found, named, await albums, tokens);
+  }
+
+  /**
+   * What "search" finds as songs: whether it found any (otherwise the replies say why not), and whether one of them is
+   * the song the words name.
+   */
+  async function searchSongs(raw: string, tokens: string[]): Promise<{ replies: Reply[]; found: boolean; named: boolean }> {
+    const hit = (replies: Reply[], songs: Track[] = []) => ({ replies, found: true, named: songs.length === 0 || songs.some((song) => namesSong(song, tokens)) });
+    const miss = (replies: Reply[]) => ({ replies, found: false, named: false });
+    // The first source is asked before the catalog; what it finds that fits the words is the answer.
+    const failures: string[] = [];
+    if (deps.first) {
+      try {
+        const found = await deps.first.lookup(raw, MAX_CHOICES, { relevant: true });
+        if (found.length > 0) return hit(await pickFrom(found, tokens), found);
+      } catch (err) {
+        if (!(err instanceof SourceError)) throw err;
+        failures.push(`${deps.first.name}: ${err.message}`);
+      }
+    }
     const local = deps.catalog.search(raw, MAX_CHOICES);
     // Naming exactly one song the catalog has is answered at once, without asking anyone else.
     const named = local.filter((track) => namesSong(track, tokens));
-    if (named.length === 1) return play(named[0]!);
+    if (named.length === 1) return hit(await play(named[0]!), named);
 
     // Just an artist's name: their songs, newest first.
     const byArtist = artistList(tokens);
-    if (byArtist) return byArtist;
+    if (byArtist) return hit(await byArtist);
 
     // Otherwise the catalog may hold only some of what fits (the songs synced or asked for before), so the other
     // source is asked too and its results come first.
@@ -411,18 +488,66 @@ export function createBot(deps: BotDeps): Bot {
         found = merge(await deps.source.lookup(raw, MAX_CHOICES), local, MAX_CHOICES);
       } catch (err) {
         if (!(err instanceof SourceError)) throw err;
-        if (local.length === 0) return [say(`I couldn't search ${deps.source.name}: ${err.message}.`)];
+        failures.push(`${deps.source.name}: ${err.message}`);
+        if (local.length === 0) {
+          // With one source down, the one that was asked says why; with both, each does.
+          return miss([say(failures.length === 1 ? `I couldn't search ${deps.source.name}: ${err.message}.` : `I couldn't search ${[deps.first!.name, deps.source.name].join(' or ')}: ${failures.join('; ')}.`)]);
+        }
       }
     }
     if (found.length === 0) {
-      const also = deps.source ? ` (I looked on ${deps.source.name} too)` : '';
-      return [say(`No match for "${raw}"${also}. Try the artist and title, or fewer words.`)];
+      const asked = [deps.first?.name, deps.source?.name].filter((name): name is string => name !== undefined);
+      const also = asked.length > 0 ? ` (I looked on ${asked.join(' and ')} too)` : '';
+      return miss([say(`No match for "${raw}"${also}. Try the artist and title, or fewer words.`)]);
     }
-    if (found.length === 1) return play(found[0]!);
+    return hit(await pickFrom(found, tokens), found);
+  }
 
+  /**
+   * The albums the request's words are about: every word is in the album's title or artist, and at least one in the title (a
+   * request that is only an artist's name isn't about any one album). Never fails and never waits long: it is a nicety.
+   */
+  function albumsFor(raw: string, tokens: string[]): Promise<Album[]> {
+    if (!deps.albums) return Promise.resolve([]);
+    return deps.albums.search(raw, MAX_CHOICES).then(
+      (found) => found.filter((album) => fitsAll(album, tokens) && touchesTitle(album, tokens)).slice(0, 2),
+      () => [],
+    );
+  }
+
+  /**
+   * Says when the words match an album. Under the songs found, a line for each with the album's 👍 on it. When no song was
+   * found, or the words name an album outright and no song found has that name (songs that only resemble the words),
+   * the albums are the answer, as a list to pick from.
+   */
+  function withAlbums(replies: Reply[], foundSongs: boolean, namedSong: boolean, albums: Album[], tokens: string[]): Reply[] {
+    if (albums.length === 0) return replies;
+    const named = albums.filter((album) => namesSong(album, tokens));
+    if (!foundSongs || (!namedSong && named.length > 0)) {
+      if (foundSongs) albums = named;
+      return listReplies(
+        albums.length === 1 ? "No song by that name, but there's an album:" : 'No song by that name, but there are albums:',
+        albums.map((album) => ({ line: albumLine(album), postback: `album:${album.id}` })),
+        'Tap 👍 on one to get the whole album as a zip.',
+        albums.map((album, i) => ({ label: chipLabel(i + 1, album.title), postback: `album:${album.id}` })),
+        CHOICE_VALID_MS,
+      );
+    }
+    return [
+      ...replies,
+      ...albums.map((album): Reply => ({
+        kind: 'text',
+        text: `💿 Also an album: ${albumLine(album)}. 👍 this, or text "album ${album.title}", to get all of it as a zip.`,
+        postback: `album:${album.id}`,
+      })),
+    ];
+  }
+
+  /** Songs that fit a request: the one it names, if it names one, else a list to choose from. */
+  async function pickFrom(found: Track[], tokens: string[]): Promise<Reply[]> {
+    if (found.length === 1) return play(found[0]!);
     const exact = found.filter((track) => namesSong(track, tokens));
     if (exact.length === 1) return play(exact[0]!);
-
     return listReplies(
       'Which one?',
       found.map((track) => ({ line: describe(track), postback: `play:${track.id}` })),
@@ -430,6 +555,95 @@ export function createBot(deps: BotDeps): Bot {
       found.map((track, i) => ({ label: chipLabel(i + 1, track.title), postback: `play:${track.id}` })),
       CHOICE_VALID_MS,
     );
+  }
+
+  /** "youtube …": the same as "search", but only one source is asked and the catalog isn't looked in. */
+  async function searchOn(source: TrackSource | undefined, raw: string): Promise<Reply[]> {
+    if (!source) return [say('YouTube Music is turned off (YOUTUBE_MUSIC=off in .env), so there is nothing to search there.')];
+    // "youtube music …" is fine too.
+    const query = raw.replace(/^music\b[\s:,-]*/i, '').trim();
+    const tokens = parseQuery(query);
+    if (tokens.every((token) => token.length < 2)) return [say('Text "youtube" and a song or an artist, like "youtube lipa vnusni".')];
+    const albums = albumsFor(query, tokens);
+    let found: Track[];
+    try {
+      found = await source.lookup(query, MAX_CHOICES);
+    } catch (err) {
+      if (!(err instanceof SourceError)) throw err;
+      return [say(`I couldn't search ${source.name}: ${err.message}.`)];
+    }
+    if (found.length === 0) {
+      const why = source.hint ? ` (${source.hint})` : '';
+      return withAlbums([say(`No match for "${query}" on ${source.name}${why}. Try the artist and title, or fewer words.`)], false, false, await albums, tokens);
+    }
+    return withAlbums(await pickFrom(found, tokens), true, found.some((song) => namesSong(song, tokens)), await albums, tokens);
+  }
+
+  const albumLine = (album: Album): string => `${album.artist ? `${album.artist} — ` : ''}${album.title}${album.year ? ` (${album.year})` : ''}`;
+
+  /** "album …": the album the words name (sent at once), or the albums that fit to choose from. */
+  async function albumSearch(raw: string): Promise<Reply[]> {
+    const albums = deps.albums;
+    if (!albums) return [say('Albums come from YouTube Music, which is turned off (YOUTUBE_MUSIC=off in .env).')];
+    const tokens = parseQuery(raw);
+    if (tokens.every((token) => token.length < 2)) return [say('Text "album" and an album or an artist, like "album michoel schnitzler".')];
+    let found: Album[];
+    try {
+      found = await albums.search(raw, MAX_CHOICES);
+    } catch (err) {
+      if (!(err instanceof SourceError)) throw err;
+      return [say(`I couldn't search albums on ${albums.name}: ${err.message}.`)];
+    }
+    if (found.length === 0) {
+      const why = albums.hint ? ` (${albums.hint})` : '';
+      return [say(`No album for "${raw}" on ${albums.name}${why}. Try the artist and the album's name, or fewer words.`)];
+    }
+    // One album that fits, or one that the words name outright (its title, with or without the artist), goes at once.
+    const named = found.filter((album) => namesSong(album, tokens));
+    if (found.length === 1) return sendAlbum(found[0]!.id);
+    if (named.length === 1) return sendAlbum(named[0]!.id);
+    return listReplies(
+      'Which album?',
+      found.map((album) => ({ line: albumLine(album), postback: `album:${album.id}` })),
+      'Tap 👍 on one to get the whole album as a zip.',
+      found.map((album, i) => ({ label: chipLabel(i + 1, album.title), postback: `album:${album.id}` })),
+      CHOICE_VALID_MS,
+    );
+  }
+
+  /** An album as one reply for the runner to zip: its cover first, and a word on any songs that had to stay out. */
+  async function sendAlbum(id: string): Promise<Reply[]> {
+    const albums = deps.albums;
+    if (!albums) return [say('Albums come from YouTube Music, which is turned off (YOUTUBE_MUSIC=off in .env).')];
+    let opened: Awaited<ReturnType<AlbumSource['open']>>;
+    try {
+      opened = await albums.open(id);
+    } catch (err) {
+      if (!(err instanceof SourceError)) throw err;
+      return [say(`I can't send that album: ${err.message}.`)];
+    }
+    const { album, songs, leftOut } = opened;
+    const name = albumLine(album);
+    // Every song is checked the way a single song is (the list it must be on, its size), so nothing goes that couldn't alone.
+    const checks = await inBatches(songs, ALBUM_CHECKS_AT_ONCE, (song) => deps.checkAudio(song.track.url));
+    const sendable = songs.filter((_, i) => checks[i]!.ok);
+    const refused = checks.flatMap((check) => (check.ok ? [] : [check.reason]));
+    if (sendable.length === 0) {
+      return [say(`I can't send "${name}": ${refused[0] ?? 'none of its songs may be sent'}.`)];
+    }
+    const bytes = checks.reduce((total, check) => total + (check.ok ? (check.bytes ?? 0) : 0), 0);
+    const out = leftOut + refused.length;
+    const size = bytes > 0 ? `, about ${Math.max(1, Math.round(bytes / (1024 * 1024)))} MB` : '';
+    return [
+      album.cover ? { kind: 'image', url: album.cover, caption: { title: album.title, artist: album.artist } } : say(`🎵 ${name}`),
+      say(`${sendable.length} song${sendable.length === 1 ? '' : 's'}${size}${out > 0 ? `; ${out} left out` : ''}. Zipping it up, one moment.`),
+      {
+        kind: 'album',
+        title: album.title,
+        artist: album.artist,
+        songs: sendable.map((song) => ({ number: song.number, title: song.track.title, url: song.track.url })),
+      },
+    ];
   }
 
   /** "jarvis …": the rest of the message, whole, goes to the assistant. Nothing is said when it's on its way. */
@@ -454,7 +668,11 @@ export function createBot(deps: BotDeps): Bot {
     async handle(msg) {
       if (msg.postback !== undefined) {
         const all = /^all:(.+)$/s.exec(msg.postback)?.[1];
+        // "all" on a list of albums: one album is a whole zip, so they are not all sent at once.
+        if (all !== undefined && all.split('|').every((item) => item.startsWith('album:'))) return [say('That list is albums; tap 👍 on the one you want and I\'ll send all of it as a zip.')];
         if (all !== undefined) return playAll(all.split('|'));
+        const albumId = /^album:(.+)$/.exec(msg.postback)?.[1];
+        if (albumId !== undefined) return sendAlbum(albumId);
         const album = /^post:(.+)$/.exec(msg.postback)?.[1];
         if (album !== undefined) {
           const tracks = deps.catalog.postTracks?.(album) ?? [];
@@ -488,6 +706,8 @@ export function createBot(deps: BotDeps): Bot {
       }
       const first = FIRST_WORD.exec(raw);
       if (first && isSearch(first[1]!)) return search(raw.slice(first[0].length).trim());
+      if (first && isYouTube(first[1]!)) return searchOn(deps.youtube, raw.slice(first[0].length).trim());
+      if (first && isAlbum(first[1]!)) return albumSearch(raw.slice(first[0].length).trim());
       // "all" with no list open (the runner answers it when one is).
       if (ALL_WORDS.has(words.join(' '))) {
         return [say(`Text ${deps.browse ? '"trending", "new" or ' : ''}"search" and a song first; then "all" sends every song on the list.`)];

@@ -33,7 +33,7 @@ It listens on `127.0.0.1` only, and answers only pages loaded from that address 
 
 ```bash
 npm run simulate -- --demo     # three made-up songs, no network
-npm run simulate               # your catalog, and YouTube Music and music-table.com when the catalog has no match
+npm run simulate               # YouTube Music first, then your catalog and music-table.com
 npm run simulate -- --offline  # your catalog only; no link checks
 ```
 
