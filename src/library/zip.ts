@@ -40,37 +40,32 @@ export function zipName(name: string): string {
   return Array.from(cleaned).slice(0, 120).join('') || 'file';
 }
 
-/** The archive holding these files, in this order. */
-export function createZip(entries: readonly ZipEntry[]): Uint8Array {
-  if (entries.length > 0xfffe) throw new Error('too many files for one archive');
-  const out = new Uint8Array(zipSize(entries.map((entry) => ({ name: entry.name, size: entry.data.length }))));
+/** An entry's local header: what comes just before its data. */
+function localHeader(name: Uint8Array, crc: number, size: number): Uint8Array {
+  const out = new Uint8Array(LOCAL_HEADER + name.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, 0x04034b50, true); // local file header
+  view.setUint16(4, VERSION, true);
+  view.setUint16(6, UTF8_NAMES, true);
+  view.setUint16(8, 0, true); // stored
+  view.setUint16(10, 0, true); // time
+  view.setUint16(12, DOS_DATE_1980, true);
+  view.setUint32(14, crc, true);
+  view.setUint32(18, size, true);
+  view.setUint32(22, size, true);
+  view.setUint16(26, name.length, true);
+  view.setUint16(28, 0, true); // no extra field
+  out.set(name, LOCAL_HEADER);
+  return out;
+}
+
+/** The central directory and the end record that close an archive whose entries start at `start` (the directory's offset). */
+function directory(entries: ReadonlyArray<{ name: Uint8Array; crc: number; size: number; offset: number }>, start: number): Uint8Array {
+  const length = entries.reduce((total, entry) => total + CENTRAL_HEADER + entry.name.length, 0);
+  const out = new Uint8Array(length + END_RECORD);
   const view = new DataView(out.buffer);
   let at = 0;
-  const central: Array<{ name: Uint8Array; crc: number; size: number; offset: number }> = [];
-
   for (const entry of entries) {
-    const name = encoder.encode(entry.name);
-    const crc = crc32(entry.data);
-    if (entry.data.length > 0xfffffffe || at > 0xfffffffe) throw new Error('the archive is too big');
-    central.push({ name, crc, size: entry.data.length, offset: at });
-    view.setUint32(at, 0x04034b50, true); // local file header
-    view.setUint16(at + 4, VERSION, true);
-    view.setUint16(at + 6, UTF8_NAMES, true);
-    view.setUint16(at + 8, 0, true); // stored
-    view.setUint16(at + 10, 0, true); // time
-    view.setUint16(at + 12, DOS_DATE_1980, true);
-    view.setUint32(at + 14, crc, true);
-    view.setUint32(at + 18, entry.data.length, true);
-    view.setUint32(at + 22, entry.data.length, true);
-    view.setUint16(at + 26, name.length, true);
-    view.setUint16(at + 28, 0, true); // no extra field
-    out.set(name, at + LOCAL_HEADER);
-    out.set(entry.data, at + LOCAL_HEADER + name.length);
-    at += LOCAL_HEADER + name.length + entry.data.length;
-  }
-
-  const centralStart = at;
-  for (const entry of central) {
     view.setUint32(at, 0x02014b50, true); // central directory header
     view.setUint16(at + 4, VERSION, true); // made by
     view.setUint16(at + 6, VERSION, true); // needed to extract
@@ -87,11 +82,59 @@ export function createZip(entries: readonly ZipEntry[]): Uint8Array {
     out.set(entry.name, at + CENTRAL_HEADER);
     at += CENTRAL_HEADER + entry.name.length;
   }
-
   view.setUint32(at, 0x06054b50, true); // end of central directory
-  view.setUint16(at + 8, central.length, true);
-  view.setUint16(at + 10, central.length, true);
-  view.setUint32(at + 12, at - centralStart, true);
-  view.setUint32(at + 16, centralStart, true);
+  view.setUint16(at + 8, entries.length, true);
+  view.setUint16(at + 10, entries.length, true);
+  view.setUint32(at + 12, length, true);
+  view.setUint32(at + 16, start, true);
   return out;
+}
+
+/** The headers and the directory for files of these names, checksums and sizes, in order. */
+function layout(entries: ReadonlyArray<{ name: string; crc: number; size: number }>): { headers: Uint8Array[]; directory: Uint8Array } {
+  if (entries.length > 0xfffe) throw new Error('too many files for one archive');
+  const placed: Array<{ name: Uint8Array; crc: number; size: number; offset: number }> = [];
+  const headers: Uint8Array[] = [];
+  let at = 0;
+  for (const entry of entries) {
+    const name = encoder.encode(entry.name);
+    if (entry.size > 0xfffffffe || at > 0xfffffffe) throw new Error('the archive is too big');
+    placed.push({ name, crc: entry.crc, size: entry.size, offset: at });
+    const header = localHeader(name, entry.crc, entry.size);
+    headers.push(header);
+    at += header.length + entry.size;
+  }
+  return { headers, directory: directory(placed, at) };
+}
+
+/** The archive holding these files, in this order. */
+export function createZip(entries: readonly ZipEntry[]): Uint8Array {
+  const { headers, directory: end } = layout(entries.map((entry) => ({ name: entry.name, crc: crc32(entry.data), size: entry.data.length })));
+  const out = new Uint8Array(zipSize(entries.map((entry) => ({ name: entry.name, size: entry.data.length }))));
+  let at = 0;
+  entries.forEach((entry, i) => {
+    out.set(headers[i]!, at);
+    at += headers[i]!.length;
+    out.set(entry.data, at);
+    at += entry.data.length;
+  });
+  out.set(end, at);
+  return out;
+}
+
+/** The CRC-32 a ZIP keeps for a file, read a chunk at a time, so the file is never copied whole. */
+export async function blobCrc32(blob: Blob): Promise<number> {
+  let crc = 0;
+  for await (const chunk of blob.stream() as unknown as AsyncIterable<Uint8Array>) crc = crc32(chunk, crc);
+  return crc;
+}
+
+/**
+ * The same archive as `createZip`, made of the files as they are: the Blob it returns refers to them rather than copying
+ * them into one buffer, which matters on a small host where a part of an album is tens of megabytes. Each entry brings
+ * its checksum (`blobCrc32`), worked out when the file arrived.
+ */
+export function zipBlob(entries: ReadonlyArray<{ name: string; data: Blob; crc: number }>): Blob {
+  const { headers, directory: end } = layout(entries.map((entry) => ({ name: entry.name, crc: entry.crc, size: entry.data.size })));
+  return new Blob([...entries.flatMap((entry, i) => [headers[i]!, entry.data]), end] as unknown as ConstructorParameters<typeof Blob>[0], { type: 'application/zip' });
 }

@@ -641,7 +641,10 @@ export function createBot(deps: BotDeps): Bot {
         kind: 'album',
         title: album.title,
         artist: album.artist,
-        songs: sendable.map((song) => ({ number: song.number, title: song.track.title, url: song.track.url })),
+        songs: songs.flatMap((song, i) => {
+          const check = checks[i]!;
+          return check.ok ? [{ number: song.number, title: song.track.title, url: song.track.url, ...(check.bytes ? { bytes: check.bytes } : {}) }] : [];
+        }),
       },
     ];
   }

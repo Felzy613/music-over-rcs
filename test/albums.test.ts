@@ -235,10 +235,11 @@ describe('albums on YouTube Music', () => {
         kind: 'album',
         title: 'Shabbuson',
         artist: MICHOEL,
+        // Each song's size comes along, so the runner can plan the zip parts before downloading anything.
         songs: [
-          { number: 1, title: 'Opening', url: youTube.trackUrl('albumsong01') },
-          { number: 2, title: 'הנחת תפילין', url: youTube.trackUrl('albumsong02') },
-          { number: 5, title: 'Closing', url: youTube.trackUrl('albumsong04') },
+          { number: 1, title: 'Opening', url: youTube.trackUrl('albumsong01'), bytes: 4000 },
+          { number: 2, title: 'הנחת תפילין', url: youTube.trackUrl('albumsong02'), bytes: 4000 },
+          { number: 5, title: 'Closing', url: youTube.trackUrl('albumsong04'), bytes: 4000 },
         ],
       });
     });
@@ -414,7 +415,15 @@ describe('sending an album as a zip', () => {
     zemer.reset(LISTED);
   });
 
-  function makeRunner(options: { maxFileBytes?: number; noFiles?: boolean; failSong?: string } = {}) {
+  /** What happened, in order: "get <title>" when a download starts, "got <title>" when it ends, "zip <file>" when one is sent. */
+  let events: string[] = [];
+  let inFlight = 0;
+  let mostInFlight = 0;
+
+  function makeRunner(options: { maxFileBytes?: number; noFiles?: boolean; failSong?: string; downloadsAhead?: number } = {}) {
+    events = [];
+    inFlight = 0;
+    mostInFlight = 0;
     const catalog = new Catalog(':memory:');
     const youTube = new YouTubeMusic({ baseUrl: youtube.url });
     const whitelist = new ZemerWhitelist({ baseUrl: zemer.url, state: catalog });
@@ -437,18 +446,37 @@ describe('sending an album as a zip', () => {
           sendAudio: matrixClient.sendAudio.bind(matrixClient),
           reactions: true,
         }
-      : matrixClient;
+      : {
+          listMessages: matrixClient.listMessages.bind(matrixClient),
+          sendText: matrixClient.sendText.bind(matrixClient),
+          sendAudio: matrixClient.sendAudio.bind(matrixClient),
+          reactions: true,
+          sendFile: async (room: string, file: { data: Blob; fileName: string; mimeType: string; bytes: number }) => {
+            events.push(`zip ${file.fileName}`);
+            return matrixClient.sendFile(room, file);
+          },
+        };
     return createRunner({
       chat,
       bot,
       chatID: matrix.roomId,
       fetchAudio: async (url, title) => {
-        if (options.failSong && url.endsWith(options.failSong)) throw new Error('boom');
-        return audio.fetchAudio(url, title);
+        const name = (title ?? url).replace(/^.* — /, '');
+        events.push(`get ${name}`);
+        inFlight += 1;
+        mostInFlight = Math.max(mostInFlight, inFlight);
+        try {
+          if (options.failSong && url.endsWith(options.failSong)) throw new Error('boom');
+          return await audio.fetchAudio(url, title);
+        } finally {
+          inFlight -= 1;
+          events.push(`got ${name}`);
+        }
       },
       pollMs: 20,
       log: () => {},
       ...(options.maxFileBytes !== undefined ? { maxFileBytes: options.maxFileBytes } : {}),
+      ...(options.downloadsAhead !== undefined ? { downloadsAhead: options.downloadsAhead } : {}),
     });
   }
 
@@ -485,6 +513,56 @@ describe('sending an album as a zip', () => {
     assert.deepEqual(files.map((event) => event.content.filename), ['Michoel Schnitzler - Shabbuson (part 1 of 2).zip', 'Michoel Schnitzler - Shabbuson (part 2 of 2).zip']);
     assert.deepEqual(readZip(matrix.uploads[0]!.bytes).map((entry) => entry.name), ['01 Opening.m4a', '02 הנחת תפילין.m4a']);
     assert.deepEqual(readZip(matrix.uploads[1]!.bytes).map((entry) => entry.name), ['05 Closing.m4a']);
+    for (const upload of matrix.uploads) assert.ok(upload.bytes.length <= 8_700);
+  });
+
+  test('on a small host only one part is held at a time: its songs one by one, then it goes, then the next part’s', async () => {
+    // Render's settings, scaled down: one download at a time, and two of these songs to a zip.
+    const runner = makeRunner({ maxFileBytes: 8_700, downloadsAhead: 1 });
+    await ask(runner, 'album shabbuson');
+    assert.deepEqual(events, [
+      'get Opening',
+      'got Opening',
+      'get הנחת תפילין',
+      'got הנחת תפילין',
+      'zip Michoel Schnitzler - Shabbuson (part 1 of 2).zip',
+      'get Closing',
+      'got Closing',
+      'zip Michoel Schnitzler - Shabbuson (part 2 of 2).zip',
+    ]);
+    assert.equal(mostInFlight, 1);
+  });
+
+  test('a bigger host downloads a few ahead, but never more than it is told', async () => {
+    const runner = makeRunner({ downloadsAhead: 2 });
+    await ask(runner, 'album shabbuson');
+    assert.equal(mostInFlight, 2);
+    assert.deepEqual(readZip(matrix.uploads[0]!.bytes).map((entry) => entry.name), ['01 Opening.m4a', '02 הנחת תפילין.m4a', '05 Closing.m4a']);
+  });
+
+  test('an album whose sizes are not known in advance is still split to fit, its parts numbered as they go', async () => {
+    const sizeless = createBot({
+      catalog: new Catalog(':memory:'),
+      checkAudio: async () => ({ ok: true, type: 'audio/mp4' }),
+    });
+    const youTube = new YouTubeMusic({ baseUrl: youtube.url });
+    const songs = ['albumsong01', 'albumsong02', 'albumsong04'].map((id, i) => ({ number: i + 1, title: `Song ${i + 1}`, url: youTube.trackUrl(id) }));
+    const bot = { handle: async (): Promise<Reply[]> => [{ kind: 'album', title: 'No Sizes', artist: MICHOEL, songs }] };
+    void sizeless;
+    const runner = createRunner({
+      chat: new MatrixClient({ token: matrix.token, homeserver: matrix.url }),
+      bot,
+      chatID: matrix.roomId,
+      fetchAudio: (url, title) => resolvingYouTubeAudio(youTube, { checkAudio: async () => ({ ok: true, type: 'x' }), fetchAudio: (u, t) => fetchAudio(u, t) }).fetchAudio(url, title),
+      pollMs: 20,
+      log: () => {},
+      maxFileBytes: 8_700,
+      downloadsAhead: 1,
+    });
+    await ask(runner, 'album no sizes');
+    const files = matrix.sent.filter((event) => event.content.msgtype === 'm.file').map((event) => event.content.filename);
+    assert.deepEqual(files, ['Michoel Schnitzler - No Sizes (part 1).zip', 'Michoel Schnitzler - No Sizes (part 2).zip']);
+    assert.deepEqual(readZip(matrix.uploads[1]!.bytes).map((entry) => entry.name), ['03 Song 3.m4a']);
     for (const upload of matrix.uploads) assert.ok(upload.bytes.length <= 8_700);
   });
 

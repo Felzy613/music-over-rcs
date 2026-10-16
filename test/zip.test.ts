@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { crc32 } from 'node:zlib';
-import { createZip, zipEntryOverhead, zipName, zipSize } from '../src/library/zip.ts';
+import { blobCrc32, createZip, zipBlob, zipEntryOverhead, zipName, zipSize } from '../src/library/zip.ts';
 import { readZip } from './helpers/read-zip.ts';
 
 describe('zip', () => {
@@ -62,6 +62,22 @@ describe('zip', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('the Blob version, made from the files as they are, is the same archive byte for byte', async () => {
+    const blobs = files.map((file) => ({ name: file.name, data: new Blob([file.data]) }));
+    const entries = await Promise.all(blobs.map(async (entry) => ({ ...entry, crc: await blobCrc32(entry.data) })));
+    entries.forEach((entry, i) => assert.equal(entry.crc, crc32(files[i]!.data)));
+    const blob = zipBlob(entries);
+    assert.equal(blob.type, 'application/zip');
+    assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), createZip(files));
+    assert.equal(blob.size, zipSize(files.map((file) => ({ name: file.name, size: file.data.length }))));
+  });
+
+  test('a checksum is read a chunk at a time, and matches the one-go checksum for a big file', async () => {
+    const big = Uint8Array.from({ length: 3 * 1024 * 1024 + 17 }, (_, i) => (i * 31) % 256);
+    assert.equal(await blobCrc32(new Blob([big])), crc32(big));
+    assert.equal(await blobCrc32(new Blob([])), 0);
   });
 
   test('zipName keeps a title usable as a file name', () => {

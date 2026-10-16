@@ -12,6 +12,8 @@ export interface AlbumSong {
   number: number;
   title: string;
   url: string;
+  /** Its size, when known before downloading it: lets the zip parts be planned before anything is downloaded. */
+  bytes?: number;
 }
 
 /** A tappable suggestion under a message. `label` is capped at 25 characters by RCS. */
