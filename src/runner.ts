@@ -563,7 +563,12 @@ export function createRunner(options: RunnerOptions): Runner {
         if (reply.chips) setChoices({ chips: reply.chips, at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
         // Options need a word on how to pick one, unless the text already gives it.
         const hint = !chat.reactions && reply.chips && !/\breply with a number\b/i.test(reply.text);
-        await sendLinkedText(markBotText(hint ? `${reply.text}\n\n${CHOICE_HINT}` : reply.text), reply.postback);
+        const text = hint ? [reply.text, CHOICE_HINT].filter(Boolean).join('\n\n') : reply.text;
+        // A message with no words only carries its list's chips: where a 👍 picks, nothing more is said.
+        if (!text.trim()) continue;
+        await sendLinkedText(markBotText(text), reply.postback);
+        // What the bot said, in the host's log too: an answer that explains a failure is otherwise invisible there.
+        log(`-> ${JSON.stringify(text.length > 160 ? `${text.slice(0, 160)}…` : text)}`);
       }
     }
   }

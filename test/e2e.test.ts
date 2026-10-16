@@ -123,7 +123,7 @@ describe('Google webhook to bot to RBM API', () => {
   test('an ambiguous request offers chips, and tapping one sends the track', async () => {
     await deliver(userText('search night owls', 'm2'));
     const [question] = sentMessages();
-    assert.match(question.text, /^Which one\?/);
+    assert.match(question.text, /^The Night Owls:\n1\. Song: Blue Horizon\n2\. Song: Blue Horizon \(Live\)$/);
     assert.equal(question.suggestions.length, 2);
 
     rbm.requests.length = 0;

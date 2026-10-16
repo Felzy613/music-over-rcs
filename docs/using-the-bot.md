@@ -40,22 +40,23 @@ To get a whole album, start with `album`:
 album yu di kenst
 ```
 
-An album that the words name outright is sent at once; otherwise you get the albums that fit, one message each, and a 👍 on one sends it (`all` doesn't send every album). You get its cover and a line (`11 songs, about 70 MB`), then **one zip file** with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds about 100 MB (`MAX_DOWNLOAD_MB`); a bigger album arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
+An album that the words name outright is sent at once; otherwise you get the albums that fit, listed under their artist (`Album: Yu Di Kenst (2020)`, one message each), and a 👍 on one sends it (`all` doesn't send every album). You get its cover and one line (`11 songs, coming as a zip.`), then **one zip file** with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds about 100 MB (`MAX_DOWNLOAD_MB`); a bigger album arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
 
-**A `search` tells you when your words match an album.** If you type an album's name, `search yu di kenst` says so instead of guessing at a song: "No song by that name, but there's an album: Michoel Schnitzler — Yu Di Kenst (2020)", and a 👍 on that line sends the whole album as a zip. If a song does have that name, you get the song and, under it, a line "💿 Also an album: …" with the same 👍. Typing only an artist's name doesn't mention albums (it isn't about any one of them). The album line follows the same rules as everything from YouTube Music: only artists on Zemer's list, no women.
+**A `search` lists albums too.** Albums sit in the same list as songs, under their artist, as `Album: …` lines whose 👍 sends the whole album as a zip. `search lipa schmeltzer` lists his songs, then his albums. If you type an album's name and no song has it, the album is the answer (`search yu di kenst` lists `Album: Yu Di Kenst (2020)` rather than guessing at a song). If a song does have that name, the song comes, with an `Album: …` line under it. Albums follow the same rules as everything from YouTube Music: only artists on Zemer's list, no women.
 
 Everything from YouTube Music is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out of the zip ("1 left out").
 
 ## Lists
 
-When several songs fit, it asks which one. Each option is **its own message**, so you can tap 👍 on the one you want:
+When several songs (or albums) fit, you get a plain list: each artist's name, then one short message per song or album under it, so you can tap 👍 on the one you want. A song with more than one artist sits under the first and says who else is on it:
 
 ```text
-🎵 Which one?
-🎵 Mendy Roth — Chuppah Medley
-🎵 Shulem Lemmer & Beri Weber — Chuppah Medley
-🎵 Shloime Daskal & The Freilach Band — Chuppah Medley
-🎵 Tap 👍 on one to choose.
+🎵 Lipa Schmeltzer:
+🎵 Song: Chatzoitzrois
+🎵 Song: Tzitzis (with Shimmy Schmeltzer)
+🎵 Album: A Poshiter Yid (2008)
+🎵 Michoel Schnitzler:
+🎵 Song: Baalei Teshuva
 ```
 
 Then any of:
@@ -67,7 +68,7 @@ Then any of:
 | `more` | The next ten, when there are more |
 | `search` and a new name | A new search; the old list closes |
 
-A number picks nothing; with a list open it gets "To get a song from the list, tap 👍 on it." A "Which one?" list stays open (for `all`) for half an hour, the other lists for two hours, and the daily message's for the day; a 👍 on a song works for a month. (On Beeper and RCS for Business, where a 👍 can't reach the bot, a list comes as one numbered message instead, and you reply with a number.)
+A number picks nothing; with a list open it gets "To get a song from the list, tap 👍 on it." A search's list stays open (for `all`, which sends its songs, not its albums) for half an hour, the other lists for two hours, and the daily message's for the day; a 👍 on a song works for a month. (On Beeper and RCS for Business, where a 👍 can't reach the bot, a list comes as one numbered message instead, and you reply with a number.)
 
 ## Artists
 

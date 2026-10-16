@@ -287,10 +287,8 @@ describe('message simulator', () => {
       await say('search weiss');
       const first = await live.waitFor((f) => f.event === 'trace-end');
       const said = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data);
-      const heading = said.findIndex((message) => message.text === '🎵 Which one?');
-      const closing = said.findIndex((message) => message.text === '🎵 Tap 👍 on one to choose.');
-      assert.ok(heading >= 0 && closing > heading, 'the bot lists its options');
-      const options = said.slice(heading + 1, closing);
+      assert.ok(said.some((message) => /^🎵 .+:$/.test(message.text ?? '')), 'the artist heads the list');
+      const options = said.filter((message) => /^🎵 (?:Song|Album): /.test(message.text ?? ''));
       assert.ok(options.length >= 2, 'one message per option');
       assert.ok(options.every((message) => !/^🎵 \d/.test(message.text ?? '')), 'no numbers');
 
@@ -299,7 +297,8 @@ describe('message simulator', () => {
       assert.equal((await react(options[1].id)).status, 202);
       const second = await live.waitFor((f) => f.event === 'trace-end' && f.data.id !== first.data.id);
       assert.equal(second.data.choice, true);
-      assert.equal(second.data.text, `👍 ${options[1].text.replace('🎵 ', '')}`);
+      // The trace names the song the 👍 picked, artist first.
+      assert.ok(second.data.text.endsWith(` — ${options[1].text.replace(/^🎵 Song: /, '').replace(/ \(with .*\)$/, '')}`), second.data.text);
       assert.ok(live.frames.some((f) => f.event === 'reaction' && f.data.id === options[1].id && f.data.key === '👍'), 'the page sees the 👍');
       const audio = live.frames.map((f) => f.data).filter((d) => d?.audio);
       assert.equal(audio.length, 1, 'a 👍 on an option sends that one song');
@@ -310,7 +309,8 @@ describe('message simulator', () => {
       assert.ok(live.frames.some((f) => f.event === 'message' && f.data.text === '🎵 To get a song from the list, tap 👍 on it.'));
 
       await react(options[0].id); // the list is still on screen, so the other option can be picked too
-      await live.waitFor((f) => f.event === 'trace-end' && f.data.text === `👍 ${options[0].text.replace('🎵 ', '')}`);
+      const firstTitle = options[0].text.replace(/^🎵 Song: /, '').replace(/ \(with .*\)$/, '');
+      await live.waitFor((f) => f.event === 'trace-end' && typeof f.data.text === 'string' && f.data.text.startsWith('👍 ') && f.data.text.endsWith(` — ${firstTitle}`));
       assert.equal(live.frames.map((f) => f.data).filter((d) => d?.audio).length, 2);
     } finally {
       await finish();

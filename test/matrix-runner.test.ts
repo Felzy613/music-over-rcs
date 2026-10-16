@@ -248,7 +248,7 @@ describe('runner over Matrix (the bridge case)', () => {
     typedOnPhone('search paper planes');
     typedOnPhone('search night owls');
     await runner.tick();
-    assert.equal(mock.sent.length, 6, 'the name and audio for the first, then the list for the second (heading, two options, how to pick)');
+    assert.equal(mock.sent.length, 5, 'the name and audio for the first, then the list for the second (the artist, two options)');
   });
 
   test('offers a choice, one message per option and no numbers, and a 👍 on one is the answer', async () => {
@@ -256,12 +256,7 @@ describe('runner over Matrix (the bridge case)', () => {
     await runner.prime();
     typedOnPhone('search night owls');
     await runner.tick();
-    assert.deepEqual(mock.sent.map((s) => s.content.body), [
-      '🎵 Which one?',
-      '🎵 The Night Owls — Blue Horizon',
-      '🎵 The Night Owls — Blue Horizon (Live)',
-      '🎵 Tap 👍 on one to choose.',
-    ]);
+    assert.deepEqual(mock.sent.map((s) => s.content.body), ['🎵 The Night Owls:', '🎵 Song: Blue Horizon', '🎵 Song: Blue Horizon (Live)']);
 
     mock.addReaction(mock.ghost, mock.sent[2]!.eventId!, '👍');
     await runner.tick();

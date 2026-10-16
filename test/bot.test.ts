@@ -116,7 +116,7 @@ describe('bot', () => {
     assert.deepEqual((await ask('search blue horizon live'))[1], audio(byTitle('Blue Horizon (Live)')));
   });
 
-  test('an ambiguous request lists the options: a heading, one message per option without a number (a 👍 on it picks it), and the list as chips', async () => {
+  test('an ambiguous request lists the options under the artist: "Song: …", one message each (a 👍 on it picks it), and the list as chips', async () => {
     const { ask, byTitle } = setup();
     const replies = await ask('search night owls');
     const blue = `play:${byTitle('Blue Horizon').id}`;
@@ -124,21 +124,41 @@ describe('bot', () => {
     assert.deepEqual(
       replies.map((reply) => (reply.kind === 'text' ? [reply.text, reply.postback ?? ''] : [reply.kind, ''])),
       [
-        ['Which one?', ''],
-        ['The Night Owls — Blue Horizon', blue],
-        ['The Night Owls — Blue Horizon (Live)', live],
-        ['Tap 👍 on one to choose.', ''],
+        ['The Night Owls:', ''],
+        ['Song: Blue Horizon', blue],
+        ['Song: Blue Horizon (Live)', live],
+        // No words: it only carries the list's chips, and the runner doesn't send it where a 👍 picks.
+        ['', ''],
       ],
     );
     assert.deepEqual(textOf(replies.at(-1)).chips, [
       { label: '1. Blue Horizon', postback: blue },
       { label: '2. Blue Horizon (Live)', postback: live },
     ]);
-    // Where a 👍 can't reach the bot, it's one message, numbered as the chips are, and a number picks.
+    // Where a 👍 can't reach the bot, it's one message, numbered as the chips are, and a number picks (the runner adds
+    // how to pick).
     assert.deepEqual(
       joinLists(replies).map((reply) => (reply.kind === 'text' ? reply.text : reply.kind)),
-      ['Which one?\n1. The Night Owls — Blue Horizon\n2. The Night Owls — Blue Horizon (Live)\n\nReply with a number to choose.'],
+      ['The Night Owls:\n1. Song: Blue Horizon\n2. Song: Blue Horizon (Live)'],
     );
+  });
+
+  test('songs by different artists are listed under each artist, and a song with several artists says who else is on it', async () => {
+    const { catalog, ask } = setup();
+    const duet = catalog.add({ title: 'Night Duet', artist: 'The Night Owls & Mira Vale', url: 'https://cdn.example.test/duet.mp3' });
+    const solo = catalog.add({ title: 'Night Solo', artist: 'Mira Vale', url: 'https://cdn.example.test/solo.mp3' });
+    const replies = await ask('search night');
+    const lines = replies.flatMap((reply) => (reply.kind === 'text' && reply.text ? [reply.text] : []));
+    assert.ok(lines.includes('Song: Night Duet (with Mira Vale)'), lines.join(' | '));
+    assert.ok(lines.indexOf('Mira Vale:') < lines.indexOf('Song: Night Solo'), 'a solo song sits under its own artist');
+    assert.ok(lines.indexOf('The Night Owls:') < lines.indexOf('Song: Night Duet (with Mira Vale)'), 'a duet sits under its first artist');
+    const chips = textOf(replies.at(-1)).chips ?? [];
+    assert.deepEqual(chips.map((chip) => chip.postback).filter((postback) => [`play:${duet.id}`, `play:${solo.id}`].includes(postback)).length, 2);
+    // The numbers in a chat without 👍 follow the order on screen, across the artists.
+    const joined = textOf(joinLists(replies)[0]).text.split('\n');
+    const numbered = joined.filter((line) => /^\d+\. /.test(line)).map((line) => Number(line.split('.')[0]));
+    assert.deepEqual(numbered, numbered.map((_, i) => i + 1));
+    assert.ok(joined.includes('Mira Vale:') && joined.includes('The Night Owls:'), joined.join(' | '));
   });
 
   test('chip labels are cut to 25 characters', async () => {
@@ -234,7 +254,7 @@ describe('bot', () => {
       assert.deepEqual(asked, ['yoely weiss']);
       assert.deepEqual(
         replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : [])),
-        ['Yoely Weiss — Purim', 'Yoely Weiss — Shabbos'],
+        ['Song: Purim', 'Song: Shabbos'],
         'its results first, no repeats',
       );
     });
@@ -243,7 +263,7 @@ describe('bot', () => {
       const { catalog, ask } = withSource(() => new SourceError('the site is down'));
       catalog.add({ title: 'Shabbos', artist: 'Yoely Weiss', url: 'https://cdn.example.test/s.mp3' });
       catalog.add({ title: 'Purim', artist: 'Yoely Weiss', url: 'https://cdn.example.test/p.mp3' });
-      assert.match(textOf((await ask('search yoely weiss'))[0]).text, /^Which one\?/);
+      assert.equal(textOf((await ask('search yoely weiss'))[0]).text, 'Yoely Weiss:');
       assert.match(textOf((await ask('search nothing like it'))[0]).text, /I couldn't search music-table\.com: the site is down/);
     });
   });

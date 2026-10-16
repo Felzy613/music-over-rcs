@@ -30,7 +30,9 @@ try {
   // A search asks YouTube Music first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
   // SONG_SOURCES sets which is asked first).
   const musicTable = musicTableFromEnv();
-  const youTube = youTubeMusicFromEnv();
+  const youTube = youTubeMusicFromEnv(process.env, { log });
+  // Whether YouTube serves this host at all (it turns many datacenter addresses away), learned and logged at start.
+  void youTube?.checkStreams();
   const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
   const audio = resolvingYouTubeAudio(
     youTube,

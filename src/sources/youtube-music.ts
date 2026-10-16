@@ -40,6 +40,16 @@ const MAX_ALBUM_PAGES = 10;
 const FREE_WINDOW_BYTES = 1024 * 1024;
 /** Sessions tried before giving up on a song (each with every client version). */
 const MAX_ROUNDS = 3;
+/**
+ * YouTube turns many datacenter addresses away with "Sign in to confirm you're not a bot", whatever the client. When it
+ * does that to this host, YouTube songs are left aside for this long (a search goes to music-table.com instead of
+ * offering songs that can't be sent), then it is asked again.
+ */
+const TURNED_AWAY_MS = 15 * 60_000;
+/** What is said when YouTube turns this host away; it ends up in the chat ("I can't send …: <this>"). */
+export const TURNED_AWAY = "YouTube Music is turning this server away for now (it asks to confirm it isn't a bot)";
+/** A short, well-known video ("Me at the zoo", 19 s): asked for once at start to learn whether YouTube serves this host. */
+const PROBE_VIDEO = 'jNQXAC9IVRw';
 /** Where YouTube serves its media from. A link anywhere else is refused. */
 const MEDIA_HOSTS = ['googlevideo.com'];
 const MAX_STREAMS_KEPT = 100;
@@ -111,6 +121,10 @@ export interface YouTubeMusicOptions {
   timeoutMs?: number;
   /** How long a resolved stream link is reused, so checking a song and then sending it asks YouTube once. */
   streamTtlMs?: number;
+  /** How long YouTube songs are left aside once YouTube turns this host away with its bot check. */
+  turnedAwayMs?: number;
+  /** Hears what went wrong (a search, an album page, a song's link), so the host's log shows it. */
+  log?: (line: string) => void;
   now?: () => number;
 }
 
@@ -347,6 +361,10 @@ export class YouTubeMusic {
   #streams = new Map<string, YouTubeStream>();
   #flights = new Map<string, Promise<YouTubeStream>>();
 
+  #turnedAwayFor: number;
+  #turnedAwayUntil = 0;
+  #log: (line: string) => void;
+
   constructor(options: YouTubeMusicOptions = {}) {
     this.baseUrl = (options.baseUrl ?? YOUTUBE_MUSIC_URL).replace(/\/+$/, '');
     this.#origin = new URL(this.baseUrl).origin;
@@ -354,6 +372,8 @@ export class YouTubeMusic {
     this.#timeout = options.timeoutMs ?? 20_000;
     this.#streamTtl = options.streamTtlMs ?? 30 * 60_000;
     this.#now = options.now ?? Date.now;
+    this.#turnedAwayFor = options.turnedAwayMs ?? TURNED_AWAY_MS;
+    this.#log = options.log ?? (() => {});
     // Pointed somewhere else (the tests), the media comes from there too.
     this.#mediaHosts = this.#origin === YOUTUBE_MUSIC_URL ? MEDIA_HOSTS : [...MEDIA_HOSTS, new URL(this.#origin).hostname];
   }
@@ -377,21 +397,55 @@ export class YouTubeMusic {
 
   async search(query: string): Promise<YouTubeHit[]> {
     // Zemer sends no visitor id with a search: a stale one can make YouTube answer with nothing at all.
-    const response = await this.#post('search', WEB_REMIX, { query, params: SONG_FILTER });
+    const response = await this.#logged(`searching "${query}"`, () => this.#post('search', WEB_REMIX, { query, params: SONG_FILTER }));
     return parseSearch(response);
+  }
+
+  /** Whether YouTube is turning this host away with its bot check right now (see TURNED_AWAY_MS). */
+  get turnsThisHostAway(): boolean {
+    return this.#now() < this.#turnedAwayUntil;
+  }
+
+  /**
+   * Asks once for a short, well-known video's audio, to learn (and log) whether YouTube serves this host at all. On a
+   * host it turns away, YouTube songs are then left aside from the start instead of after someone's request fails.
+   */
+  async checkStreams(): Promise<{ ok: true } | { ok: false; problem: string }> {
+    try {
+      await this.stream(PROBE_VIDEO);
+      this.#log('YouTube Music: songs can be had from this host');
+      return { ok: true };
+    } catch (err) {
+      if (!(err instanceof YouTubeMusicError)) throw err;
+      this.#log(`YouTube Music: songs can't be had from this host right now: ${err.message}`);
+      return { ok: false, problem: err.message };
+    }
+  }
+
+  /** Runs a request to YouTube Music, logging why it failed before passing the failure on. */
+  async #logged<T>(what: string, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (err) {
+      this.#log(`YouTube Music: ${what} failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
   }
 
   /** Albums (and EPs and singles) matching a search, best match first. */
   async searchAlbums(query: string): Promise<YouTubeAlbumHit[]> {
-    const response = await this.#post('search', WEB_REMIX, { query, params: ALBUM_FILTER });
+    const response = await this.#logged(`searching albums "${query}"`, () => this.#post('search', WEB_REMIX, { query, params: ALBUM_FILTER }));
     return parseAlbumSearch(response);
   }
 
   /** An album's page: its title, artists, cover and every song on it, following the page's continuations. */
   async album(browseId: string): Promise<YouTubeAlbumPage> {
     if (!ALBUM_ID.test(browseId)) throw new YouTubeMusicError("that isn't an album I know");
-    const first = parseAlbumPage(await this.#post('browse', WEB_REMIX, { browseId }), browseId);
-    if (!first) throw new YouTubeMusicError("YouTube Music didn't have that album");
+    const first = parseAlbumPage(await this.#logged(`opening album ${browseId}`, () => this.#post('browse', WEB_REMIX, { browseId })), browseId);
+    if (!first) {
+      this.#log(`YouTube Music: album ${browseId} came back without a title or songs`);
+      throw new YouTubeMusicError("YouTube Music didn't have that album");
+    }
     const { album } = first;
     let more = first.more;
     for (let pages = 1; more && pages < MAX_ALBUM_PAGES; pages += 1) {
@@ -406,6 +460,7 @@ export class YouTubeMusic {
 
   /** A link to download the song's audio from, as AAC (what Google Messages plays), asked for fresh if the last one is old. */
   stream(videoId: string): Promise<YouTubeStream> {
+    if (this.turnsThisHostAway) return Promise.reject(new YouTubeMusicError(TURNED_AWAY));
     const kept = this.#streams.get(videoId);
     if (kept && kept.expiresAt > this.#now()) return Promise.resolve(kept);
     const running = this.#flights.get(videoId);
@@ -433,6 +488,7 @@ export class YouTubeMusic {
       try {
         return await fetchAudio(stream.url, title, { fetch: withHeaders, ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}) });
       } catch (err) {
+        this.#log(`YouTube Music: downloading ${id} failed${attempt > 0 ? ' again' : ''}: ${err instanceof Error ? err.message : String(err)}`);
         if (attempt > 0 || !(err instanceof AudioFetchError) || !/HTTP (?:403|410)/.test(err.message)) throw err;
         this.#streams.delete(id);
       }
@@ -500,12 +556,16 @@ export class YouTubeMusic {
 
   async #resolve(videoId: string): Promise<YouTubeStream> {
     let problem = 'no client gave a link';
+    let asked = 0;
+    let deadLinks = 0;
+    let botChecks = 0;
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
       const visitor = await this.#visitorId(round > 0);
       let botCheck = false;
       let refused = false;
       for (const client of STREAM_CLIENTS) {
         let response: unknown;
+        asked += 1;
         try {
           response = await this.#post('player', client, { videoId, contentCheckOk: true, racyCheckOk: true }, visitor);
         } catch (err) {
@@ -517,23 +577,35 @@ export class YouTubeMusic {
         if (status !== 'OK') {
           const reason = str(at(response, 'playabilityStatus', 'reason')) ?? status ?? 'no reason given';
           problem = reason;
-          if (/not a bot/i.test(reason)) botCheck = true;
+          if (/not a bot/i.test(reason)) {
+            botCheck = true;
+            botChecks += 1;
+          }
           continue;
         }
         const stream = this.#pickAudio(response, client);
         if (stream && (await this.#acceptsWholeSong(stream))) {
+          if (deadLinks > 0) this.#log(`YouTube Music: ${videoId} needed ${deadLinks + 1} links (${deadLinks} refused the whole song)`);
           this.#keep(videoId, stream);
           return stream;
         }
         if (stream) {
           problem = 'its link was refused';
           refused = true; // each ask gives a new link, and most are fine
+          deadLinks += 1;
         } else {
           problem = 'it has no AAC audio';
         }
       }
       // A refused link is worth a fresh session and another round, up to MAX_ROUNDS; a refused session id, one more.
       if (!refused && !(botCheck && round < 1)) break;
+    }
+    this.#log(`YouTube Music: gave up on ${videoId} after ${asked} asks: ${problem}`);
+    // Every ask met the bot check: YouTube is turning this host away, not refusing this one song.
+    if (botChecks > 0 && botChecks === asked) {
+      this.#turnedAwayUntil = this.#now() + this.#turnedAwayFor;
+      this.#log(`YouTube Music turns this host away (it asks to confirm it isn't a bot); YouTube songs are left aside for ${Math.round(this.#turnedAwayFor / 60_000)} minutes`);
+      throw new YouTubeMusicError(TURNED_AWAY);
     }
     throw new YouTubeMusicError(`YouTube Music wouldn't give me that song (${problem})`);
   }
@@ -629,6 +701,8 @@ export function createYouTubeMusicSource(deps: YouTubeLookupDeps): TrackSource {
     async lookup(query, limit, options?: LookupOptions) {
       const wanted = parseQuery(query);
       if (wanted.length === 0) return [];
+      // Songs that can't be sent are not offered: "search" goes to music-table.com instead, "youtube" says why.
+      if (deps.youTube.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);
       await deps.whitelist.ready();
       const hits = await deps.youTube.search(wanted.join(' '));
       const allowed = hits.filter((hit) => deps.whitelist.allows(hit.videoId, hit.artistIds));
@@ -707,6 +781,7 @@ export function createYouTubeAlbumSource(deps: YouTubeLookupDeps): AlbumSource {
     async search(query, limit) {
       const wanted = parseQuery(query);
       if (wanted.length === 0) return [];
+      if (deps.youTube.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);
       await deps.whitelist.ready();
       const hits = await deps.youTube.searchAlbums(wanted.join(' '));
       const allowed = hits.filter((hit) => deps.whitelist.allows(hit.browseId, hit.artistIds));
@@ -714,6 +789,7 @@ export function createYouTubeAlbumSource(deps: YouTubeLookupDeps): AlbumSource {
       return allowed.slice(0, limit).map((hit): Album => ({ id: hit.browseId, title: hit.title, artist: hit.artist, year: hit.year, cover: hit.cover }));
     },
     async open(id) {
+      if (deps.youTube.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);
       await deps.whitelist.ready();
       const page = await deps.youTube.album(id);
       const verdict = deps.whitelist.verdict(id, page.artistIds);

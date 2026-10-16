@@ -75,6 +75,7 @@ export function createEventHandler(deps: HandlerDeps): (event: UserEvent) => Pro
 
     // Options are tappable chips here, so a list stays one message.
     for (const reply of joinLists(replies)) {
+      if (reply.kind === 'text' && !reply.text.trim()) continue; // a message with no words only carries a list's chips
       if (await attempt(`sending ${reply.kind} reply`, () => deps.rbm.send(from, reply))) continue;
       if (reply.kind === 'audio') {
         await attempt('sending failure notice', () => deps.rbm.send(from, { kind: 'text', text: REJECTED_NOTICE }));

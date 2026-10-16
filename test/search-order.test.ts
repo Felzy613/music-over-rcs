@@ -96,10 +96,10 @@ describe('search looks on YouTube Music first, then on music-table.com', () => {
     const { say, youTube } = setup();
     assert.equal(audioUrl(await say('search blue horizon')), youTube.trackUrl('aaaaaaaaaa1'));
     const listed = await say('search night owls');
-    assert.equal(textOf(listed[0]).text, 'Which one?');
+    assert.equal(textOf(listed[0]).text, 'The Night Owls:');
     assert.deepEqual(
       listed.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined).map((reply) => reply.text),
-      ['The Night Owls — Blue Horizon', 'The Night Owls — Blue Horizon (Live)'],
+      ['Song: Blue Horizon', 'Song: Blue Horizon (Live)'],
     );
   });
 
@@ -130,7 +130,7 @@ describe('search looks on YouTube Music first, then on music-table.com', () => {
   test('"youtube" keeps YouTube Music’s own answer for the same words, because there is nothing to fall back on', async () => {
     const { say } = setup();
     const replies = await say('youtube owls zzzzqq');
-    assert.equal(textOf(replies[0]).text, 'Which one?');
+    assert.equal(textOf(replies[0]).text, 'The Night Owls:');
   });
 
   test('a song that misses one of the words is a different song: music-table.com gets to answer instead', async () => {
@@ -173,6 +173,23 @@ describe('search looks on YouTube Music first, then on music-table.com', () => {
     assert.equal(
       textOf((await bot.handle({ from: 'u', messageId: 'm', text: 'search blue horizon' }))[0]).text,
       "I couldn't search YouTube Music or music-table.com: YouTube Music: YouTube Music answered HTTP 500; music-table.com: the site may have changed.",
+    );
+  });
+
+  test('when YouTube turns this server away, a search answers from music-table.com at once, and "youtube" says why', async () => {
+    const catalog = new Catalog(':memory:');
+    catalog.add({ title: 'Blue Horizon', artist: OWLS, url: 'https://www.music-table.com/post/blue-horizon#0' });
+    const { say, youTube } = setup({ catalog });
+    youtube.firstAcceptedVisitor = 99; // every player call meets the bot check, as from a datacenter address
+    assert.equal((await youTube.checkStreams()).ok, false);
+    assert.equal(youTube.turnsThisHostAway, true);
+    youtube.reset();
+
+    assert.equal(audioUrl(await say('search blue horizon night owls')), 'https://www.music-table.com/post/blue-horizon#0');
+    assert.deepEqual(youtube.searches, [], 'YouTube songs that could not be sent are not even looked for');
+    assert.equal(
+      textOf((await say('youtube blue horizon'))[0]).text,
+      "I couldn't search YouTube Music: YouTube Music is turning this server away for now (it asks to confirm it isn't a bot).",
     );
   });
 

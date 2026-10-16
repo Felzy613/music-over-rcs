@@ -104,7 +104,7 @@ describe('runner over Beeper', () => {
     assert.equal(beeper.sent.length, 1);
     assert.equal(
       beeper.sent[0]?.text,
-      '🎵 Which one?\n1. The Night Owls — Blue Horizon\n2. The Night Owls — Blue Horizon (Live)\n\nReply with a number to choose.',
+      '🎵 The Night Owls:\n1. Song: Blue Horizon\n2. Song: Blue Horizon (Live)\n\nReply with a number to choose.',
     );
 
     beeper.addUserMessage('2');

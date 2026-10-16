@@ -13,6 +13,7 @@ import {
   parseSearch,
   resolvingYouTubeAudio,
   YouTubeMusic,
+  TURNED_AWAY,
   YouTubeMusicError,
   youTubeGate,
   youTubeMusicFromEnv,
@@ -188,8 +189,59 @@ describe('YouTube Music streams', () => {
 
     youtube.reset();
     youtube.firstAcceptedVisitor = 99;
-    await assert.rejects(make().stream('aaaaaaaaaa1'), /not a bot/);
+    await assert.rejects(make().stream('aaaaaaaaaa1'), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
     assert.equal(youtube.visitorIds, 2, 'it tries a fresh session once, not forever');
+  });
+
+  describe('when YouTube turns this host away with its bot check (as it does many datacenter addresses)', () => {
+    test('YouTube songs are left aside for a while: no more asking, and it says why at once', async () => {
+      youtube.firstAcceptedVisitor = 99;
+      let clock = 1_000_000;
+      const lines: string[] = [];
+      const youTube = new YouTubeMusic({ baseUrl: youtube.url, now: () => clock, log: (line) => lines.push(line) });
+      await assert.rejects(youTube.stream('aaaaaaaaaa1'), new RegExp(TURNED_AWAY.replace(/[()]/g, '\\$&')));
+      assert.equal(youTube.turnsThisHostAway, true);
+      assert.ok(lines.some((line) => /turns this host away/.test(line)), lines.join('\n'));
+      const asked = youtube.playerCalls.length;
+      await assert.rejects(youTube.stream('aaaaaaaaaa2'), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
+      assert.equal(youtube.playerCalls.length, asked, 'not asked again while it turns this host away');
+
+      // After the window it is asked again, and if YouTube has relented, songs come back.
+      youtube.firstAcceptedVisitor = 1;
+      clock += 16 * 60_000;
+      assert.equal(youTube.turnsThisHostAway, false);
+      assert.equal((await youTube.stream('aaaaaaaaaa1')).bytes, youtube.bytes('aaaaaaaaaa1').length);
+    });
+
+    test('one song YouTube won’t play (another reason) does not turn YouTube songs aside', async () => {
+      const youTube = make();
+      await assert.rejects(youTube.stream('cccccccccc1'), /not available in your country/);
+      assert.equal(youTube.turnsThisHostAway, false);
+    });
+
+    test('the start-up check says in the log whether songs can be had from this host', async () => {
+      const lines: string[] = [];
+      const good = new YouTubeMusic({ baseUrl: youtube.url, log: (line) => lines.push(line) });
+      // The probe asks for a video the mock doesn't know, so it is refused for that reason: not turned away.
+      const first = await good.checkStreams();
+      assert.equal(first.ok, false);
+      assert.equal(good.turnsThisHostAway, false);
+      youtube.firstAcceptedVisitor = 99;
+      const turned = new YouTubeMusic({ baseUrl: youtube.url, log: (line) => lines.push(line) });
+      assert.deepEqual(await turned.checkStreams(), { ok: false, problem: TURNED_AWAY });
+      assert.equal(turned.turnsThisHostAway, true);
+      assert.ok(lines.some((line) => /songs can't be had from this host right now/.test(line)), lines.join('\n'));
+    });
+
+    test('a failing search or album page is logged with the reason', async () => {
+      youtube.failSearch = true;
+      const lines: string[] = [];
+      const youTube = new YouTubeMusic({ baseUrl: youtube.url, log: (line) => lines.push(line) });
+      await assert.rejects(youTube.search('blue horizon'));
+      await assert.rejects(youTube.album('MPREb_doesnotexist'));
+      assert.ok(lines.some((line) => /searching "blue horizon" failed: YouTube Music answered HTTP 500/.test(line)), lines.join('\n'));
+      assert.ok(lines.some((line) => /opening album MPREb_doesnotexist failed/.test(line)), lines.join('\n'));
+    });
   });
 
   test('passes on why YouTube will not play a song, and says when there is no AAC audio', async () => {
@@ -382,9 +434,9 @@ describe('looking things up on YouTube Music from the bot', () => {
   test('a vague request lists the songs to choose from, and a 👍 on one plays it', async () => {
     const { ask, tap } = setup();
     const replies = await ask('night owls');
-    assert.equal(textOf(replies[0]).text, 'Which one?');
+    assert.equal(textOf(replies[0]).text, 'The Night Owls:');
     const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined);
-    assert.deepEqual(choices.map((reply) => reply.text), ['The Night Owls — Blue Horizon', 'The Night Owls — Blue Horizon (Live)', 'The Night Owls — Hidden Song']);
+    assert.deepEqual(choices.map((reply) => reply.text), ['Song: Blue Horizon', 'Song: Blue Horizon (Live)', 'Song: Hidden Song']);
     const played = await tap(choices[1]!.postback!);
     assert.deepEqual(played[1], { kind: 'audio', url: `${youtube.url}/watch?v=aaaaaaaaaa2`, title: 'The Night Owls — Blue Horizon (Live)' });
   });
@@ -490,7 +542,7 @@ describe('looking things up on YouTube Music from the bot', () => {
     const { ask } = setup(catalog);
     const replies = await ask('night owls');
     const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined).map((reply) => reply.text);
-    assert.deepEqual(choices, ['The Night Owls — Blue Horizon', 'The Night Owls — Blue Horizon (Live)', 'The Night Owls — Hidden Song', 'The Night Owls — Blue Horizon Remix']);
+    assert.deepEqual(choices, ['Song: Blue Horizon', 'Song: Blue Horizon (Live)', 'Song: Hidden Song', 'Song: Blue Horizon Remix']);
   });
 });
 
