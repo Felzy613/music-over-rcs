@@ -1,8 +1,8 @@
-# Running it in the cloud (Render and Cloudflare)
+# How it runs: Render and Cloudflare
 
-This moves everything that runs on the Mac (the Matrix homeserver, the Google Messages bridge and the bot) to a cloud host, so the bot keeps answering when your Mac loses its internet. It costs nothing beyond a Cloudflare Workers plan you may already have.
+Since 2026-10-16 the bot runs here, not on a Mac: the Matrix homeserver, the Google Messages bridge and the bot are one Docker container on Render's free plan, with a Cloudflare Worker and an R2 bucket beside it. A Mac that loses its internet no longer matters. It costs nothing beyond a Cloudflare Workers plan you may already have. This page is the runbook: how it fits together, what it costs, how it was set up (and how to set it up again), what to do day to day, and what has been proven.
 
-**Status:** the code is written and tested, and the container has been built and run on a Mac against a stand-in for R2 ([what that proved](#what-has-been-tried-and-what-hasnt)). Nothing has run on Render, on real R2, or against the real OneDrive and Google yet.
+**Status:** live. Render service `music-over-rcs` (Ohio, free plan; deploy branch `main`), Worker `mors-edge`, bucket `mors-state`. Songs are **not saved anywhere yet**: that needs the OneDrive app in step 5, which is not set up.
 
 ## How it fits together
 
@@ -71,7 +71,7 @@ Nothing personal goes in a file: the addresses are Worker secrets. Until you giv
 
 ### 2. Render
 
-Create a **workspace** for this (Render dashboard, workspace menu, *New workspace*), then a **Blueprint** in it (New, Blueprint), from this repository and the branch that holds `render.yaml`. It makes the web service and generates `SECRET_KEY`, `MATRIX_PASSWORD` and `ADMIN_TOKEN` for you. Fill in the ones marked as yours:
+Create a **workspace** for this (Render dashboard, workspace menu, *New workspace*): the free hours and the bandwidth are per workspace. In it create a **Web Service** from this repository (runtime Docker, the `Dockerfile` in the root, free plan, branch `main`, no health check path, **auto-deploy off**), or a **Blueprint** from `render.yaml`, which also generates `SECRET_KEY`, `MATRIX_PASSWORD` and `ADMIN_TOKEN` for you (otherwise make three long random values yourself, for example `openssl rand -hex 24`, and enter them). The first service was made on the branch `cloud-hosting`, which points at the same commit as `main`; if the dashboard still says `cloud-hosting`, switch it to `main` (Settings → Build & Deploy → Branch). Fill in the ones marked as yours:
 
 | Setting | Value |
 |---|---|
@@ -102,11 +102,13 @@ It says, in plain lines, what is working and what to do about what isn't: the ho
 
 Open `https://<service>.onrender.com/pair` (any user name; the password is `ADMIN_TOKEN`). Press **Start login**, follow the bridge's instructions in a private browser window, paste the request it asks for, and tap the emoji on your phone. The pasted request holds your Google cookies; you paste it only into this page, and it is deleted from the chat a minute later. Then text yourself once from your phone, enter your number under step 2 on the page, press **Find**, and choose the room.
 
-Your other chats are not copied: the bridge makes no rooms at login (`initial_chat_sync_count: 0`) and no backfill, only for chats that get a message while it runs.
+The free plan gets about a tenth of a CPU, so after you link, the bridge needs several minutes to make its rooms. Wait for the logs to go quiet (or about ten minutes) before pressing **Find**; a chat whose room is not made yet is not found.
 
-### 5. Save songs to your OneDrive (optional)
+What the bridge copies is more than your one chat: right after linking it makes a room for each of your 25 most recent conversations (a name and a number, no old messages), and from then on it relays every message in any chat into Synapse while it runs. The bot reads only the room you choose. See [Privacy and security](privacy-and-security.md#what-the-bridge-copies).
 
-Songs aren't kept on the host, so this is how you keep them. Each song the bot sends is also uploaded, in the background, to `Apps/<the app's name>/Artist/Album/01 Title.mp3` in your OneDrive, with its tags and cover written in. Sign-in is Microsoft's device-code flow: you type a code at microsoft.com yourself, and neither your password nor any cookie reaches the bot.
+### 5. Save songs to your OneDrive (not done yet)
+
+Songs aren't kept on the host, so until this is set up **nothing is saved**: each song is fetched, sent, and gone. This is how you keep them. Each song the bot sends is also uploaded, in the background, to `Apps/<the app's name>/Artist/Album/01 Title.mp3` in your OneDrive, with its tags and cover written in. Sign-in is Microsoft's device-code flow: you type a code at microsoft.com yourself, and neither your password nor any cookie reaches the bot.
 
 Register the app once (about two minutes, no cost) at [entra.microsoft.com](https://entra.microsoft.com) → App registrations → New registration:
 
@@ -120,35 +122,30 @@ Then open the `/pair` page, press **Sign in to OneDrive** under step 3, open the
 
 Microsoft renews the sign-in each time the bot uses it. If it is revoked (a password change can do it), the bot emails you and you press the button again.
 
-### 6. Carry over your plays and follows (optional)
+### 6. Carry over a catalog (only when starting over)
 
-On the Mac, make a copy of the catalog and upload it to the new host. It brings the songs, plays, follows and the daily message's state, but not the old chat's message links.
+If you have an earlier catalog file (the songs, plays, follows and the daily message's state; not the old chat's message links), upload it before the bot starts. The catalog must still be empty, and `ALLOW_IMPORT` must be `1` in Render (it restarts the service).
 
 ```bash
-sqlite3 "$HOME/Library/Application Support/music-over-rcs/catalog.db" "VACUUM INTO '/tmp/catalog-export.db'"
-read -rs ADMIN_TOKEN; echo     # paste Render's ADMIN_TOKEN
-curl --fail -u ":$ADMIN_TOKEN" --data-binary @/tmp/catalog-export.db https://<service>.onrender.com/admin/import-catalog
+sqlite3 old-catalog.db "VACUUM INTO '/tmp/catalog-export.db'"      # a consistent copy
+curl --fail -X POST -H "Authorization: Bearer $(pbpaste)" \
+  --data-binary @/tmp/catalog-export.db https://<service>.onrender.com/admin/import-catalog
 rm /tmp/catalog-export.db
 ```
 
-It works only before the bot starts (the catalog must be empty). Then remove `ALLOW_IMPORT` from Render's environment.
+(`pbpaste` is `ADMIN_TOKEN` copied from Render's Environment page.) It answers with how many songs, artists, plays and follows it took. Then set `ALLOW_IMPORT` back to `0`. The first set-up did exactly this on 2026-10-16, from the Mac's catalog (5,195 songs, 1,092 artists, 71 plays, 7 follows).
 
-### 7. Switch over
+### 7. Turn the bot on
 
-Two bots on one chat both answer, so stop the Mac's first:
+Set `BOT_ENABLED` to `on` in Render (changing the environment restarts the service). The bot joins the chat you chose, says one hello (see `STARTUP_MESSAGE`) once the bridge can deliver it, and answers. `npm run cloud:check` reaches "The bot is answering texts". Try `search`, a 👍 on a list line and `all`.
 
-```bash
-npm run stack -- disable-bot
-```
-
-Then set `BOT_ENABLED` to `on` in Render (changing the environment restarts the service). `npm run cloud:check` reaches "The bot is answering texts". Try `search`, a 👍 on a list line, and `all`; then restart the service from the Render dashboard and confirm a text sent during the restart is still answered afterwards.
-
-**Rolling back:** suspend the Render service, then `npm run stack -- enable-bot` on the Mac. After a week of it working, unpair the Mac's old Google session (Google Messages, Device pairing) and leave the Mac stack stopped.
+The Mac install this replaced (`deploy/mac`, `docs/setup-mac.md`, launchd jobs) was removed on 2026-10-16. It is still in git history, for example `git show 1dc96c2:deploy/mac/setup.sh`. Do not run it next to the cloud host: two bots in one chat both answer. If a Google Messages session from the Mac is still listed (Google Messages → Device pairing), unlink it.
 
 ## Day to day
 
 - **`/status`** (the same password) reports the phase, bridge login state, problems, memory, the lease, what the Worker last saw, and bytes sent this month. **`/pair`** is also where you re-link Google Messages if it ever unlinks.
 - **Email**: the bot's problem reports (bridge unlinked, site not answering, OneDrive sign-in lost) reach you within five minutes, mailed by the Worker; the Worker adds "the host isn't answering" (three missed checks in a row) and "the bot isn't running" (up but not answering for 30 minutes). A problem is repeated at most every six hours.
+- **Deploying a change**: push to `main`, then Render dashboard → the service → *Manual Deploy* → *Deploy latest commit*. The bot is down for about a minute and a half while the new copy starts and restores; texts sent meanwhile are answered afterwards. Only one deploy runs at a time, and each queues behind the last, so do not stack them. A deploy that never finishes (it waits on the lease, see below) is failed by Render after about 15 minutes; *Cancel deploy* in the Events list starts the next one at once.
 - **Deploys** are manual (`autoDeploy: false`). A deploy briefly runs the new copy beside the old; the lease holds it until the old one has stopped. Render stops the old copy only once the new one has opened its port, so while the new copy waits for the lease it answers on the web port itself (`/healthz` ok, everything else 503; `src/cloud/waiting-door.ts`) and closes that door as soon as the lease is its own. Without that, a deploy would wait on itself forever.
 - **Uptime monitor (Better Stack and the like)**: watch `https://<service>.onrender.com/ping` and treat **HTTP 500** as up. `/ping` answers 500 on purpose, and neither Render's "starting up" page nor its gateway errors (502/503) nor the waiting door above ever say 500, so only the running web door passes; a sleeping service just keeps failing the check until it has woken. `/healthz` (200) stays what the Worker uses.
 - **Re-pairing** can change the chat's room. `/pair` lets you choose it again; no environment change is needed.
@@ -171,7 +168,7 @@ The ones that matter for the cloud host. The bot's own settings (`DIGEST_TIME`, 
 | `BOT_ENABLED` | `off` keeps the bot from answering (setup only) |
 | `ALLOW_IMPORT` | `1` allows the one-time catalog upload |
 | `PREFETCH_MB` | `0` on this host (nothing is kept on a wiped disk) |
-| `MAX_DOWNLOAD_MB`, `DOWNLOADS_AHEAD` | Smaller than on the Mac (30 and 1): each file is held in memory whole |
+| `MAX_DOWNLOAD_MB`, `DOWNLOADS_AHEAD` | Smaller than the defaults (100 and 3), because each file is held in memory whole: 30 and 1 here |
 | `BOT_HEAP_MB`, `BOT_MEMORY_MB` | The bot's heap cap (default 120), and its share of memory (default 220) used to hold back a big song's OneDrive copy where the container's own limit can't be read |
 | `SERVER_NAME`, `SYNAPSE_PORT`, `BRIDGE_PORT`, `DATA_DIR` | Defaults `localhost`, 8008, 29336, `/data` (`deploy/cloud/litestream.yml` names the databases under `/data`, so change them together) |
 
@@ -182,22 +179,24 @@ The same image runs anywhere that runs a Docker container with the same environm
 - **Render Starter** ($7/mo): change `plan` to `starter`. It doesn't sleep, so the Worker's keep-awake isn't needed, and has a full CPU share, which makes restarts quick. With a persistent disk ($0.25/GB) the backups matter less but still work.
 - **Cloudflare Containers** (about $7/mo more on the Workers plan you have): its disk is also wiped on restart, so the same R2 backups and lease apply. It has far more outbound traffic included than Render's free plan.
 
-## What has been tried, and what hasn't
+## What has been proven, and what hasn't
 
-Tried, on a Mac, with the real container image (Synapse 1.143.0, the bridge at `186284e`, Litestream 0.5.17, Node 24) and an S3 server standing in for R2, limited to 512 MB and, for the timing, a tenth of a CPU (Render's free share):
+**Built and tested before the first deploy**, on a Mac with the real container image (Synapse 1.143.0, the bridge at `186284e`, Litestream 0.5.17, Node 24), an S3 server standing in for R2, 512 MB, and a tenth of a CPU for the timing: the lease, restoring, clean stops, a fresh-disk restore, a second host waiting and taking over, a cold start in 36 seconds, songs of 20 and 30 MB passing through.
 
-- It builds, and starts: the lease, restoring (or finding no backup), the bridge's real generated config patched by `src/cloud/provision.ts`, the account created, the bot signed in.
-- A stopped host leaves cleanly (processes stopped in order, lease released); a brand-new container with an empty disk restored all three databases and carried on (the account, the bot's saved state).
-- A second host waits and starts nothing while the first runs, takes over within seconds of a clean stop, and after a kill -9 once the dead host's lease runs out (about 75 seconds).
-- A cold start with a restore reached "ready" in 36 seconds at a tenth of a CPU. Idle memory about 200 MB of 512.
-- Songs of 20 and 30 MB passing through, with their OneDrive copy, fit without the host being killed (the container's peak, including reclaimable file cache, was 400 to 450 MB). The request signing matches AWS's published test vectors and a real S3 server's checks.
+**Learned on the first real runs (2026-10-15 and 16):**
 
-**Not tried yet** (the first deploy will show):
+- **R2's conditional writes** work as the lease needs, with two adjustments the stand-in did not need. Node's fetch asks for gzip, which can turn an ETag weak (`W/"…"`) and a weak ETag never matches `If-Match`, so `src/cloud/s3.ts` asks for `accept-encoding: identity` and strips the `W/`. Until then the lease could be taken (`If-None-Match`) but never renewed or retaken. A write R2 refuses is now logged with its reason.
+- **Render starts the new copy of a deploy beside the old one and stops the old one only once the new one has opened its port.** The old copy's stopping is what lets go of the lease, so a new copy that waited for the lease with no port open waited forever. `src/cloud/waiting-door.ts` now answers on the port while it waits and closes that door the moment the lease is taken.
+- **The free plan's tenth of a CPU** makes everything that is not a plain restart slow: after linking Google Messages, the bridge needed several minutes to make rooms for 25 chats. A restart itself, restore included, takes about a minute.
+- **Memory** stays near 260 MB of 512 while the bridge makes its rooms; idle it is about 200 MB.
+- **Google** accepted the bridge's session from Render's address, and the pasted-request link worked. **Render's amd64 build** works.
+- **The catalog import**, **Litestream's backup and restore** on real R2, the **hello message** and **answers to texts** all work.
+- **Email**: the Worker's mail was accepted by Cloudflare's `send_email`; whether the first one reached an inbox (or the spam folder) is for you to confirm.
 
-1. **Real R2.** Its conditional writes are documented to work as the lease needs (and the stand-in S3 server behaved exactly so), and Litestream is documented to work against it, but this has not been run against R2 itself.
-2. **Render itself**: the Blueprint (`autoDeploy: false` is still the right key), the amd64 build (it was built here for ARM), the real memory and CPU share, and its bandwidth figure.
-3. **OneDrive** against the real service, only against a stand-in written from Microsoft's documentation. To check on the first real upload: that the app-folder permission (`Files.ReadWrite.AppFolder`) is accepted for upload sessions at `special/approot:/…` (if not, set `ONEDRIVE_SCOPE` to `Files.ReadWrite offline_access`, which gives the app your whole OneDrive), that missing folders are made, and that a Microsoft account sign-in lasts.
-4. **Google** accepting a data-centre address for the bridge's session, and YouTube Music and music-table.com answering requests from one.
-5. **Email** from the Worker (the domain set up for Email Service).
+**Not tried yet:**
 
-Not built: moving the songs from the synced OneDrive folder onto the external drive (do it by hand, or ask for a command that does it when the drive is connected), saving the songs the Mac's background jobs would have kept ready in advance (only songs actually sent are saved), and drawing the song cards and the daily collage on Linux (they fall back to a plain cover; the collage is skipped).
+1. **OneDrive** against the real service, only against a stand-in written from Microsoft's documentation. To check on the first real upload: that the app-folder permission (`Files.ReadWrite.AppFolder`) is accepted for upload sessions at `special/approot:/…` (if not, set `ONEDRIVE_SCOPE` to `Files.ReadWrite offline_access`, which gives the app your whole OneDrive), that missing folders are made, and that a Microsoft account sign-in lasts.
+2. **Bandwidth**: the monthly 5 GB on a Hobby workspace; watch `/status` (`sentThisMonthMb`) and Render's own figure for the first month.
+3. **A long unattended stretch**: the free plan may restart the service at any time; the first week will show how often and whether the Worker's alerts are enough.
+
+Not built: moving saved songs from the synced OneDrive folder onto an external drive (do it by hand), saving the songs the Mac's background jobs used to keep ready in advance (only songs actually sent are saved), and drawing the song cards and the daily collage on Linux (they fall back to a plain cover; the collage is skipped).
