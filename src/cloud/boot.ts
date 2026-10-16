@@ -170,6 +170,8 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     const botEnv: NodeJS.ProcessEnv = { ...deps.env, MATRIX_HOMESERVER: HOMESERVER, BRIDGE_URL: BRIDGE, MATRIX_USER: config.user, CATALOG_DB: paths.catalog, BRIDGE_DB: paths.bridgeDb, BRIDGE_PIDFILE: join(config.runDir, 'bridge.pid'), PREFETCH_MB: deps.env.PREFETCH_MB ?? '0' };
     // The bot's share of the 512 MB: what is left after the homeserver, bridge, replicator and this supervisor (see SongArchive).
     botEnv.BOT_MEMORY_MB ??= '220';
+    // The first start in the cloud says hello in the chat (once; STARTUP_MESSAGE=off or always changes that).
+    botEnv.STARTUP_MESSAGE ??= 'once';
     // Big buffers (a song) go straight back to the system when freed, so the bot's memory use follows what it really holds.
     botEnv.MALLOC_ARENA_MAX ??= '2';
     botEnv.MALLOC_MMAP_THRESHOLD_ ??= '262144';

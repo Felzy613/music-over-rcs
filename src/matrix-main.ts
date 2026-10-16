@@ -14,6 +14,7 @@ import { addSent } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { memoryCheck } from './cloud/memory.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
+import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { sourcesInOrder, songSourceOrder } from './sources/songs.ts';
 import { createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
@@ -167,12 +168,26 @@ try {
   const watching = setInterval(() => void bridge.check(), 60_000);
   watching.unref();
   void bridge.check();
+  // A word in the chat once the bot is up and the bridge can pass it on (the cloud host asks for it once, on its first start).
+  let shuttingDown = false;
+  void sendStartupMessage({
+    mode: startupModeFrom(process.env),
+    state: catalog,
+    ready: async () => {
+      await bridge.check();
+      return !['bridge', 'internet'].some((key) => health.has(key));
+    },
+    send: (replies) => runner.announce(replies),
+    stopped: () => shuttingDown,
+    log,
+  });
   log(
     `signed in as ${userId}, watching room ${config.roomID}, ${catalog.count()} tracks in ${config.dbPath}, YouTube Music ${youTube ? 'on' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}${extensions.map((extension) => `, ${extension.summary ?? extension.name}`).join('')}. Text "search" and a song name in that chat.`,
   );
 
   const shutdown = async () => {
     log('shutting down');
+    shuttingDown = true;
     clearInterval(watching);
     stopWatching?.();
     await stopExtensions(extensions, log);
