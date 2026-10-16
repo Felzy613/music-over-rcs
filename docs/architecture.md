@@ -4,6 +4,8 @@ TypeScript on Node 22.18+, run directly (no build step), with **no runtime depen
 
 ## The path of a message
 
+In production the homeserver, the bridge and the bot run together in one container on Render ([How it runs](cloud.md)); the path below is the same wherever they run.
+
 ```text
 phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse room ──> MatrixClient.listMessages()
                                                                                │
@@ -31,15 +33,15 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
 src/bot.ts              what to answer: songs, lists, choices, albums, follow / unfollow
 src/runner.ts           watches one chat and answers it; 👍, numbers where 👍 can't reach, songs spaced out, typing, announcements, safety limits
 src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, follows, state
-src/health.ts           Mac notifications when something breaks; the bridge's login status, and when to restart it
-src/bridge-restart.ts   restarts the bridge's launchd service when its Google Messages session goes stale
+src/health.ts           problem reports when something breaks (mailed by the cloud host; a notification on a Mac); the bridge's login status, and when to restart it
+src/bridge-restart.ts   restarts the bridge when its Google Messages session goes stale (a signal to the host's supervisor; launchd on a Mac)
 src/extensions.ts       add-ons kept outside this repository (extensions/): loading, starting and stopping them
 src/artists.ts          splits "A, B & C Ft. D" into artists
 src/query.ts            words of a request ("play", "send me", "by" dropped)
 src/audio-check.ts      checks a link: reachable, audio, within the size limit
 src/audio-fetch.ts      downloads a direct audio link into memory
 src/image-fetch.ts      downloads album art (with a small memory)
-src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies
+src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies; on the Linux host a card falls back to the plain cover and the daily collage is skipped
 src/library/zip.ts      writes a ZIP (files stored as they are, UTF-8 names) for albums: no dependencies
 src/library/images.ts   a song's card (cover + name) and the daily collage (the new covers in a grid)
 src/sources/            music-table.com: the client, the lookup, relevance and spelling; youtube-music.ts: YouTube Music's app API (search, stream links, download); zemer-whitelist.ts: Zemer's artist list, kept current; songs.ts: which source is asked first
@@ -55,12 +57,19 @@ src/matrix/             Matrix client, and joining a pasted multi-line command f
 src/beeper/             Beeper Desktop API client
 src/rbm/                RCS for Business client, auth and webhook verification
 src/simulator/          the browser simulator: server, page, simulated chat, step-by-step trace
-src/matrix-main.ts      starts the bridge route   (npm run matrix)
+src/matrix-main.ts      starts the bot on the bridge route: assembles everything (npm run matrix; the cloud host loads it from cloud-main.ts)
 src/beeper-main.ts      starts the Beeper route   (npm run beeper)
 src/main.ts, server.ts  the RCS for Business webhook server (npm start)
 src/simulate*.ts        the terminal and browser simulators
-scripts/                command-line tools: catalog, library, music-table, matrix-*, beeper-*, send-test, invite-tester
-deploy/mac/             setup.sh (the installer) and stack (service control)
+scripts/                command-line tools: catalog, library, music-table, cloud-check, beeper-*, send-test, invite-tester
+src/cloud-main.ts      the cloud host's entry: the web door (/healthz, /ping, /status, /pair, /admin/*), signing in, then matrix-main.ts
+src/cloud/              the host's parts: boot (the start-up sequence), supervise (keeps the processes running; the lease client), lease and s3 (the lease in R2), provision (Synapse's and the bridge's settings), waiting-door, web, pairing, memory, check
+src/alert.ts            problems left as files in the bucket's alerts/ folder, for the Worker to mail
+src/archive/            saving each sent song to OneDrive (onedrive.ts: Microsoft's device-code sign-in and upload sessions; archiver.ts: the queue, the memory guard, the monthly allowance)
+src/startup-message.ts  the one hello in the chat when the cloud bot first comes up
+deploy/cloud/           entrypoint.ts (the container's PID 1) and litestream.yml (the database backups)
+cloudflare/             the Worker: every five minutes it checks the host, keeps it awake and mails the alerts
+Dockerfile, render.yaml the image (Synapse, the bridge, Litestream, Node) and the Render service
 test/                   unit and end-to-end tests, with mock servers in test/helpers/
 ```
 
@@ -75,7 +84,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 | `site_posts` | music-table.com posts: title, category, the site's category ids, publish date, views, picture, number of MP3s, when first seen, when in a daily message, when in an alert |
 | `plays` | Every song sent, with its time |
 | `follows` | Artists you follow (or unfollowed, so they're never followed for you again), whether by your choice or from your plays, and since when |
-| `audio_cache` | Songs kept on disk: the file (a name in the folder on the Mac, or its full path once moved to `SONGS_ARCHIVE_DIR`), type, size, last used |
+| `audio_cache` | Songs kept on disk, for a bot on a computer with a disk (the cloud host keeps none): the file (a name in the cache folder, or its full path once moved to `SONGS_ARCHIVE_DIR`), type, size, last used |
 | `message_links` | Messages that stand for one song (for 👍), kept a month |
 | `state` | Small facts: last sync, scan progress, the daily message's date, the current list |
 
@@ -83,7 +92,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 
 `LibraryJobs` runs inside the bot, checking once a minute, one thing at a time: the sync every three hours, songs kept ready (after each sync and when the bot starts), a look at the RSS feed every 15 minutes while you follow anyone (a sync when it shows something new), the daily message when it's due, alerts for new songs by artists you follow (outside the quiet hours), and the one-time scan of the whole site, a few pages per round. Its state lives in the catalog, so a restart picks up where it was.
 
-`Health` collects problems and shows them as Mac notifications (`osascript`), once when they start, every six hours while they last, and when they're fixed. It's told about them by the runner (the homeserver, or Beeper, not answering), the jobs (the site failing twice in a row) and `BridgeWatch`, which asks the bridge's provisioning API every five minutes how the Google Messages login is doing.
+`Health` collects problems and reports them, once when they start, every six hours while they last, and when they're fixed: on the cloud host as a file in the bucket's `alerts/` folder that the Worker mails (`src/alert.ts`), on a Mac as a notification (`osascript`). It's told about them by the runner (the homeserver, or Beeper, not answering), the jobs (the site failing twice in a row) and `BridgeWatch`, which asks the bridge's provisioning API every five minutes how the Google Messages login is doing.
 
 ## Safety rails
 
@@ -91,7 +100,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 - At most 30 messages a minute; a word-for-word repeat within 20 seconds is answered once.
 - Downloads are refused unless they're audio and within the size limit; links to web pages are rejected.
 - The site client paces its requests and remembers answers; download hosts must be the site's own over HTTPS.
-- Servers (simulator, webhook) listen on 127.0.0.1; the simulator refuses other hosts and requests without its header.
+- The simulator listens on 127.0.0.1 and refuses other hosts and requests without its header. The cloud host's web door listens on every interface because Render must reach it: `/healthz` and `/ping` are open, everything else needs `ADMIN_TOKEN`; Synapse and the bridge listen on 127.0.0.1 inside the container.
 
 ## Tests
 
@@ -100,10 +109,10 @@ npm test
 npm run typecheck
 ```
 
-`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list by category, category pages, feed, files, download links), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a Mac asleep at 09:00, retries, quiet hours), and the seasons are checked against real dates.
+`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list by category, category pages, feed, files, download links), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
 
 ## Extending
 
 - **Another chat platform:** implement `ChatClient` beside `src/matrix/` and `src/beeper/`, then start a runner with it.
-- **An add-on kept elsewhere:** a folder in `extensions/` (git ignores it, so it can be a repository of its own) whose `index.ts` default-exports an `ExtensionSetup` (see `src/extensions.ts`). It can take messages that start with its own word, get the pictures sent from the phone, send into the chat and put reactions on messages. The bridge route loads it at start; `npm run stack -- sync-bot` copies it with the bot, and `npm test` and `npm run typecheck` include it.
+- **An add-on kept elsewhere:** a folder in `extensions/` (git ignores it, so it can be a repository of its own) whose `index.ts` default-exports an `ExtensionSetup` (see `src/extensions.ts`). It can take messages that start with its own word, get the pictures sent from the phone, send into the chat and put reactions on messages. The bridge route loads it at start (the cloud image does not include `extensions/`, so it runs only where the bot runs from a checkout), and `npm test` and `npm run typecheck` include it.
 - **Another place to find music:** implement `TrackSource` (`name`, `lookup(query, limit)`) beside `src/sources/music-table.ts` and `youtube-music.ts`, and add its name to `src/sources/songs.ts`. Its tracks go into the catalog like any others; if their addresses need turning into a download link, wrap the audio check and download the way `resolvingYouTubeAudio` does.

@@ -1,6 +1,6 @@
 # Other routes: Beeper, and an RCS for Business agent
 
-The [Mac setup with the bridge](setup-mac.md) is the recommended route. Two others share the same bot.
+The [bridge on Render](cloud.md), which is how the bot runs, is the recommended route. Two others share the same bot.
 
 ## Beeper
 

@@ -1,6 +1,6 @@
 # The library: catalog, sync, songs kept ready, daily message
 
-Everything the bot knows lives in one SQLite file, the **catalog** (`CATALOG_DB`; on a Mac set up with `npm run mac:setup` that's `~/Library/Application Support/music-over-rcs/catalog.db`). While the bot runs, it keeps the catalog in step with music-table.com, keeps popular songs downloaded, sends the daily new-music message, and sends new songs by the artists you follow.
+Everything the bot knows lives in one SQLite file, the **catalog** (`CATALOG_DB`; on Render it is `/data/catalog.db`, backed up to R2 every minute). While the bot runs, it keeps the catalog in step with music-table.com, keeps popular songs downloaded, sends the daily new-music message, and sends new songs by the artists you follow.
 
 ## What's in the catalog
 
@@ -35,6 +35,8 @@ Page links (a video site's watch page, say) are refused on purpose. `check` test
 
 ## Songs kept ready
 
+> **On the cloud host nothing is kept on disk** (`PREFETCH_MB=0`: its disk is wiped at every restart), so this section and the next describe a bot run on a computer with a disk. On Render each song sent is instead saved to OneDrive, sorted and tagged the same way ([How it runs](cloud.md), step 5).
+
 Songs are kept on disk, in an `audio-cache` folder beside the catalog (sorted as below), so they're sent without downloading:
 
 - **your most played songs** (from the plays above),
@@ -56,9 +58,9 @@ Weddings & Events/May 31 '26/04 Chuppa 1.mp3
 - **The artist's folder is the main artist**; guests ("ft. …") go in the song's name instead, so a guest appearance doesn't make a folder of its own. A duet ("A & B", "A x B") is the artist.
 - **A post with several songs is an album**, named after the post (without "(Full Album)"); its songs are numbered by the number in their name, or else by their place on the post. A song on its own goes in the artist's `Singles` folder.
 - **No artist:** a wedding's recording (a post named by its date) goes under `Weddings & Events`, a compilation under `Various Artists`, anything else under `Unknown Artist`.
-- **Tidy names:** underscores become spaces, "(Official Music Video)" and the like are dropped, and characters a disk won't take (`/ : ? * " < > |`) are replaced, so the folders work on a Mac and on a drive formatted for Windows. `(2)` is added when two songs would share a name.
+- **Tidy names:** underscores become spaces, "(Official Music Video)" and the like are dropped, and characters a disk won't take (`/ : ? * " < > |`) are replaced, so the folders work on a Mac, on Windows and on a drive formatted for either. `(2)` is added when two songs would share a name.
 - **The file that's sent is named the same way**, with the artist in front: `Ishay Ribo - Derech (feat. Zusha).mp3`, `Yumi Gelb - 01 Elul Live Kumzitz (….mp3`.
-- **Songs kept before this**, or whose name changes later (a corrected title on the site, say), are moved into place within a minute, on the Mac and on the drive. Folders left empty by a move are removed.
+- **Songs kept before this**, or whose name changes later (a corrected title on the site, say), are moved into place within a minute, on the computer and on the drive. Folders left empty by a move are removed.
 
 **The tags inside each song match** (ID3 in an MP3, iTunes-style in an M4A), so a music app (Apple Music, Finder, Windows) shows the same artist, album, number and title: the main artist as artist and album artist, the album with the song's number on it (`3/8`), a single as its own album (`Derech (feat. Zusha) - Single`), and the year it came out. What the upload had (a video's title, its channel, "People & Blogs") is replaced; its picture is kept, and a song with none gets the site's cover. The audio itself is never changed. A file the site calls an MP3 that is really an M4A is kept and sent as `.m4a`. Songs are tagged as they're kept, so the file sent to your phone has them too; songs kept before are tagged within a minute. Tags you edit yourself are left alone, unless the song's name changes on the site.
 
@@ -83,11 +85,11 @@ SONGS_ARCHIVE_DIR="/Volumes/Music Drive/Music/Music over RCS"
 
 ## The daily new-music message
 
-At `DIGEST_TIME` (09:00 by default, your Mac's time) the bot syncs, then sends what was published since the last message: a heading, one picture of the new covers in a grid (drawn on your Mac), a line per song or album, the posts that are only videos, and a closing line. A 👍 on a song's line gets it; `all` gets them all (all day). See [Using the bot](using-the-bot.md#the-daily-new-music-message).
+At `DIGEST_TIME` (09:00 by default, in the host's time zone: `America/New_York` on Render) the bot syncs, then sends what was published since the last message: a heading, one picture of the new covers in a grid (drawn with macOS's graphics, so the Linux host skips the picture), a line per song or album, the posts that are only videos, and a closing line. A 👍 on a song's line gets it; `all` gets them all (all day). See [Using the bot](using-the-bot.md#the-daily-new-music-message).
 
 - Nothing new, no message; the day still counts as done.
 - The first time the bot runs with it on, it waits for the next scheduled time instead of sending in the middle of the day.
-- A Mac asleep at the scheduled time sends when it wakes, once. A message that can't be sent is tried again after 30 minutes.
+- A host that was down at the scheduled time sends when it's back, once. A message that can't be sent is tried again after 30 minutes.
 - `DIGEST_TIME=off` turns it off.
 
 ## Alerts for artists you follow
@@ -102,16 +104,16 @@ Each goes out as its card (the cover with the name drawn on) and a line, then on
 
 ## Health checks
 
-The bot keeps an eye on the pieces it depends on and shows a **Mac notification** when one breaks, since it can't text you when the chat is what's broken:
+The bot keeps an eye on the pieces it depends on and reports a problem (an email on the cloud host, a notification on a Mac) when one breaks, since it can't text you when the chat is what's broken:
 
 | Check | How often | Notification |
 | --- | --- | --- |
-| The bridge's login to Google Messages (asked from the bridge on your Mac) | Every 5 minutes | Logged out (log in again); can't reach Google for 15 minutes or more; RCS chats off on the phone; the bridge not answering |
-| This Mac's internet (asked only when the bridge isn't connected: one small request to Google) | Every 5 minutes | After ten minutes without it. Then nothing else is blamed: not the bridge, the phone or the site |
+| The bridge's login to Google Messages (asked from the bridge in the container) | Every 5 minutes | Logged out (log in again); can't reach Google for 15 minutes or more; RCS chats off on the phone; the bridge not answering |
+| The host's internet (asked only when the bridge isn't connected: one small request to Google) | Every 5 minutes | After ten minutes without it. Then nothing else is blamed: not the bridge, the phone or the site |
 | The Matrix homeserver | Every check of the chat | After 20 failed checks in a row (about five minutes, as the checks slow down while it fails) |
 | music-table.com | Every sync | After two failed syncs in a row |
 
-Each problem is shown when it starts, again every six hours while it lasts, and once more when it's fixed ("Fixed: …"). What's wrong right now also shows in `npm run library -- status` under `health:`. See [Troubleshooting](troubleshooting.md#mac-notifications).
+Each problem is shown when it starts, again every six hours while it lasts, and once more when it's fixed ("Fixed: …"). What's wrong right now also shows in `/status` and `cloud:check`. See [Troubleshooting](troubleshooting.md#alerts).
 
 ## Commands
 
@@ -125,4 +127,4 @@ npm run library -- digest --days 3   # the same, covering the last three days
 npm run library -- digest --send     # send it to your chat now (MATRIX_ROOM_ID), exactly as the bot would
 ```
 
-The bot does all of this on its own while it runs; these commands are for looking and trying. They share the catalog with the running bot safely. A message sent with `digest --send` works like the bot's own: its 👍 and `all` are answered by the running bot.
+These commands read a catalog file on your own computer (`CATALOG_DB`, by default `data/catalog.db`); they do not reach the live catalog on Render, and `digest --send` needs a homeserver and room of your own, so it is not available for the cloud host. The bot does all of this on its own while it runs; the commands are for looking and trying. They share the catalog with the running bot safely. A message sent with `digest --send` works like the bot's own: its 👍 and `all` are answered by the running bot.

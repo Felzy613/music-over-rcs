@@ -124,7 +124,7 @@ They're music-table.com's own categories, most popular first (by views), with th
 …
 ```
 
-The first time you ask for one it reads the whole category from the site (a few seconds); after that the list comes from your Mac, refreshed at most once a day.
+The first time you ask for one it reads the whole category from the site (a few seconds); after that the list comes from the catalog, refreshed at most once a day.
 
 **In season, the bot points you to them.** From 15 Kislev to 3 Tevet `trending`, `new` and the daily message carry a line like `🕎 Chanukah is here: text "chanukah" for Chanukah songs.`; the same for Purim (1 to 15 Adar). During Sefirah (16 Nisan to 5 Sivan) and the Three Weeks (17 Tamuz to 9 Av) the line points to `vocal`, and the daily message lists the new a cappella songs first, each marked "vocal". The dates come from the Jewish calendar built into your Mac.
 
@@ -170,7 +170,7 @@ At 09:00 each day (see `DIGEST_TIME` in [Configuration](configuration.md)) the b
 - The picture holds up to nine covers; every song gets its line either way.
 - Posts that are only a video (no MP3) are listed at the end under "Also new, video only".
 - A day with nothing new sends nothing.
-- The first time it runs it waits for the next 09:00 rather than sending in the middle of the day. If your Mac was asleep at 09:00 it sends when it wakes, once.
+- The first time it runs it waits for the next 09:00 rather than sending in the middle of the day. If the host was down at 09:00 it sends when it's back, once.
 
 To see today's message now: `npm run library -- digest` (shows it, sends nothing), or `npm run library -- digest --send` (sends it to your chat).
 

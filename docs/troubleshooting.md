@@ -1,39 +1,47 @@
 # Troubleshooting
 
-Start with `npm run stack -- status` (what's running) and the bot's log: `npm run stack -- logs bot` follows it, or open `~/Library/Application Support/music-over-rcs/logs/bot.log`. The log has a `<-` line for every request the bot picks up and an `->` line for every song or announcement it sends. `npm run library -- status` lists anything the bot currently thinks is wrong, under `health:`.
+Start with the logs and the health check. The logs are in the Render dashboard (the service, then Logs); each line is prefixed with the process (`[host]`, `[bot]`, `[bridge]`, `[synapse]`, `[litestream]`), and the bot logs a `<-` line for every request it picks up and an `->` line for every song or announcement it sends. The health check says in plain lines what is working and what to do about what isn't:
 
-## Mac notifications
+```bash
+ADMIN_TOKEN=… npm run cloud:check -- --render https://<service>.onrender.com
+```
 
-The bot shows a notification titled **Music over RCS** when something it depends on breaks, and again when it's fixed. What each one means:
+(`ADMIN_TOKEN` is the value in Render's Environment page.) The service's own address, `/status`, shows the same facts as JSON.
 
-| Notification | What to do |
+## Alerts
+
+When something the bot depends on breaks, an email arrives within about five minutes (the bot leaves it in the bucket and the Cloudflare Worker mails it), and another when it's fixed. What each one means:
+
+| Alert | What to do |
 | --- | --- |
-| Google Messages is logged out of the bridge | The bridge has no Google login at all (the phone unlinked it, or its data was lost), so nothing can reconnect by itself: `npm run matrix-console`, then `login google`, and follow the bridge's steps (the same as the first time). Said two minutes after the bridge starts without one. |
-| Google Messages unlinked the bridge | Google (or the phone) ended the link: "Unpaired from Google Messages, please re-link". Restarting can't undo that, so the bot doesn't try; it can't fix this itself. Link it again: `npm run matrix-console`, then `login google`, and follow the bridge's steps (the same as the first time: a copied request from Google Messages for web, then the emoji on the phone; there is no QR code). Said at once, and again every six hours while it lasts. |
-| The bridge is signed out of Google Messages | Usually Google turned the bridge away for a while (a web filter or network block on `instantmessaging-pa.clients6.google.com` does this). The bot restarts the bridge every few minutes and it reconnects on its own once Google lets it through; there is nothing to do unless it lasts for hours, and then `login google` as above. (Said after fifteen minutes.) |
-| This Mac has no internet | The Mac can't reach the internet, even if Wi-Fi shows connected: usually the router's or the provider's connection is down, so restarting the modem and router is the fix. Texts you send meanwhile aren't lost: the bridge picks them up within a minute of the internet coming back, and the bot answers them. (Said after ten minutes, and only once.) |
-| The bridge can't reach Google Messages | The internet works but the bridge can't get through to Google. The bot restarts the bridge every few minutes (after the first, five minutes later, then every ten) for as long as it lasts, so it comes back by itself within about ten minutes of whatever was in the way (a web filter's downtime, say) going away. With "phone" in the reason, open Google Messages on the phone. (Short drops are normal and aren't reported; this one has lasted 15 minutes.) |
+| Google Messages is logged out of the bridge | The bridge has no Google login at all (the phone unlinked it, or its data was lost), so nothing can reconnect by itself: open the service's `/pair` page, press **Start login**, and follow the steps (the same as the first time). Said two minutes after the bridge starts without one. |
+| Google Messages unlinked the bridge | Google (or the phone) ended the link: "Unpaired from Google Messages, please re-link". Restarting can't undo that, so the bot doesn't try. Link it again on the `/pair` page (a copied request from Google Messages for web, then the emoji on the phone; there is no QR code), then choose the chat again if it asks. Said at once, and again every six hours while it lasts. |
+| The bridge is signed out of Google Messages | Usually Google turned the bridge away for a while (a web filter or network block on `instantmessaging-pa.clients6.google.com` does this). The bot restarts the bridge every few minutes and it reconnects on its own once Google lets it through; there is nothing to do unless it lasts for hours, and then link it again on `/pair`. (Said after fifteen minutes.) |
+| The bot's host has no internet | The host can't reach the internet, which on Render means Render has a problem (check its status page). Texts you send meanwhile aren't lost: the bridge picks them up within a minute of the internet coming back, and the bot answers them. (Said after ten minutes, and only once.) |
+| The bridge can't reach Google Messages | The internet works but the bridge can't get through to Google. The bot restarts the bridge every few minutes (after the first, five minutes later, then every ten) for as long as it lasts, so it comes back by itself within about ten minutes of whatever was in the way going away. With "phone" in the reason, open Google Messages on the phone. (Short drops are normal and aren't reported; this one has lasted 15 minutes.) |
 | RCS chats are off on your phone | Google Messages → Settings → RCS chats → on. Without RCS, files this size can't be sent. |
-| The Google Messages bridge isn't answering | The bot restarts the bridge's service after two minutes, and again every few minutes. If it still says so, `npm run stack -- start` (or `npm run stack -- status` to see what stopped) |
-| The bot can't reach the Matrix homeserver | `npm run stack -- start` |
-| The drive for … has been away for a day; N songs wait on this Mac | Connect the drive (or check `SONGS_ARCHIVE_DIR`); the songs move within a minute. Nothing is lost meanwhile. |
-| macOS won't let the bot use … | System Settings → Privacy & Security → Files and Folders: allow `node` to use removable volumes (or the drive's folder). |
-| music-table.com isn't answering the bot | Usually the site is down or slow; songs already on your Mac still work. If it lasts, the reason in the notification helps, and `npm run music-table -- search <words>` shows what the site answers now. |
+| The Google Messages bridge isn't answering | The host restarts the bridge after two minutes, and again every few minutes. If it still says so, restart the service in Render. |
+| The bot can't reach the Matrix homeserver | The homeserver inside the container isn't answering. The host restarts it by itself; if this lasts, restart the service in Render. |
+| music-table.com isn't answering the bot | Usually the site is down or slow; songs already in the catalog still work. If it lasts, the reason in the alert helps. |
+| The host isn't answering (from the Worker) | Three checks in a row (15 minutes) got no answer from the service. The free plan restarts it at times and a restart takes about a minute and a half; if this lasts, look at Render's Events and Logs. |
+| The bot isn't running (from the Worker) | The host answers but the bot hasn't for 30 minutes. `cloud:check` says why: the bridge is unlinked, no chat is chosen, `BOT_ENABLED` is off, or the bot is crashing (see the logs). |
+| OneDrive sign-in lost | Microsoft revoked it (a password change can). Open `/pair` and press **Sign in to OneDrive** again. |
 
-A problem that lasts is repeated every six hours. **No notifications at all?** macOS shows them from Script Editor (the bot uses `osascript`): System Settings → Notifications → Script Editor → Allow notifications.
+A problem that lasts is repeated every six hours. **No emails at all?** `cloud:check` with `--alert` leaves a test alert in the bucket; if it isn't mailed within about ten minutes, check the spam folder, then that the Worker has `ALERT_FROM` and `ALERT_TO` (`npx wrangler secret list` in `cloudflare/`) and that the sender address is on a domain set up for Email Service.
 
-## The bridge route
+## The host and the bridge
 
-- **"Can't reach the Matrix homeserver":** Synapse isn't running: `npm run stack -- start`. Right after `stack restart` the bot may start a moment before Synapse; it restarts itself 15 seconds later.
-- **A service sits at "loaded, not running", or starts and never logs anything:** it can't read its files. This happens when the services folder is under `~/Documents`, `~/Desktop` or `~/Downloads`, which macOS blocks for background jobs. Keep `MORS_HOME` elsewhere.
-- **"The homeserver rejected the access token":** `npm run matrix-login` again.
-- **The bot ignores code or `.env` changes:** it runs from a copy. `npm run stack -- restart`.
-- **Can't find your chat:** `npm run matrix-rooms -- --phone <your number>`. If it finds none, text yourself once on the phone, wait a few seconds, try again. `npm run matrix-console` then `help` lists the bridge's commands.
+- **A page shows Render's "starting up" screen, or 502/503:** the service is waking or restarting (about a minute and a half). `/healthz` answers 200 as soon as the host is up; an uptime monitor can watch `/ping`, which answers 500 on purpose.
+- **A deploy sits at "In progress":** the new copy is waiting for the old one's lease and the old one has not been told to stop (Render stops it only once the new one has opened its port, which the waiting door does; see [How it runs](cloud.md)). Render fails it after about 15 minutes; *Cancel deploy* in the Events list starts the next one at once.
+- **"Can't reach the Matrix homeserver":** Synapse isn't up yet (the first minute of a start) or has stopped; the host restarts it. Right after a restart the bot may start a moment before it and restarts itself 15 seconds later.
+- **"The homeserver rejected the access token":** the host signs in again at every start, so restart the service. If it keeps happening, `MATRIX_PASSWORD` or `SECRET_KEY` was changed.
+- **The bot ignores a change:** it runs the last commit that was deployed (or the environment as it was at the last restart). Push to `main` and deploy, or change the variable in Render.
+- **Can't find your chat on `/pair`:** text yourself once on the phone, then wait: the free plan's slow CPU means the bridge takes several minutes to make its rooms after linking. Enter your number with or without the country code; the page matches the last ten digits.
 - **"Your message may not have been bridged":** the bot restarts the bridge after this terminal delivery error. Retry the request; the failed reply itself isn't replayed.
-- **Replies show up in Matrix but not on the phone:** the bridge only relays messages from users listed in `bridge.permissions` in `gmessages/config.yaml`; your Matrix ID must be there. Also check that the phone is online.
-- **The bridge was logged out** (the bridge bot says so in `npm run matrix-console`): `login google` again.
-- **Two answers to every message:** two bots are running. `npm run stack -- disable-bot` and stop any `npm run matrix` in a terminal, then enable one.
-- **The audio doesn't arrive:** check the file is under `MAX_DOWNLOAD_MB` (and the homeserver's 100 MB upload limit), and that RCS chats are on: SMS/MMS can't carry files this size.
+- **Replies show up in Matrix but not on the phone:** check the phone is online and `cloud:check` says the bridge is connected. The host configures the bridge so that only the bot's account may use it.
+- **The bridge was logged out:** link it again on `/pair`.
+- **Two answers to every message:** two bots are running: the cloud host and something else (a bot started with `npm run matrix` on a computer, or an old install). Stop the other one.
+- **The audio doesn't arrive:** check the file is under `MAX_DOWNLOAD_MB` (30 on Render, and the homeserver's 100 MB upload limit), and that RCS chats are on: SMS/MMS can't carry files this size.
 
 ## Songs and lists
 
@@ -44,7 +52,7 @@ A problem that lasts is repeated every six hours. **No notifications at all?** m
 - **"I couldn't search music-table.com: …":** the message says why. If it says the site may have changed, `npm run music-table -- search <words>` shows what the site returns now.
 - **A song you know is there isn't found:** try the artist and title as the site writes them, or fewer words. `npm run simulate:web` and **Behind the scenes** show what was searched and what the site listed.
 - **An artist's name gives songs instead of their list:** the name fits several artists and none clearly has the most songs (like `weiss`). Use the full name.
-- **`trending` or `new` say the catalog is still being filled:** the first run reads the whole site in the background (about 20 minutes). `npm run library -- status` shows how far it got; `npm run library -- scan` finishes it in about two minutes.
+- **`trending` or `new` say the catalog is still being filled:** the first run reads the whole site in the background (about 20 minutes on a fast computer, longer on the free plan's slow CPU). A catalog carried over from an earlier install already has it (see [How it runs](cloud.md), step 6).
 - **A number gets "tap 👍 on it":** lists have no numbers; tap 👍 on the song's own message. (With no list open, a number gets the help text.) Lists last, for `all`, half an hour ("Which one?"), two hours (`trending`, `new`, artists) or a day (the daily message), and a new search ends them.
 - **A song name gets "To look for a song, start with "search"":** every message starts with a command now; send the line it suggests (`search` and the name).
 - **A 👍 does nothing:** it works on messages that stand for one song: a list's options, the songs in the daily message (the picture or a song's line), and a new-song alert. On anything else a 👍 is just a reaction.
@@ -52,18 +60,18 @@ A problem that lasts is repeated every six hours. **No notifications at all?** m
 - **`follow <name>` says it doesn't know the artist:** it only knows artists with songs in the catalog. Text the name alone first to see whether it's found, or try the name as the site writes it.
 - **A one-letter message or a stray number** gets the help text, not a search.
 - **"has no MP3 to download":** that post only has a video, or its MP3 is in a Google Drive folder (an album), which the bot can't open.
-- **New releases stopped appearing in the catalog** (the log says `synced … 0 new` or `npm run library -- status` shows an old date, and new posts have no songs): the site probably changed how it offers its MP3s. In October 2026 it moved from attached files to download buttons, and posts looked like videos until the bot learned to read them. `npm run music-table -- search <a new song>` shows what the bot sees in a post's files. After a fix, the next sync (every three hours; restarting the bot doesn't force one) fills the gap for the last 50 posts.
+- **New releases stopped appearing in the catalog** (the log says `synced … 0 new` for days, and new posts have no songs): the site probably changed how it offers its MP3s. In October 2026 it moved from attached files to download buttons, and posts looked like videos until the bot learned to read them. `npm run music-table -- search <a new song>` shows what the bot sees in a post's files. After a fix, the next sync (every three hours; restarting the bot doesn't force one) fills the gap for the last 50 posts.
 
 ## Alerts for artists you follow
 
-- **A new song didn't come:** alerts wait out the quiet hours (`QUIET_HOURS`, 22:00 to 07:00 by default), skip songs you already got and anything out before you followed the artist, and only cover posts from the last two days. `npm run library -- status` lists who you follow. New posts are noticed within about 15 minutes.
+- **A new song didn't come:** alerts wait out the quiet hours (`QUIET_HOURS`, 22:00 to 07:00 by default), skip songs you already got and anything out before you followed the artist, and only cover posts from the last two days. `following` in the chat lists who you follow. New posts are noticed within about 15 minutes.
 - **Too many:** `unfollow <name>`. Artists the bot followed for you are marked "(from your plays)" in `following`; after an unfollow it won't follow them again.
 
 ## The daily message
 
-- **It didn't come:** `npm run library -- status` shows when it last went out and whether today counts as done. Nothing new means no message. The first day the bot runs, it waits for the next scheduled time. A sleeping Mac sends it when it wakes.
-- **See it now:** `npm run library -- digest` (shows it) or `npm run library -- digest --send` (sends it).
-- **Change the time or turn it off:** `DIGEST_TIME` in `.env`, then `npm run stack -- restart`.
+- **It didn't come:** look for `-> announcement` around the time in the logs. Nothing new means no message. The first day the bot runs, it waits for the next scheduled time. A host that was down at the scheduled time sends it when it's back, once.
+- **See it now:** `npm run library -- digest` shows it as it would go out, from a catalog on your own computer (not the live one).
+- **Change the time or turn it off:** `DIGEST_TIME` in Render's environment (it restarts the service).
 
 ## Beeper
 

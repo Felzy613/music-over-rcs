@@ -18,7 +18,7 @@ Nothing from YouTube Music reaches the chat unless it passes Zemer's artist whit
 
 **It stays up to date, because the list changes through the day as music comes out:**
 - Before every search the bot checks the list is no more than 5 minutes old; if it is, it asks the server (a request of about 100 bytes, waiting at most 2 seconds) and downloads the whole list only when the version number changed. The blocked songs are re-read at every check.
-- While the bot runs it also checks every 10 minutes whether or not anyone searches. If the list can't be updated for a day, the Mac shows a notification, and the last good list stays in use meanwhile.
+- While the bot runs it also checks every 10 minutes whether or not anyone searches. If the list can't be updated for a day, an alert is raised, and the last good list stays in use meanwhile.
 - A song is checked again against the current list **when it is sent**, not only when it was found. So a song found yesterday stops being sent the moment its singer is flagged or the song is blocked, and a stored song with no recorded artists isn't sent at all.
 - The list is kept in the catalog, so after a restart with no internet the bot still filters. With no list at all (the first run, offline) YouTube Music gives no answer, as in Zemer, and the next source is asked.
 
@@ -45,7 +45,7 @@ Zemer has three more ways to play a song (`WEB_REMIX`, `WEB_CREATOR`, `TVHTML5_S
 
 The file is the AAC audio exactly as YouTube serves it: a fragmented MP4 (`audio/mp4`, saved as `.m4a`). It plays on a Mac, and Google Messages should play it, but that hasn't been tried on a phone. Two things follow from it being fragmented:
 
-- Songs kept on this Mac are stored as they arrived, **without the artist and title tags** inside the file (the tag writer, `src/library/mp4.ts`, deliberately refuses fragmented files). The artist and album folders and the file name still sort them.
+- Songs kept on a disk or saved to OneDrive are stored as they arrived, **without the artist and title tags** inside the file (the tag writer, `src/library/mp4.ts`, deliberately refuses fragmented files). The artist and album folders and the file name still sort them.
 - It is whatever YouTube Music has: no ID3 tags, no cover inside the file (the cover is sent as the picture before the song).
 
 ## Turning it off, and the order
