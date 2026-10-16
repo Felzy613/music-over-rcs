@@ -239,9 +239,9 @@ export function loadMatrixConfig(env: NodeJS.ProcessEnv = process.env, options: 
   const problems: string[] = [];
 
   const token = env.MATRIX_ACCESS_TOKEN?.trim() ?? '';
-  if (!token) problems.push('MATRIX_ACCESS_TOKEN is not set (run `npm run matrix-login` to get one)');
+  if (!token) problems.push('MATRIX_ACCESS_TOKEN is not set (the cloud host signs the bot in by itself; see docs/cloud.md)');
   const roomID = env.MATRIX_ROOM_ID?.trim() ?? '';
-  if (needRoom && !roomID) problems.push('MATRIX_ROOM_ID is not set (run `npm run matrix-rooms` to find it)');
+  if (needRoom && !roomID) problems.push("MATRIX_ROOM_ID is not set (choose your chat on the service's /pair page)");
   const homeserver = (env.MATRIX_HOMESERVER?.trim() || DEFAULT_HOMESERVER).replace(/\/+$/, '');
   checkUrl('MATRIX_HOMESERVER', homeserver, problems);
   const settings = readChatSettings(env, 'MATRIX_POLL_MS', problems);

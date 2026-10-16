@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
-/** The launchd service deploy/mac/setup.sh installs for the Google Messages bridge. */
+/** The launchd label a Mac install used for the Google Messages bridge (the Mac install is retired; this stays for a bot run on a Mac). */
 export const BRIDGE_SERVICE = 'com.musicoverrcs.bridge';
 
 export type Exec = (file: string, args: string[]) => Promise<void>;

@@ -151,7 +151,7 @@ try {
     // Half a minute without the homeserver is worth a word; it comes back on its own when it's restarted.
     onPoll: (ok, failures, error) => {
       if (ok) health.ok('homeserver', 'Fixed: the bot can reach the Matrix homeserver again.');
-      else if (failures >= 20) health.problem('homeserver', `The bot can't reach the Matrix homeserver (${error ?? 'no answer'}). Start it: npm run stack -- start`);
+      else if (failures >= 20) health.problem('homeserver', `The bot can't reach the Matrix homeserver (${error ?? 'no answer'}). It restarts on its own; if this lasts, restart the service in Render.`);
     },
   });
   await runner.start();
@@ -160,7 +160,7 @@ try {
   // the daily message tries again in half an hour, the alerts at the next round.
   library.start(async (replies) => {
     const blocked = ['bridge', 'internet'].find((key) => health.has(key));
-    if (blocked) throw new Error(blocked === 'internet' ? 'this Mac has no internet' : 'the bridge is not connected to Google Messages');
+    if (blocked) throw new Error(blocked === 'internet' ? 'the host has no internet' : 'the bridge is not connected to Google Messages');
     await runner.announce(replies);
   });
   const chat: ExtensionChat = {

@@ -546,10 +546,10 @@ function errorFrom(status: number, json: Json, text: string): MatrixError {
 export function describeMatrixError(err: unknown, homeserver = DEFAULT_HOMESERVER): string {
   if (err instanceof MatrixError) {
     if (err.status === 401 || err.errcode === 'M_UNKNOWN_TOKEN') {
-      return 'The homeserver rejected the access token. Run `npm run matrix-login` to get a new one.';
+      return 'The homeserver rejected the access token. The host signs the bot in again when it starts: restart the service in Render.';
     }
     if (err.errcode === 'M_FORBIDDEN' && /invite|join/i.test(err.message)) {
-      return `${err.message}\nThe bridge invites your account to each chat it creates; check the room ID with \`npm run matrix-rooms\`.`;
+      return `${err.message}\nThe bridge invites your account to each chat it creates; check the chat you chose on the service's /pair page.`;
     }
     return err.message;
   }

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 
-/** Shows a notification on this Mac (Notification Center). Elsewhere it does nothing. */
+/** Shows a notification on a Mac running the bot (Notification Center). Elsewhere it does nothing; the cloud host mails its alerts instead (src/alert.ts). */
 export type Notify = (title: string, message: string) => Promise<void>;
 
 export const macNotify: Notify = (title, message) =>
@@ -190,7 +190,7 @@ export class BridgeWatch {
       // launchd starts a crashed bridge again by itself; one that hangs without exiting is restarted here.
       const now = this.#now().getTime();
       this.#troubleSince ??= now;
-      this.#health.problem('bridge', "The Google Messages bridge isn't answering. Start it: npm run stack -- start");
+      this.#health.problem('bridge', "The Google Messages bridge isn't answering. It is restarted on its own; if this lasts, restart the service in Render.");
       if (this.#restartDue(now, BRIDGE_RESTART_GRACE_MS)) await this.#restartBridge("The Google Messages bridge isn't answering; restarting its bridge service.", now);
       return;
     }
@@ -207,7 +207,7 @@ export class BridgeWatch {
         this.#networkRecovery = true;
         this.#restartAttempted = false;
         if (now - this.#offlineSince >= OFFLINE_GRACE_MS) {
-          this.#health.problem('internet', "This Mac has no internet (it may still show Wi-Fi as connected). Texts you send meanwhile are answered when it's back.");
+          this.#health.problem('internet', "The bot's host has no internet. Texts you send meanwhile are answered when it's back.");
         }
         return;
       }
@@ -215,7 +215,7 @@ export class BridgeWatch {
     if (this.#offlineSince !== undefined) {
       const outageMs = now - this.#offlineSince;
       this.#offlineSince = undefined;
-      this.#health.ok('internet', 'Fixed: this Mac is back online.');
+      this.#health.ok('internet', 'Fixed: the bot\'s host is back online.');
       // Give the bridge a short chance to reconnect before restarting its stale Google session.
       this.#troubleSince = now;
       this.#networkRecovery = outageMs >= BRIDGE_RESTART_GRACE_MS || !connected;
@@ -230,7 +230,7 @@ export class BridgeWatch {
       this.#restartAttempted = false;
       this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
       if (now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
-        this.#health.problem('bridge', 'Google Messages is logged out of the bridge. Log in again: npm run matrix-console, then "login google".');
+        this.#health.problem('bridge', "Google Messages is logged out of the bridge. Log in again on the service's /pair page.");
       }
     } else if (unlinked) {
       // Restarting can't undo this, so it isn't tried: only a new link, made with a code scanned on the phone, mends it.
@@ -242,7 +242,7 @@ export class BridgeWatch {
       this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
       this.#health.problem(
         'bridge',
-        `Google Messages unlinked the bridge${why ? ` (${why})` : ''}. Restarting can't fix that; link it again: npm run matrix-console, then "login google" (docs/setup-mac.md, step 4, has the steps).`,
+        `Google Messages unlinked the bridge${why ? ` (${why})` : ''}. Restarting can't fix that; link it again on the service's /pair page (docs/cloud.md, step 4).`,
       );
     } else if (connected) {
       if (this.#networkRecovery && this.#restart && !this.#restartAttempted && this.#troubleSince !== undefined && now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
@@ -277,12 +277,12 @@ export class BridgeWatch {
         const detail = why ? ` (${why})` : '';
         const retrying = ' The bot keeps restarting it and reconnects on its own once Google lets it through (a web filter blocking Google does this).';
         if (signedOut && this.#restart) {
-          this.#health.problem('bridge', `The bridge is signed out of Google Messages${detail}.${retrying} If this lasts for hours, log in again: npm run matrix-console, then "login google".`);
+          this.#health.problem('bridge', `The bridge is signed out of Google Messages${detail}.${retrying} If this lasts for hours, log in again on the service's /pair page.`);
         } else if (signedOut) {
-          this.#health.problem('bridge', `Google Messages is logged out of the bridge${detail}. Log in again: npm run matrix-console, then "login google".`);
+          this.#health.problem('bridge', `Google Messages is logged out of the bridge${detail}. Log in again on the service's /pair page.`);
         } else {
           const phone = /phone/i.test(why ?? '') ? ' Is your phone on and online?' : '';
-          const hint = this.#restart ? retrying : phone || ' It keeps trying; if this lasts, restart it: npm run stack -- restart';
+          const hint = this.#restart ? retrying : phone || ' It keeps trying; if this lasts, restart the service in Render.';
           this.#health.problem('bridge', `The bridge can't reach Google Messages${detail}.${hint}${this.#restart ? phone : ''}`);
         }
       }
@@ -295,7 +295,7 @@ export class BridgeWatch {
   async sendFailed(): Promise<void> {
     const now = this.#now().getTime();
     if (!this.#restart) {
-      this.#health.problem('bridge-restart', 'Google Messages reported an undelivered message. Restart the bridge: npm run stack -- restart');
+      this.#health.problem('bridge-restart', 'Google Messages reported an undelivered message. If texts stop arriving, restart the service in Render.');
       return;
     }
     if (this.#lastSendFailureRestartAt !== undefined && now - this.#lastSendFailureRestartAt < 10 * 60_000) {
@@ -328,7 +328,7 @@ export class BridgeWatch {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.#log(`could not restart the Google Messages bridge automatically: ${detail}`);
-      this.#health.problem('bridge-restart', `The bridge couldn't restart automatically (${detail}). Restart it manually: npm run stack -- restart`);
+      this.#health.problem('bridge-restart', `The bridge couldn't restart automatically (${detail}). Restart the service in Render.`);
     }
   }
 }

@@ -185,8 +185,8 @@ describe('loadMatrixConfig', () => {
       (err: unknown) => {
         assert.ok(err instanceof Error);
         for (const needle of [
-          'MATRIX_ACCESS_TOKEN is not set (run `npm run matrix-login`',
-          'MATRIX_ROOM_ID is not set (run `npm run matrix-rooms`',
+          'MATRIX_ACCESS_TOKEN is not set (the cloud host signs the bot in by itself',
+          'MATRIX_ROOM_ID is not set (choose your chat on the service\'s /pair page)',
           'MATRIX_HOMESERVER',
           'MATRIX_POLL_MS',
         ]) {

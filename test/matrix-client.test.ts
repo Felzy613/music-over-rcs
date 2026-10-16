@@ -224,7 +224,7 @@ describe('MatrixClient', () => {
     const refused = await client().joinRoom('!stranger:localhost').catch((err: unknown) => err);
     assert.ok(refused instanceof MatrixError);
     assert.equal(refused.errcode, 'M_FORBIDDEN');
-    assert.match(describeMatrixError(refused), /matrix-rooms/);
+    assert.match(describeMatrixError(refused), /\/pair page/);
   });
 
   test('createDirectRoom invites the other user to a direct chat', async () => {
@@ -256,7 +256,7 @@ describe('MatrixClient', () => {
 
   test('describeMatrixError turns failures into advice', async () => {
     const wrongToken = await new MatrixClient({ token: 'wrong', homeserver: mock.url }).whoami().catch((err: unknown) => err);
-    assert.match(describeMatrixError(wrongToken), /npm run matrix-login/);
+    assert.match(describeMatrixError(wrongToken), /restart the service in Render/);
 
     const closed = 'http://127.0.0.1:9';
     const unreachable = await new MatrixClient({ token: 'x', homeserver: closed }).whoami().catch((err: unknown) => err);

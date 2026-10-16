@@ -7,8 +7,8 @@ import type { IncomingPicture } from './runner.ts';
 import type { Reply } from './types.ts';
 
 // Add-ons kept outside this repository. Each is a folder in extensions/ (which git ignores) whose index.ts
-// default-exports a function that sets it up; `npm run stack -- sync-bot` copies them along with the bot. The bridge
-// route (matrix-main.ts) loads them.
+// default-exports a function that sets it up. The bridge route (matrix-main.ts) loads them; the cloud image does not include
+// extensions/, so an add-on runs only where the bot runs from a checkout.
 
 /** What an add-on can use from the bot when it's set up. */
 export interface ExtensionContext {

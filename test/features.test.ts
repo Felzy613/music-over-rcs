@@ -373,7 +373,7 @@ describe('health on the Mac', () => {
 
     status = new Error('connection refused');
     await watch.check();
-    assert.match(shown.at(-1)!, /isn't answering\. Start it: npm run stack -- start/);
+    assert.match(shown.at(-1)!, /isn't answering\. It is restarted on its own; if this lasts, restart the service in Render\./);
   });
 
   test('the same trouble in other words is not announced again until the hours pass', () => {
@@ -392,7 +392,7 @@ describe('health on the Mac', () => {
     assert.deepEqual(shown, ['error A', 'error B']);
   });
 
-  test("when this Mac has no internet that's what is said, after ten minutes, and the bridge isn't blamed; then its return", async () => {
+  test("when the host has no internet that's what is said, after ten minutes, and the bridge isn't blamed; then its return", async () => {
     let clock = day(2026, 10, 6, 23);
     let up = false;
     let status: BridgeStatus = { state: 'TRANSIENT_DISCONNECT', error: 'gm-ping-failed', rcsEnabled: true };
@@ -407,13 +407,13 @@ describe('health on the Mac', () => {
       clock = day(2026, 10, 6, 23, minute);
       await watch.check();
     }
-    assert.deepEqual(shown, ["This Mac has no internet (it may still show Wi-Fi as connected). Texts you send meanwhile are answered when it's back."]);
+    assert.deepEqual(shown, ["The bot's host has no internet. Texts you send meanwhile are answered when it's back."]);
     assert.equal(health.has('bridge'), false, 'nothing blamed on the bridge or the phone');
 
     up = true;
     clock = day(2026, 10, 7, 10);
     await watch.check();
-    assert.equal(shown.at(-1), 'Fixed: this Mac is back online.');
+    assert.equal(shown.at(-1), 'Fixed: the bot\'s host is back online.');
     status = { state: 'CONNECTED', rcsEnabled: true };
     clock = day(2026, 10, 7, 10, 5);
     await watch.check();

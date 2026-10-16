@@ -115,15 +115,15 @@ describe('restarting the bridge on its own', () => {
     assert.equal(state.restarts, 2);
   });
 
-  test("with restarts off, or when one fails, it's said on the Mac instead", async () => {
+  test("with restarts off, or when one fails, it's said in the alert instead", async () => {
     const off = setUp({ restart: false });
     await off.watch.sendFailed();
-    assert.match(off.shown.at(-1)!, /reported an undelivered message\. Restart the bridge: npm run stack -- restart/);
+    assert.match(off.shown.at(-1)!, /reported an undelivered message\. If texts stop arriving, restart the service in Render\./);
 
     const failing = setUp({ restartFails: true });
     await failing.watch.sendFailed();
     assert.equal(failing.state.restarts, 1);
-    assert.match(failing.shown.at(-1)!, /couldn't restart automatically \(Could not find service .*\)\. Restart it manually/);
+    assert.match(failing.shown.at(-1)!, /couldn't restart automatically \(Could not find service .*\)\. Restart the service in Render\./);
   });
 });
 
@@ -183,7 +183,7 @@ describe('recovering by itself when Google turns the bridge away for a while', (
     const message = 'Unpaired from Google Messages, please re-link the connection to continue using SMS/RCS';
     state.status = { state: 'BAD_CREDENTIALS', error: 'gm-unpaired', message };
     await tick(8, 0);
-    assert.match(shown.at(-1)!, /^Google Messages unlinked the bridge \(Unpaired from Google Messages.*Restarting can't fix that; link it again: npm run matrix-console, then "login google"/);
+    assert.match(shown.at(-1)!, /^Google Messages unlinked the bridge \(Unpaired from Google Messages.*Restarting can't fix that; link it again on the service's \/pair page/);
     await run(tick, 1, 180);
     assert.equal(state.restarts, 0);
     assert.equal(shown.length, 1, 'said once, not at every check');
@@ -205,7 +205,7 @@ describe('recovering by itself when Google turns the bridge away for a while', (
     await tick(8, 1);
     assert.deepEqual(shown, []);
     await tick(8, 2);
-    assert.match(shown.at(-1)!, /^Google Messages is logged out of the bridge\. Log in again: npm run matrix-console/);
+    assert.match(shown.at(-1)!, /^Google Messages is logged out of the bridge\. Log in again on the service's \/pair page\./);
     await run(tick, 3, 40);
     assert.equal(state.restarts, 0, 'a restart cannot link an account');
   });

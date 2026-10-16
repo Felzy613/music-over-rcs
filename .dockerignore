@@ -8,7 +8,6 @@ extensions
 .claude
 test
 docs
-deploy/mac
 deploy/dell
 cloudflare
 *.db
