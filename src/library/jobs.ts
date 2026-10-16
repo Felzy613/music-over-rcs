@@ -1,7 +1,7 @@
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import { describe } from '../bot.ts';
 import type { Catalog } from '../catalog.ts';
-import type { FeedItem, MusicTable } from '../sources/music-table.ts';
+import type { MusicTable } from '../sources/music-table.ts';
 import type { Reply } from '../types.ts';
 import { prefetch, songsToKeep, type AudioCache } from './audio-cache.ts';
 import type { Categories } from './categories.ts';
@@ -179,10 +179,10 @@ export class LibraryJobs {
     if (result && this.#o.cache) await this.keepReady();
   }
 
-  async sync(feedItems?: FeedItem[]): Promise<SyncResult | undefined> {
+  async sync(): Promise<SyncResult | undefined> {
     const { catalog, musicTable } = this.#o;
     try {
-      const result = await syncSite({ musicTable, catalog, now: this.#now, ...(feedItems ? { feedItems } : {}) });
+      const result = await syncSite({ musicTable, catalog, now: this.#now });
       catalog.setState(STATE.lastSync, this.#now().toISOString());
       this.#log(`synced with music-table.com: ${result.seen} recent posts, ${result.fresh.length} new, ${result.songs} songs in the catalog from them`);
       this.#siteFailures = 0;
@@ -211,7 +211,7 @@ export class LibraryJobs {
     this.#lastWatch = now;
     try {
       const feed = await this.#o.musicTable.feed();
-      if (feed.some((item) => !this.#o.catalog.sitePost(item.slug))) await this.sync(feed);
+      if (feed.some((item) => !this.#o.catalog.sitePost(item.slug))) await this.sync();
     } catch {
       // the regular sync will catch up
     }
@@ -280,7 +280,7 @@ export class LibraryJobs {
     const { catalog, musicTable } = this.#o;
     const offset = Number(catalog.getState(STATE.scanOffset) ?? 0) || 0;
     try {
-      const result = await syncSite({ musicTable, catalog, pages, offset, feed: false, now: this.#now });
+      const result = await syncSite({ musicTable, catalog, pages, offset, now: this.#now });
       catalog.setState(STATE.scanOffset, String(offset + result.seen));
       if (!result.more) {
         catalog.setState(STATE.scanDone, this.#now().toISOString());
@@ -291,13 +291,13 @@ export class LibraryJobs {
     }
   }
 
-  /** The whole site at once (the command line's scan): pages of 50, with a pause between them. Returns posts read. */
+  /** The whole site at once (the command line's scan): pages of 48, with a pause between them. Returns releases read. */
   async scanAll(options: { pauseMs?: number; progress?: (posts: number) => void } = {}): Promise<number> {
     const { catalog, musicTable } = this.#o;
     const sleep = this.#o.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     let offset = 0;
     for (;;) {
-      const result = await syncSite({ musicTable, catalog, pages: 1, offset, feed: offset === 0, now: this.#now });
+      const result = await syncSite({ musicTable, catalog, pages: 1, offset, now: this.#now });
       offset += result.seen;
       catalog.setState(STATE.scanOffset, String(offset));
       options.progress?.(offset);

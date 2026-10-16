@@ -25,7 +25,6 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 const trace = new Trace();
 const catalog = new Catalog(flag('real-catalog') ? (process.env.CATALOG_DB ?? 'data/catalog.db') : ':memory:');
 const musicTable = musicTableFromEnv(process.env, { onEvent: (event) => trace.site(event) });
-void musicTable?.warm();
 const youTube = youTubeMusicFromEnv();
 const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
 void whitelist?.warm();

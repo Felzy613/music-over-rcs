@@ -254,7 +254,7 @@ describe('message simulator', () => {
       const res = await fetch(`${base}/api/play/${audio.linkId}`);
       assert.equal(res.status, 200);
       const { url } = (await res.json()) as { url: string };
-      assert.match(url, /\/files\/.*token=/);
+      assert.match(url, /\/api\/download\//);
       assert.equal(site.signed, 1, 'the link made while checking the file is still fresh, so it is reused');
       assert.deepEqual(site.fileRequests, [], 'nothing is downloaded until Play is pressed');
       const file = Buffer.from(await (await fetch(url)).arrayBuffer());
@@ -406,14 +406,13 @@ describe('message simulator', () => {
       assert.equal(shown[2].text, '🎵 Oizer Oberlander — Ana Elech · single');
       assert.match(shown[3].text, /Also new, video only:\n• Band - Clip/);
       const steps = labels(live.frames, ended.data.id).join('\n');
-      assert.match(steps, /site feed/);
       assert.match(steps, /newest posts/);
-      assert.equal(art.postReads.length, 0, 'the list carried everything; no post was read on its own');
+      assert.deepEqual(art.postReads, ['oizer-ana-elech', 'band-clip'], 'each new release is read once, for its files');
 
       await react(shown[2].id);
       const picked = await live.waitFor((f) => f.event === 'trace-end' && f.data.choice === true);
       const reply = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data).slice(-2);
-      assert.equal(reply[0].image.url, 'https://static.wixstatic.com/media/img1~mv2.png/v1/fill/w_640,h_360,al_c,q_80/cover.jpg', "the song's card first");
+      assert.equal(reply[0].image.url, `${art.url}/media/covers/img1~mv2.png`, "the song's card first");
       assert.match(reply[1].audio.name, /Ana Elech\.mp3$/, 'then the song: two messages');
       assert.equal(picked.data.text, '👍 Oizer Oberlander — Ana Elech');
     } finally {

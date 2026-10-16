@@ -46,7 +46,7 @@ src/library/zip.ts      writes a ZIP (files stored as they are, UTF-8 names) for
 src/library/images.ts   a song's card (cover + name) and the daily collage (the new covers in a grid)
 src/sources/            music-table.com: the client, the lookup, relevance and spelling; youtube-music.ts: YouTube Music's app API (search, stream links, download); zemer-whitelist.ts: Zemer's artist list, kept current; songs.ts: which source is asked first
 src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs, and:
-  categories.ts         holiday and other category lists (learning the site's category ids)
+  categories.ts         holiday and other category lists (by the site's own category names)
   category-list.ts      which categories, and the words that ask for them
   follows.ts            following artists, and following them for you after three of their songs
   naming.ts             each song's name and place: Artist/Album/01 Title.mp3, and "Artist - Title.mp3" when sent
@@ -81,7 +81,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 | --- | --- |
 | `tracks` (+ `tracks_fts`) | Songs: title, artist credit, URL (unique), album art, source post, release date. Full-text search over title and artist; when that finds nothing, a looser pass over every song (apostrophes, typos: `rankSongs` in `src/sources/relevance.ts`). |
 | `artists`, `artist_tracks` | Artists split out of credits, and which songs each is on |
-| `site_posts` | music-table.com posts: title, category, the site's category ids, publish date, views, picture, number of MP3s, when first seen, when in a daily message, when in an alert |
+| `site_posts` | music-table.com releases: title, kind, the site's categories, publish date, views, picture, number of MP3s, when first seen, when in a daily message, when in an alert |
 | `plays` | Every song sent, with its time |
 | `follows` | Artists you follow (or unfollowed, so they're never followed for you again), whether by your choice or from your plays, and since when |
 | `audio_cache` | Songs kept on disk, for a bot on a computer with a disk (the cloud host keeps none): the file (a name in the cache folder, or its full path once moved to `SONGS_ARCHIVE_DIR`), type, size, last used |
@@ -109,7 +109,7 @@ npm test
 npm run typecheck
 ```
 
-`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search, post list by category, category pages, feed, files, download links), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
+`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search box and search page, release pages, lists by page, category and sort, feed, releases for sale, download links that redirect to storage), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
 
 ## Extending
 

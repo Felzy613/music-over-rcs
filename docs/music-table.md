@@ -1,29 +1,29 @@
 # music-table.com
 
-[music-table.com](https://www.music-table.com) is a Jewish music blog. Each release post can carry a "Download MP3" file that the site hosts itself, next to an embedded video. The bot uses those MP3s, and only those.
+[music-table.com](https://www.music-table.com) is a site of Jewish music releases. Each release page can offer its MP3s for download (a single, or every track of an album), next to an embedded video. The bot uses those MP3s, and only those. In October 2026 the site was rebuilt (it had been a Wix blog); the addresses of the releases stayed the same, so the songs already in the catalog still work.
 
 ## What it uses, and what it doesn't
 
-- **Only the MP3 files a post offers for download**, the same ones its Download button gives you. A post offers one in one of two ways: attached to the post (the bot asks the site for a time-limited link), or as a button linking straight to the file, either on the site's own storage or as a public Google Drive file on a button that says Mp3 or Download (the bot downloads it from Drive the way the button would). A button for a video, tickets, or a Drive *folder* (an album the bot can't list) is not a song. The YouTube videos in the posts are ignored, and the site's artist pages (galleries of YouTube videos) aren't used. Nothing in this source downloads from YouTube; [YouTube Music](youtube-music.md) is a separate source.
-- **A song is stored as a link to its post**, not the audio and not the download address. The site's download links expire, so a fresh one is asked for when the song is sent.
+- **Only the MP3 files a release offers for free download**, the same ones its Download button gives you. Releases the site sells are left alone: they aren't offered as songs, and their files are never asked for. The YouTube videos on the pages are ignored. Nothing in this source downloads from YouTube; [YouTube Music](youtube-music.md) is a separate source.
+- **A song is stored as a link to its release** (`…/post/<name>#<n>`, the nth file), not the audio and not the download address. The site's download links expire within minutes, so a fresh one is asked for when the song is sent.
 - **Rights.** These are files the site offers for download. Whether you may keep or share them is between you and the rights holders; this project only fetches what you ask for, into your own chat.
 
 ## How it talks to the site
 
-The site is a Wix blog. The bot uses the same public endpoints the site's own pages use, with a visitor session like any browser's, identifying itself as this project in its User-Agent:
+The bot uses the same public addresses the site's own pages use, identifying itself as this project in its User-Agent. No account or session is needed.
 
 | For | Request |
 | --- | --- |
-| A visitor session | `GET /_api/v1/access-tokens` (reused for 20 minutes) |
-| Searching | The quick search behind the site's search box (a small JSON request, about 0.1 s). The full search page (about 2.4 s, 1.8 MB) is used only when the quick search knows none of your words. |
-| Reading posts | `GET /_api/communities-blog-node-api/_api/posts/<post>` for one post, or the post list for 50 at a time (files, album art, views and dates included) |
-| Category names | The RSS feed, `/blog-feed.xml` |
-| A song's file | An attached file: `POST .../v2/files/download-url` for a time-limited link, then the file from the site's file host. A button's link is used as it is, after the same check of where it points (the site's file hosts and Google Drive's download host only). |
-| Album art | The post's picture from the site's image host, resized to 640×360 (about 40 KB) |
+| Searching | `GET /api/suggest?q=…`, the answer behind the site's search box (a small JSON request; it also corrects spelling). The search page, `/search?q=…`, is used only when that fails or knows none of your words. |
+| Reading a release | `GET /post/<name>`: the page carries its files (name, size), picture, date, views and whether it's for sale, as data for its scripts |
+| Lists and the sync | `GET /new-music?all=1&page=N` (48 releases a page, newest first, each with its categories, views, date and picture), with `&category=chanukah` or `&sort=views` for the holiday and popular lists |
+| Checking for new releases | The RSS feed, `/feed.xml`, while you follow anyone |
+| A song's file | `POST /api/downloads` with the release and the file's place, as the Download button does; the answer is a link on the site that redirects to the file in the site's storage for a few minutes |
+| Album art | The release's picture, from the site |
 
-**How it behaves toward the site:** about ten requests a second at most, in short bursts; searches remembered for 10 minutes, posts for 5, download links for a minute; the background sync is two requests every three hours; the one-time full scan pauses between pages; songs kept ready are downloaded one at a time with a pause between them. A typical request costs one search and a few post reads, or nothing at all when the catalog already has the song.
+**How it behaves toward the site:** about ten requests a second at most, in short bursts; searches remembered for 10 minutes, releases for 5, download links for a minute; the background sync is one list page every three hours, plus one page for each release it hasn't seen yet; the one-time full scan pauses between pages; songs kept ready are downloaded one at a time with a pause between them. A typical request costs one search and a few release reads, or nothing at all when the catalog already has the song.
 
-**It can break.** These are the site's own page APIs, not an official interface. If the site changes, lookups fail with a message saying so ("the site may have changed"), and everything already in the catalog keeps working. `npm run music-table -- search <words>` shows what the site returns right now.
+**It can break, and it has.** These are the site's own page addresses, not an official interface; the October 2026 rebuild replaced every one the bot used. If the site changes again, lookups fail with a message saying so ("the site may have changed"), the sync logs it and an alert says music-table.com isn't answering, and everything already in the catalog keeps working until it's fixed. `npm run music-table -- search <words>` shows what the site returns right now.
 
 ## How a request is matched
 

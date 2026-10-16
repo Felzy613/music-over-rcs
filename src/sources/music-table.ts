@@ -9,38 +9,27 @@ import { splitTitle } from './titles.ts';
 
 export { splitTitle };
 
-// music-table.com is a Wix blog. A release's post carries the MP3 as a "Download MP3" file the site hosts itself.
-// This client does what the site's own pages do: search, read the post, ask for that file's download link. It only
-// ever uses those site-hosted files; the YouTube players embedded in the same posts are ignored.
+// music-table.com is a site of Jewish music releases (rebuilt on its own in October 2026; it had been a Wix blog). A
+// release's page lists its MP3s, and the page's Download button asks /api/downloads for a short-lived link, which
+// redirects to the file in the site's own storage. This client does what the site's pages do: search, read a release,
+// list releases, ask for a file's link. It only ever uses those site-hosted files; the videos on the same pages are
+// ignored, and releases the site sells are left alone.
 
 export const MUSIC_TABLE_URL = 'https://www.music-table.com';
-
-/** The Wix Blog app's id; the site hands out a visitor token for it, which its own API calls carry. */
-const BLOG_APP_ID = '14bcded7-0066-7c35-14d7-466cb3f09103';
-/** The Wix Site Search app: the quick search behind the site's search box, which answers in about 150 ms. */
-const SEARCH_APP_ID = '1484cb44-49cd-5b39-9681-75188ab429de';
-const SUGGEST_PATH = '/_api/search-services-sitesearch/v1/suggest/federated';
-const SUGGEST_LIMIT = 20;
-/** Node type of an attached file in the blog API's rich content (10 is the number the API uses; "FILE" in other formats). */
-const FILE_NODE_TYPE = 10;
-/** Node type of a button (the "To Download" ones): since October 2026 many posts offer their MP3 as a button with a link, not an attached file. */
-const BUTTON_NODE_TYPE = 19;
+const SUGGEST_PATH = '/api/suggest';
+const DOWNLOADS_PATH = '/api/downloads';
+const LIST_PATH = '/new-music';
+const FEED_PATH = '/feed.xml';
+/** Releases per page of the site's lists. */
+export const LIST_PAGE_SIZE = 48;
 const AUDIO_NAME = /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac)$/i;
-/** Where the site stores uploaded files. It hands out these links itself; anything else is refused. */
-const FILE_HOSTS = ['wixmp.com', 'wixstatic.com', 'usrfiles.com'];
-/** Where a public Google Drive file downloads from. The posts link its "view" page; this is the same file's download. */
-const DRIVE_DOWNLOAD_HOST = 'drive.usercontent.google.com';
+const AUDIO_TYPE = /^(mp3|m4a|aac|ogg|oga|opus|wav|flac)$/i;
+const SLUG = /^[^/?#\s]+$/;
 
 const MAX_QUERY_CHARS = 100;
 const MAX_POSTS_PER_LOOKUP = 5;
-const MAX_FILES_PER_POST = 12;
-const LIST_PATH = '/_api/communities-blog-node-api/_api/posts';
-const IMAGE_HOST = 'https://static.wixstatic.com/media';
-
-/** The site's picture for a post, cropped to 640×360 and served as a JPEG (about 40 KB instead of 1.5 MB). */
-export function coverUrl(imageId: string): string | undefined {
-  return /^[\w~.-]+$/.test(imageId) ? `${IMAGE_HOST}/${imageId}/v1/fill/w_640,h_360,al_c,q_80/cover.jpg` : undefined;
-}
+/** The most files of one release that become songs (an album's tracks). */
+const MAX_FILES_PER_POST = 40;
 
 const POST_CACHE_SIZE = 200;
 const SEARCH_CACHE_SIZE = 100;
@@ -55,18 +44,17 @@ export class MusicTableError extends SourceError {
 
 export interface SearchHit {
   slug: string;
+  /** "Artist - Title", the way the site's releases have always been named. */
   title: string;
   url: string;
-  /** How well the site's quick search thinks it matches (higher is better). Absent from the slower search page. */
+  /** How well the search thinks it matches (higher is better), when it says. */
   score?: number;
 }
 
 export interface AudioFile {
   name: string;
-  /** Where the file is stored; the site signs a download link from this. Empty for a file the post links to directly. */
+  /** The site's id for the file. A download link is asked for by the file's place in the release, not by this. */
   path: string;
-  /** The link the post gives for the file itself (a button), which needs no signing. */
-  url?: string;
   size: number;
   mimeType: string;
 }
@@ -74,24 +62,47 @@ export interface AudioFile {
 export interface Post {
   id: string;
   slug: string;
+  /** "Artist - Title". */
   title: string;
   url: string;
-  /** The audio files attached to the post, in page order. Empty for posts that only embed videos. */
+  /** The audio files of the release, in page order. Empty for releases that are only videos. */
   files: AudioFile[];
-  /** The post's picture (the single's or album's art), sized for a chat. */
+  /** The release's picture (the single's or album's art). */
   cover?: string | undefined;
-  /** How many times the post has been viewed on the site. */
+  /** How many times the release has been viewed on the site. */
   views?: number | undefined;
-  /** ISO time it was first published. */
+  /** ISO time it was published. */
   publishedAt?: string | undefined;
-  /** The site's categories it's in (ids; names come from the feed and the category pages). */
-  categoryIds?: string[] | undefined;
+  /** The site sells it rather than giving it away: its files can't be downloaded here. */
+  forSale?: boolean | undefined;
 }
 
-/** One entry of the site's RSS feed: the newest posts, with the category names the API doesn't give. */
+/** A release as the site's lists show it: no files (its page has those), but its categories, views and date. */
+export interface Release {
+  slug: string;
+  /** "Artist - Title". */
+  title: string;
+  url: string;
+  cover?: string | undefined;
+  views?: number | undefined;
+  publishedAt?: string | undefined;
+  /** The site's categories it's in: "singles", "videos", "weddings", "chanukah", "purim", "vocal"… */
+  categories: string[];
+  forSale?: boolean | undefined;
+}
+
+/** One page of a list: its releases, and which page of how many it is. */
+export interface ReleaseList {
+  releases: Release[];
+  page: number;
+  pages: number;
+}
+
+/** One entry of the site's RSS feed: its newest releases. */
 export interface FeedItem {
   slug: string;
   title: string;
+  /** The feed no longer names categories; kept empty for whoever still reads it. */
   category: string;
   publishedAt: string;
 }
@@ -99,7 +110,7 @@ export interface FeedItem {
 /** One thing the client did (or skipped, because it already knew), for the simulator's "behind the scenes" view. */
 export interface SiteEvent {
   kind: 'token' | 'search' | 'post' | 'link' | 'list' | 'feed' | 'category';
-  /** What it was about: the words searched for, or the post. */
+  /** What it was about: the words searched for, or the release. */
   detail: string;
   ms: number;
   /** Answered from memory, without asking the site. */
@@ -116,16 +127,15 @@ export interface MusicTableOptions {
   /**
    * The pace requests to the site are held to, on average: one every this many milliseconds. Be gentle: it is
    * somebody's small site. Up to `burst` requests may go out at once before the pace applies, which is what lets a
-   * lookup read several posts together. 0 turns the pacing off.
+   * lookup read several releases together. 0 turns the pacing off.
    */
   minIntervalMs?: number;
   burst?: number;
   timeoutMs?: number;
-  tokenTtlMs?: number;
   postTtlMs?: number;
   searchTtlMs?: number;
   linkTtlMs?: number;
-  /** Decides which download links to trust. The default accepts the site's own file hosts over https. */
+  /** Decides which download links to trust. The default accepts only the site's own address (which redirects to its storage). */
   trustedFileUrl?: (url: URL) => boolean;
   /** Hears about each request, and each answer given from memory. A failing listener never affects the lookup. */
   onEvent?: (event: SiteEvent) => void;
@@ -145,10 +155,135 @@ export function decodeEntities(text: string): string {
   });
 }
 
-/** Reads the result links out of the search page. Each result appears twice (picture and title), so this keeps the first. */
+/**
+ * The data a page carries for its scripts, joined into one text. The site's pages (Next.js) send it as a run of
+ * `self.__next_f.push([1, "…"])` scripts, each a JSON string; releases, files and lists are plain JSON inside it.
+ */
+export function pageData(html: string): string {
+  const parts: string[] = [];
+  for (const match of html.matchAll(/self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g)) {
+    try {
+      parts.push(JSON.parse(match[1]!) as string);
+    } catch {
+      // a chunk that isn't a plain string carries nothing we read
+    }
+  }
+  return parts.join('');
+}
+
+/** The JSON object or array that starts at `at` in `text`, read up to its matching bracket; undefined if there is none. */
+export function jsonAt(text: string, at: number): unknown {
+  const open = text[at];
+  if (open !== '{' && open !== '[') return undefined;
+  let depth = 0;
+  let inString = false;
+  for (let i = at; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === '\\') i += 1;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === '{' || c === '[') depth += 1;
+    else if (c === '}' || c === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(at, i + 1));
+        } catch {
+          return undefined;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/** "Artist - Title", the form the rest of the bot splits apart again (`splitTitle`). */
+const joinTitle = (artist: string, title: string): string => (artist && title ? `${artist} - ${title}` : title || artist);
+
+const str = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+
+/** An address the site gave (often a path on itself), made whole. Undefined for anything that isn't a web address. */
+function siteAddress(value: unknown, origin: string): string | undefined {
+  const text = str(value);
+  if (!text) return undefined;
+  try {
+    const url = new URL(text, origin);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const isoTime = (value: unknown): string | undefined => {
+  const text = str(value);
+  const time = text ? new Date(text) : undefined;
+  return time && !Number.isNaN(time.getTime()) ? time.toISOString() : undefined;
+};
+
+/** A release from one of the site's lists, or undefined when the entry isn't one. */
+function toRelease(raw: unknown, origin: string): Release | undefined {
+  const r = (raw ?? {}) as { slug?: unknown; title?: unknown; artist?: unknown; cover?: unknown; categories?: unknown; price?: unknown; views?: unknown; publishedAt?: unknown };
+  const slug = str(r.slug);
+  if (!slug || !SLUG.test(slug)) return undefined;
+  const views = Number(r.views);
+  const cover = siteAddress(r.cover, origin);
+  const publishedAt = isoTime(r.publishedAt);
+  return {
+    slug,
+    title: joinTitle(str(r.artist), str(r.title)) || slug,
+    url: `${origin}/post/${slug}`,
+    categories: Array.isArray(r.categories) ? r.categories.filter((c): c is string => typeof c === 'string' && /^[a-z0-9-]+$/.test(c)) : [],
+    ...(cover ? { cover } : {}),
+    ...(Number.isFinite(views) && views >= 0 ? { views } : {}),
+    ...(publishedAt ? { publishedAt } : {}),
+    ...(typeof r.price === 'number' && r.price > 0 ? { forSale: true } : {}),
+  };
+}
+
+/** The releases a list page shows, and which page of how many it is. */
+export function parseReleaseList(html: string, origin: string): ReleaseList {
+  const data = pageData(html);
+  const at = data.indexOf('"initial":[');
+  const items = at < 0 ? undefined : jsonAt(data, at + '"initial":'.length);
+  if (!Array.isArray(items)) throw new MusicTableError("music-table.com sent a list I couldn't read, so the site may have changed");
+  const paging = /"page":(\d+),"pages":(\d+)/.exec(data.slice(at));
+  const releases = items.map((item) => toRelease(item, origin)).filter((release): release is Release => release !== undefined);
+  const page = Number(paging?.[1] ?? 1);
+  return { releases, page, pages: Math.max(page, Number(paging?.[2] ?? page)) };
+}
+
+/** Reads the releases out of the search box's answer (`/api/suggest`), in the order the site gave. */
+export function parseSuggest(body: unknown, origin: string): SearchHit[] {
+  const releases = (body as { releases?: unknown } | null)?.releases;
+  if (!Array.isArray(releases)) throw new MusicTableError("music-table.com's quick search sent something I couldn't read");
+  const hits: SearchHit[] = [];
+  for (const entry of releases) {
+    const e = (entry ?? {}) as { key?: unknown; title?: unknown; subtitle?: unknown; href?: unknown };
+    const fromHref = /\/post\/([^/?#\s]+)\/?$/.exec(str(e.href))?.[1];
+    const slug = fromHref ?? str(e.key);
+    if (!slug || !SLUG.test(slug)) continue;
+    hits.push({ slug, title: joinTitle(str(e.subtitle), str(e.title)), url: `${origin}/post/${slug}` });
+  }
+  return hits;
+}
+
+/** Reads the releases out of the search page: from its data when it has them, and from its links for anything else. */
 export function parseSearchResults(page: string, baseUrl: string): SearchHit[] {
   const origin = new URL(baseUrl).origin;
   const hits = new Map<string, SearchHit>();
+  const unquote = (text: string | undefined): string => {
+    try {
+      return text ? (JSON.parse(`"${text}"`) as string).trim() : '';
+    } catch {
+      return '';
+    }
+  };
+  for (const match of pageData(page).matchAll(/\{"slug":"([^"\\]+)","title":"((?:[^"\\]|\\.)*)"(?:,"artist":"((?:[^"\\]|\\.)*)")?/g)) {
+    const slug = match[1]!;
+    if (!SLUG.test(slug) || hits.has(slug)) continue;
+    hits.set(slug, { slug, title: joinTitle(unquote(match[3]), unquote(match[2])), url: `${origin}/post/${slug}` });
+  }
   for (const tag of page.match(/<a\b[^>]*>/g) ?? []) {
     const href = /\bhref="([^"]*)"/.exec(tag)?.[1];
     if (!href) continue;
@@ -168,111 +303,53 @@ export function parseSearchResults(page: string, baseUrl: string): SearchHit[] {
   return [...hits.values()];
 }
 
-/** Reads the blog posts out of a quick-search answer, keeping the order and scores the site gave. */
-export function parseSuggest(body: unknown, origin: string): SearchHit[] {
-  const groups = (body as { results?: unknown } | null)?.results;
-  if (!Array.isArray(groups)) throw new MusicTableError("music-table.com's quick search sent something I couldn't read");
-  const hits: SearchHit[] = [];
-  for (const group of groups) {
-    const g = (group ?? {}) as { documentType?: unknown; documents?: unknown };
-    if (g.documentType !== 'public/blog/posts' || !Array.isArray(g.documents)) continue;
-    for (const doc of g.documents) {
-      const d = (doc ?? {}) as { url?: unknown; title?: unknown; _score?: unknown };
-      const slug = typeof d.url === 'string' ? /^\/post\/([^/?#\s]+)\/?$/.exec(d.url)?.[1] : undefined;
-      if (!slug) continue;
-      hits.push({
-        slug,
-        title: typeof d.title === 'string' ? d.title.trim() : '',
-        url: `${origin}/post/${slug}`,
-        ...(typeof d._score === 'number' ? { score: d._score } : {}),
-      });
-    }
-  }
-  return hits;
-}
-
-/** A Google Drive file's id, from the link to its page (a folder, which can't be listed, gives none). */
-const driveFileId = (url: URL): string | undefined =>
-  url.hostname === 'drive.google.com' ? /^\/file\/d\/([\w-]{10,})(?:\/|$)/.exec(url.pathname)?.[1] : undefined;
-
 /**
- * The audio file a post's button links to, when it is one: a file on the site's own storage that ends in an audio
- * extension, or a public Google Drive file on a button that says MP3 or download (not video, and not a folder).
- * Anything else a button links to (tickets, a video, a folder) is not a song.
+ * A release's page: its name, artist, picture and files from the page's data, its date from the page's structured
+ * data, its view count from what the page shows, and whether the site sells it.
  */
-function linkedAudio(button: unknown, title: string): AudioFile | undefined {
-  const b = button as { text?: unknown; link?: { url?: unknown } | null };
-  const href = typeof b.link?.url === 'string' ? b.link.url : '';
-  const label = typeof b.text === 'string' ? b.text : '';
-  let url: URL;
-  try {
-    url = new URL(href);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== 'https:') return undefined;
-  const base = title.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() || 'song';
-  if (FILE_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`))) {
-    const extension = AUDIO_NAME.exec(url.pathname)?.[1]?.toLowerCase();
-    return extension ? { name: `${base}.${extension}`, path: '', url: url.href, size: 0, mimeType: audioTypeOf(`x.${extension}`, '') } : undefined;
-  }
-  const id = driveFileId(url);
-  if (id && /\b(mp3|m4a|audio|download)\b/i.test(label) && !/\b(mp4|video|watch|clip)\b/i.test(label)) {
-    return { name: `${base}.mp3`, path: '', url: `https://${DRIVE_DOWNLOAD_HOST}/download?id=${id}&export=download&confirm=t`, size: 0, mimeType: 'audio/mpeg' };
-  }
-  return undefined;
-}
-
-function parsePost(body: unknown, slug: string, origin: string): Post {
-  const raw = (body ?? {}) as {
-    id?: unknown;
-    title?: unknown;
-    richContent?: { nodes?: unknown };
-    coverImage?: { src?: { id?: unknown } | null };
-    viewCount?: unknown;
-    firstPublishedDate?: unknown;
-    categoryIds?: unknown;
-  };
-  if (typeof raw.id !== 'string' || !raw.id) throw new MusicTableError("music-table.com sent a post I couldn't read");
-  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : slug;
+export function parsePostPage(html: string, slug: string, origin: string): Post {
+  const data = pageData(html);
+  const at = data.indexOf('{"release":{');
+  const block = at < 0 ? undefined : (jsonAt(data, at) as { release?: unknown; files?: unknown } | undefined);
+  const release = (block?.release ?? undefined) as { title?: unknown; artist?: unknown; cover?: unknown } | undefined;
+  if (!block || !release) throw new MusicTableError("music-table.com sent a release page I couldn't read, so the site may have changed");
   const files: AudioFile[] = [];
-  const visit = (node: unknown): void => {
-    if (!node || typeof node !== 'object') return;
-    const n = node as { type?: unknown; fileData?: unknown; buttonData?: unknown; nodes?: unknown };
-    if ((n.type === BUTTON_NODE_TYPE || n.type === 'BUTTON') && n.buttonData && typeof n.buttonData === 'object' && files.length < MAX_FILES_PER_POST) {
-      const linked = linkedAudio(n.buttonData, title);
-      if (linked && !files.some((file) => file.url === linked.url)) files.push(linked);
+  for (const raw of Array.isArray(block.files) ? block.files : []) {
+    const f = (raw ?? {}) as { id?: unknown; name?: unknown; type?: unknown; sizeBytes?: unknown };
+    const name = str(f.name);
+    if (!name || !(AUDIO_NAME.test(name) || AUDIO_TYPE.test(str(f.type)))) continue;
+    if (files.length >= MAX_FILES_PER_POST) break;
+    files.push({ name, path: str(f.id), size: Number(f.sizeBytes) || 0, mimeType: audioTypeOf(AUDIO_NAME.test(name) ? name : `${name}.${str(f.type)}`, '') });
+  }
+  const linked = [...html.matchAll(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)].flatMap((match) => {
+    try {
+      const value = JSON.parse(match[1]!) as unknown;
+      return Array.isArray(value) ? value : [value];
+    } catch {
+      return [];
     }
-    if ((n.type === FILE_NODE_TYPE || n.type === 'FILE') && n.fileData && typeof n.fileData === 'object') {
-      const f = n.fileData as { name?: unknown; path?: unknown; size?: unknown; mimeType?: unknown };
-      const name = typeof f.name === 'string' ? f.name : '';
-      const path = typeof f.path === 'string' ? f.path : '';
-      const mimeType = typeof f.mimeType === 'string' ? f.mimeType : '';
-      if (path && (mimeType.startsWith('audio/') || AUDIO_NAME.test(name)) && files.length < MAX_FILES_PER_POST) {
-        files.push({ name, path, size: Number(f.size) || 0, mimeType: audioTypeOf(name, mimeType) });
-      }
-    }
-    if (Array.isArray(n.nodes)) n.nodes.forEach(visit);
-  };
-  if (Array.isArray(raw.richContent?.nodes)) raw.richContent.nodes.forEach(visit);
-  const imageId = raw.coverImage?.src?.id;
-  const cover = typeof imageId === 'string' ? coverUrl(imageId) : undefined;
-  const views = Number(raw.viewCount);
-  const published = typeof raw.firstPublishedDate === 'string' ? new Date(raw.firstPublishedDate) : undefined;
+  }) as Array<{ url?: unknown; datePublished?: unknown; offers?: { price?: unknown } }>;
+  const own = linked.find((entry) => typeof entry?.url === 'string' && entry.url.endsWith(`/post/${slug}`)) ?? linked[0];
+  const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const priceCents = Number(new RegExp(`"slug":"${escaped}","priceCents":(\\d+)`).exec(data)?.[1] ?? 0);
+  const price = Number(own?.offers?.price ?? 0);
+  const views = Number(/"([\d,]+)"," ","views"/.exec(data)?.[1]?.replace(/,/g, ''));
+  const cover = siteAddress(release.cover, origin);
+  const publishedAt = isoTime(own?.datePublished);
   return {
-    id: raw.id,
+    id: slug,
     slug,
-    title,
+    title: joinTitle(str(release.artist), str(release.title)) || slug,
     url: `${origin}/post/${slug}`,
     files,
     ...(cover ? { cover } : {}),
     ...(Number.isFinite(views) && views >= 0 ? { views } : {}),
-    ...(published && !Number.isNaN(published.getTime()) ? { publishedAt: published.toISOString() } : {}),
-    ...(Array.isArray(raw.categoryIds) ? { categoryIds: raw.categoryIds.filter((id): id is string => typeof id === 'string' && /^[0-9a-f]{24}$/.test(id)) } : {}),
+    ...(publishedAt ? { publishedAt } : {}),
+    ...(priceCents > 0 || price > 0 ? { forSale: true } : {}),
   };
 }
 
-/** Reads the site's RSS feed (`/blog-feed.xml`): its newest posts, each with its category's name. */
+/** Reads the site's RSS feed (`/feed.xml`): its newest releases. */
 export function parseFeed(xml: string): FeedItem[] {
   const text = (item: string, tag: string): string => {
     const match = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`).exec(item);
@@ -314,10 +391,6 @@ function audioTypeOf(name: string, mimeType: string): string {
   return TYPE_BY_EXTENSION[/\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase() ?? ''] ?? 'audio/mpeg';
 }
 
-const defaultTrusted = (url: URL): boolean =>
-  url.protocol === 'https:' &&
-  (url.hostname === DRIVE_DOWNLOAD_HOST || FILE_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`)));
-
 export class MusicTable {
   readonly baseUrl: string;
   #origin: string;
@@ -326,7 +399,6 @@ export class MusicTable {
   #minInterval: number;
   #burst: number;
   #timeout: number;
-  #tokenTtl: number;
   #postTtl: number;
   #searchTtl: number;
   #linkTtl: number;
@@ -334,7 +406,6 @@ export class MusicTable {
   #onEvent: ((event: SiteEvent) => void) | undefined;
   #now: () => number;
   #sleep: (ms: number) => Promise<void>;
-  #session: { blog: string; search: string | undefined; at: number } | undefined;
   #posts = new Map<string, { at: number; post: Post }>();
   #searches = new Map<string, { at: number; hits: SearchHit[] }>();
   #links = new Map<string, { at: number; url: string }>();
@@ -351,11 +422,10 @@ export class MusicTable {
     this.#minInterval = options.minIntervalMs ?? 100;
     this.#burst = Math.max(1, options.burst ?? 5);
     this.#timeout = options.timeoutMs ?? 20_000;
-    this.#tokenTtl = options.tokenTtlMs ?? 20 * 60_000;
     this.#postTtl = options.postTtlMs ?? 5 * 60_000;
     this.#searchTtl = options.searchTtlMs ?? 10 * 60_000;
     this.#linkTtl = options.linkTtlMs ?? 60_000;
-    this.#trusted = options.trustedFileUrl ?? defaultTrusted;
+    this.#trusted = options.trustedFileUrl ?? ((url) => url.origin === this.#origin);
     this.#onEvent = options.onEvent;
     this.#now = options.now ?? Date.now;
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -363,7 +433,7 @@ export class MusicTable {
     this.#refilled = this.#now();
   }
 
-  /** The address stored in the catalog for a post's nth audio file. It resolves to a download link when it is played. */
+  /** The address stored in the catalog for a release's nth audio file. It resolves to a download link when it is played. */
   trackUrl(post: Pick<Post, 'slug'>, index: number): string {
     return `${this.#origin}/post/${post.slug}#${index}`;
   }
@@ -407,7 +477,7 @@ export class MusicTable {
 
   /**
    * Holds the starts of requests to the configured pace: a small burst may go at once, then one per interval.
-   * Requests may overlap once started, which is how several posts are read at the same time.
+   * Requests may overlap once started, which is how several releases are read at the same time.
    */
   async #paced<T>(run: () => Promise<T>): Promise<T> {
     const turn = this.#queue.then(async () => {
@@ -435,67 +505,22 @@ export class MusicTable {
     });
   }
 
-  /** The visitor session: one token for each of the site's apps we talk to. Fetched once, renewed when it ages or is refused. */
-  async #visitor(refresh: boolean): Promise<{ blog: string; search: string | undefined }> {
-    if (!refresh && this.#session && this.#now() - this.#session.at < this.#tokenTtl) return this.#session;
-    return this.#once('session', async () => {
-      const started = this.#now();
-      const res = await this.#send(`${this.baseUrl}/_api/v1/access-tokens`, { headers: { accept: 'application/json' } });
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => {});
-        throw new MusicTableError(`music-table.com wouldn't start a session (HTTP ${res.status})`);
-      }
-      let blog: unknown;
-      let search: unknown;
-      try {
-        const body = (await res.json()) as { apps?: Record<string, { instance?: unknown }> };
-        blog = body.apps?.[BLOG_APP_ID]?.instance;
-        search = body.apps?.[SEARCH_APP_ID]?.instance;
-      } catch {
-        blog = undefined;
-      }
-      if (typeof blog !== 'string' || !blog) {
-        throw new MusicTableError("music-table.com didn't hand out a session, so the site may have changed");
-      }
-      const session = { blog, search: typeof search === 'string' && search ? search : undefined, at: this.#now() };
-      this.#session = session;
-      this.#emit({ kind: 'token', detail: 'visitor session', ms: this.#now() - started, cached: false, status: res.status });
-      return session;
-    });
-  }
-
-  /** Gets the visitor token ahead of the first request, so that request doesn't wait for it. Never throws. */
-  async warm(): Promise<void> {
-    try {
-      await this.#visitor(false);
-    } catch {
-      // the first real request will try again, and report the problem
+  /** A page of the site, as text; `what` names it in the error when the site refuses. */
+  async #page(path: string, what: string): Promise<{ status: number; text: string }> {
+    const res = await this.#send(`${this.baseUrl}${path}`, { headers: { accept: 'text/html' } });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      if (res.status === 404) throw new MusicTableError(`${what} isn't on music-table.com (any more)`);
+      throw new MusicTableError(`music-table.com's ${what} answered HTTP ${res.status}`);
     }
-  }
-
-  /** A call to one of the site's APIs with its visitor token. A rejected token is replaced once and the call repeated. */
-  async #api(path: string, init: RequestInit = {}, app: 'blog' | 'search' = 'blog'): Promise<Response> {
-    for (let attempt = 0; ; attempt += 1) {
-      const session = await this.#visitor(attempt > 0);
-      const token = app === 'search' ? session.search : session.blog;
-      if (!token) throw new MusicTableError("music-table.com didn't hand out a session for its search");
-      const res = await this.#send(`${this.baseUrl}${path}`, {
-        ...init,
-        headers: { accept: 'application/json', ...(init.headers as Record<string, string> | undefined), authorization: token },
-      });
-      if ((res.status === 401 || res.status === 403) && attempt === 0) {
-        await res.body?.cancel().catch(() => {});
-        continue;
-      }
-      return res;
-    }
+    return { status: res.status, text: await res.text() };
   }
 
   /**
-   * The site's search, best match first: up to 20 results. It uses the quick search behind the site's search box,
-   * which is much faster than the search page, and falls back to the page if the quick search fails.
+   * The site's search, best match first: up to 20 results. It uses the search box's quick answer (which also
+   * corrects spelling), and falls back to the search page if that fails.
    */
-  async search(query: string, limit = SUGGEST_LIMIT): Promise<SearchHit[]> {
+  async search(query: string, limit = 20): Promise<SearchHit[]> {
     const q = query.replace(/\s+/g, ' ').trim().slice(0, MAX_QUERY_CHARS);
     if (!q) return [];
     const key = `quick:${q.toLowerCase()}`;
@@ -521,7 +546,7 @@ export class MusicTable {
     });
   }
 
-  /** The site's search page: slower (it is a whole page), but it forgives typos, so it is used to find the right spelling. */
+  /** The site's search page: slower (it is a whole page), but it lists more, so it is used to find the right spelling. */
   async searchPage(query: string, limit = 12): Promise<SearchHit[]> {
     const q = query.replace(/\s+/g, ' ').trim().slice(0, MAX_QUERY_CHARS);
     if (!q) return [];
@@ -546,15 +571,7 @@ export class MusicTable {
   }
 
   async #quickSearch(q: string): Promise<SearchHit[]> {
-    const res = await this.#api(
-      SUGGEST_PATH,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query: q, limit: SUGGEST_LIMIT, includeSeoHidden: false, language: 'en', properties: [] }),
-      },
-      'search',
-    );
+    const res = await this.#send(`${this.baseUrl}${SUGGEST_PATH}?q=${encodeURIComponent(q)}`, { headers: { accept: 'application/json' } });
     if (!res.ok) {
       await res.body?.cancel().catch(() => {});
       throw new MusicTableError(`music-table.com's quick search answered HTTP ${res.status}`);
@@ -569,17 +586,13 @@ export class MusicTable {
   }
 
   async #fetchSearchPage(q: string): Promise<SearchHit[]> {
-    const res = await this.#send(`${this.baseUrl}/search?q=${encodeURIComponent(q)}`, { headers: { accept: 'text/html' } });
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      throw new MusicTableError(`music-table.com's search answered HTTP ${res.status}`);
-    }
-    return parseSearchResults(await res.text(), this.baseUrl);
+    const { text } = await this.#page(`/search?q=${encodeURIComponent(q)}`, 'search');
+    return parseSearchResults(text, this.baseUrl);
   }
 
-  /** A post and the audio files attached to it. */
+  /** A release and its audio files. */
   async getPost(slug: string): Promise<Post> {
-    if (!/^[^/?#\s]+$/.test(slug)) throw new MusicTableError("that isn't a music-table.com post");
+    if (!SLUG.test(slug)) throw new MusicTableError("that isn't a music-table.com release");
     const cached = this.#posts.get(slug);
     if (cached && this.#now() - cached.at < this.#postTtl) {
       this.#emit({ kind: 'post', detail: slug, ms: 0, cached: true, note: filesNote(cached.post) });
@@ -587,22 +600,16 @@ export class MusicTable {
     }
     return this.#once(`post:${slug}`, async () => {
       const started = this.#now();
-      const res = await this.#api(`/_api/communities-blog-node-api/_api/posts/${slug}?fieldsets=content`);
+      const res = await this.#send(`${this.baseUrl}/post/${encodeURIComponent(slug)}`, { headers: { accept: 'text/html' } });
       if (res.status === 404) {
         await res.body?.cancel().catch(() => {});
-        throw new MusicTableError('that post is gone from music-table.com');
+        throw new MusicTableError('that release is gone from music-table.com');
       }
       if (!res.ok) {
         await res.body?.cancel().catch(() => {});
         throw new MusicTableError(`music-table.com answered HTTP ${res.status}`);
       }
-      let body: unknown;
-      try {
-        body = await res.json();
-      } catch {
-        throw new MusicTableError("music-table.com sent a post I couldn't read");
-      }
-      const post = parsePost(body, slug, this.#origin);
+      const post = parsePostPage(await res.text(), slug, this.#origin);
       this.#rememberPost(post);
       this.#emit({ kind: 'post', detail: slug, ms: this.#now() - started, cached: false, status: res.status, note: filesNote(post) });
       return post;
@@ -616,64 +623,36 @@ export class MusicTable {
   }
 
   /**
-   * The newest posts, `size` at a time from `offset`, each read in full (files, picture, views) in the same request.
-   * This is how the catalog is kept up to date. Posts read this way are remembered like any other.
+   * One page of the site's list of releases (48 a page), newest first, or most viewed first; all of them, or one
+   * category's ("chanukah"). A list says which categories each release is in, its views and its date, but not its
+   * files: `getPost` reads those.
    */
-  async listPosts(offset = 0, size = 20, categoryId?: string): Promise<Post[]> {
+  async listReleases(page = 1, options: { category?: string | undefined; sort?: 'newest' | 'views' } = {}): Promise<ReleaseList> {
     const started = this.#now();
-    const only = categoryId && /^[0-9a-f]{24}$/.test(categoryId) ? `&categoryIds=${categoryId}` : '';
-    const res = await this.#api(`${LIST_PATH}?offset=${Math.max(0, Math.floor(offset))}&size=${Math.min(50, Math.max(1, Math.floor(size)))}&fieldsets=content${only}`);
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      throw new MusicTableError(`music-table.com's post list answered HTTP ${res.status}`);
+    const query = new URLSearchParams({ all: '1' });
+    if (page > 1) query.set('page', String(Math.floor(page)));
+    if (options.category) {
+      if (!/^[a-z0-9-]+$/.test(options.category)) throw new MusicTableError("that isn't a category on music-table.com");
+      query.set('category', options.category);
     }
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch {
-      throw new MusicTableError("music-table.com sent a post list I couldn't read");
-    }
-    const raw = Array.isArray(body) ? body : (body as { posts?: unknown } | null)?.posts;
-    if (!Array.isArray(raw)) throw new MusicTableError("music-table.com sent a post list I couldn't read");
-    const posts: Post[] = [];
-    for (const item of raw) {
-      const slug = (item as { slug?: unknown } | null)?.slug;
-      if (typeof slug !== 'string' || !/^[^/?#\s]+$/.test(slug)) continue;
-      try {
-        posts.push(parsePost(item, slug, this.#origin));
-      } catch {
-        // one odd post shouldn't hide the rest
-      }
-    }
-    for (const post of posts) this.#rememberPost(post);
-    const withMusic = posts.filter((post) => post.files.length > 0).length;
-    this.#emit({ kind: 'list', detail: `${posts.length} posts`, ms: this.#now() - started, cached: false, status: res.status, note: `${withMusic} with MP3s` });
-    return posts;
+    if (options.sort === 'views') query.set('sort', 'views');
+    const { status, text } = await this.#page(`${LIST_PATH}?${query}`, options.category ? `${options.category} list` : 'list of releases');
+    const list = parseReleaseList(text, this.#origin);
+    this.#emit({
+      kind: 'list',
+      detail: `${options.category ?? 'all'} page ${list.page} of ${list.pages}`,
+      ms: this.#now() - started,
+      cached: false,
+      status,
+      note: `${list.releases.length} releases`,
+    });
+    return list;
   }
 
-  /**
-   * The posts a category's page shows (its newest two dozen), by their addresses. Only used to learn which id the
-   * site gives a category, once; the post list does the rest.
-   */
-  async categoryPageSlugs(slug: string): Promise<string[]> {
-    if (!/^[a-z0-9-]+$/.test(slug)) throw new MusicTableError("that isn't a category on music-table.com");
-    const started = this.#now();
-    const res = await this.#send(`${this.baseUrl}/new-music/categories/${slug}`, { headers: { accept: 'text/html' } });
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      // No such category on the site (now): an empty list, not trouble.
-      if (res.status === 404) return [];
-      throw new MusicTableError(`music-table.com's ${slug} page answered HTTP ${res.status}`);
-    }
-    const slugs = [...new Set((await res.text()).match(/\/post\/[a-z0-9-]+/g) ?? [])].map((path) => path.slice('/post/'.length));
-    this.#emit({ kind: 'category', detail: slug, ms: this.#now() - started, cached: false, status: res.status, note: `${slugs.length} posts` });
-    return slugs;
-  }
-
-  /** The site's RSS feed: its newest posts, with category names ("Singles", "Videos"…). */
+  /** The site's RSS feed: its newest releases. */
   async feed(): Promise<FeedItem[]> {
     const started = this.#now();
-    const res = await this.#send(`${this.baseUrl}/blog-feed.xml`, { headers: { accept: 'application/rss+xml, application/xml, text/xml' } });
+    const res = await this.#send(`${this.baseUrl}${FEED_PATH}`, { headers: { accept: 'application/rss+xml, application/xml, text/xml' } });
     if (!res.ok) {
       await res.body?.cancel().catch(() => {});
       throw new MusicTableError(`music-table.com's feed answered HTTP ${res.status}`);
@@ -683,41 +662,30 @@ export class MusicTable {
     return items;
   }
 
-  /** Asks the site for a time-limited download link to one of a post's files, the way its Download button does. */
-  async #sign(post: Post, file: AudioFile): Promise<string> {
+  /** Asks the site for a short-lived download link to one of a release's files, the way its Download button does. */
+  async #sign(post: Post, index: number): Promise<string> {
+    if (post.forSale) throw new MusicTableError(`"${post.title}" is sold on music-table.com, not given away, so I can't download it`);
     const started = this.#now();
-    if (file.url) {
-      // The post links the file itself; there is nothing to sign, but the same rule applies to where it may point.
-      const direct = new URL(file.url);
-      if (!this.#trusted(direct)) throw new MusicTableError('music-table.com pointed me at a download host I do not trust');
-      this.#emit({ kind: 'link', detail: post.slug, ms: this.#now() - started, cached: false, note: 'download link from the post' });
-      return direct.href;
-    }
-    const res = await this.#api('/_api/communities-blog-node-api/v2/files/download-url', {
+    const res = await this.#send(`${this.baseUrl}${DOWNLOADS_PATH}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ postId: post.id, filePath: file.path }),
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'release', slug: post.slug, index }),
     });
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      throw new MusicTableError(`music-table.com wouldn't give out the download link (HTTP ${res.status})`);
-    }
-    let link: unknown;
+    let body: { url?: unknown; error?: unknown } = {};
     try {
-      link = ((await res.json()) as { url?: unknown }).url;
+      body = (await res.json()) as { url?: unknown; error?: unknown };
     } catch {
-      link = undefined;
+      // read below as no link
     }
-    let url: URL | undefined;
-    try {
-      url = typeof link === 'string' ? new URL(link) : undefined;
-    } catch {
-      url = undefined;
+    if (body.error === 'buy' || body.error === 'login') {
+      throw new MusicTableError(`"${post.title}" is sold on music-table.com, not given away, so I can't download it`);
     }
-    if (!url) throw new MusicTableError("music-table.com sent a download link I couldn't read");
-    if (!this.#trusted(url)) throw new MusicTableError('music-table.com pointed me at a download host I do not trust');
+    if (!res.ok) throw new MusicTableError(`music-table.com wouldn't give out the download link (HTTP ${res.status})`);
+    const href = siteAddress(body.url, this.#origin);
+    if (!href) throw new MusicTableError("music-table.com sent a download link I couldn't read");
+    if (!this.#trusted(new URL(href))) throw new MusicTableError('music-table.com pointed me at a download host I do not trust');
     this.#emit({ kind: 'link', detail: post.slug, ms: this.#now() - started, cached: false, status: res.status, note: 'download link signed' });
-    return url.href;
+    return href;
   }
 
   async #fileFor(ref: { slug: string; index: number }): Promise<{ post: Post; file: AudioFile }> {
@@ -725,13 +693,13 @@ export class MusicTable {
     const file = post.files[ref.index];
     if (!file) {
       throw new MusicTableError(
-        post.files.length === 0 ? `"${post.title}" has no MP3 to download on music-table.com` : 'that file is no longer on the post',
+        post.files.length === 0 ? `"${post.title}" has no MP3 to download on music-table.com` : 'that file is no longer on the release',
       );
     }
     return { post, file };
   }
 
-  /** A signed link to the file: the one made a moment ago when there is one, otherwise a new one. */
+  /** A download link to the file: the one made a moment ago when there is one, otherwise a new one. */
   async #linkFor(ref: { slug: string; index: number }, known?: { post: Post; file: AudioFile }): Promise<string> {
     const key = `${ref.slug}#${ref.index}`;
     const cached = this.#links.get(key);
@@ -739,21 +707,21 @@ export class MusicTable {
       this.#emit({ kind: 'link', detail: ref.slug, ms: 0, cached: true, note: 'download link reused' });
       return cached.url;
     }
-    const { post, file } = known ?? (await this.#fileFor(ref));
-    const url = await this.#sign(post, file);
+    const { post } = known ?? (await this.#fileFor(ref));
+    const url = await this.#sign(post, ref.index);
     this.#links.set(key, { at: this.#now(), url });
     return url;
   }
 
-  /** Turns a catalog address made by `trackUrl` into a direct, signed link to the MP3. Other URLs pass through unchanged. */
+  /** Turns a catalog address made by `trackUrl` into a download link for the file. Other URLs pass through unchanged. */
   async resolveUrl(raw: string): Promise<string> {
     const ref = this.parseTrackUrl(raw);
     return ref ? this.#linkFor(ref) : raw;
   }
 
   /**
-   * What a catalog address points at, without downloading it: a signed link, and the file's type and size as the
-   * post states them. Other URLs are not ours and give nothing.
+   * What a catalog address points at, without downloading it: a download link, and the file's type and size as the
+   * release states them. Other URLs are not ours and give nothing.
    */
   async inspect(raw: string): Promise<{ link: string; type: string; bytes: number } | undefined> {
     const ref = this.parseTrackUrl(raw);
@@ -763,10 +731,13 @@ export class MusicTable {
   }
 }
 
-const filesNote = (post: Post): string => (post.files.length === 0 ? 'no MP3 (video or news)' : `${post.files.length} MP3`);
+const filesNote = (post: Post): string =>
+  post.forSale ? 'for sale, not free' : post.files.length === 0 ? 'no MP3 (video or news)' : `${post.files.length} MP3`;
 
 /** The tracks a post offers, named the way the catalog stores them. */
 export function tracksOf(table: Pick<MusicTable, 'trackUrl'>, post: Post): NewTrack[] {
+  // A release the site sells can't be downloaded here, so it isn't offered as a song.
+  if (post.forSale) return [];
   const { artist, title } = splitTitle(post.title);
   return post.files.map((file, index) => {
     let name = title;

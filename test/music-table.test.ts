@@ -13,6 +13,9 @@ import {
   MusicTable,
   MusicTableError,
   musicTableFromEnv,
+  pageData,
+  parsePostPage,
+  parseReleaseList,
   parseSearchResults,
   parseSuggest,
   resolvingAudio,
@@ -24,8 +27,6 @@ import {
 import type { Reply } from '../src/types.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
 import { startMockMusicTable, type MockMusicTable, type MockPost } from './helpers/mock-music-table.ts';
-
-const BLOG_APP_ID = '14bcded7-0066-7c35-14d7-466cb3f09103';
 
 const POSTS: MockPost[] = [
   { slug: 'yoely-weiss-shabbos', title: 'Yoely Weiss - Shabbos', files: [{ name: 'Yoely Weiss - Shabbos.mp3' }], video: true },
@@ -101,37 +102,45 @@ describe('music-table.com text helpers', () => {
       { slug: 'with-query', title: 'Query', url: `${base}/post/with-query` },
     ]);
   });
+
+  test('parseSearchResults reads the releases out of the page data first, joining artist and title', () => {
+    const base = 'https://www.music-table.com';
+    const data = `44:["$","$L48",null,{"items":[{"key":"a","node":{"release":{"slug":"yoely-weiss-shabbos","title":"Shabbos","artist":"Yoely Weiss","cover":null}}},{"key":"b","node":{"wedding":{"slug":"june-9-wedding","title":"June 9 \\"26 Wedding"}}}]}]`;
+    const page = `<html><script>self.__next_f.push([1,${JSON.stringify(data)}])</script><a href="/post/yoely-weiss-shabbos">again</a><a title="Only linked" href="/post/only-linked">x</a></html>`;
+    assert.equal(pageData(page), data);
+    assert.deepEqual(parseSearchResults(page, base), [
+      { slug: 'yoely-weiss-shabbos', title: 'Yoely Weiss - Shabbos', url: `${base}/post/yoely-weiss-shabbos` },
+      { slug: 'june-9-wedding', title: 'June 9 "26 Wedding', url: `${base}/post/june-9-wedding` },
+      { slug: 'only-linked', title: 'Only linked', url: `${base}/post/only-linked` },
+    ]);
+  });
 });
 
 describe('parseSuggest', () => {
   const base = 'https://www.music-table.com';
 
-  test('keeps blog posts in the order and with the scores the site gave, and ignores everything else', () => {
+  test('keeps the releases in the order the search box gave, as "Artist - Title", and ignores everything else', () => {
     const answer = {
-      results: [
-        { documentType: 'public/stores/products', documents: [{ title: 'A product', url: '/product/x' }] },
-        {
-          documentType: 'public/blog/posts',
-          documents: [
-            { _score: 144.7, title: ' Yoely Weiss - Shabbos ', url: '/post/yoely-weiss-shabbos' },
-            { title: 'No score', url: '/post/no-score/' },
-            { title: 'Not a post', url: '/blog/category/singles' },
-            { title: 'No url' },
-            null,
-          ],
-        },
+      completions: [],
+      corrected: 'yoely weiss shabbos',
+      artists: [{ key: 'yoelyweiss', title: 'Yoely Weiss', href: `${base}/artists/yoely-weiss` }],
+      releases: [
+        { key: 'yoely-weiss-shabbos', title: ' Shabbos ', subtitle: 'Yoely Weiss', href: `${base}/post/yoely-weiss-shabbos` },
+        { key: 'no-href', title: 'Untitled Artist Song', subtitle: '' },
+        { key: 'bad/key', title: 'Bad', subtitle: 'X' },
+        null,
       ],
+      albums: [{ key: 'an-album', title: 'Album', href: `${base}/post/an-album` }],
     };
     assert.deepEqual(parseSuggest(answer, base), [
-      { slug: 'yoely-weiss-shabbos', title: 'Yoely Weiss - Shabbos', url: `${base}/post/yoely-weiss-shabbos`, score: 144.7 },
-      { slug: 'no-score', title: 'No score', url: `${base}/post/no-score` },
+      { slug: 'yoely-weiss-shabbos', title: 'Yoely Weiss - Shabbos', url: `${base}/post/yoely-weiss-shabbos` },
+      { slug: 'no-href', title: 'Untitled Artist Song', url: `${base}/post/no-href` },
     ]);
   });
 
   test('an empty answer is no results, and an unreadable one is an error fit for the user', () => {
-    assert.deepEqual(parseSuggest({ results: [] }, base), []);
-    assert.deepEqual(parseSuggest({ results: [{ documentType: 'public/blog/posts', documents: [] }] }, base), []);
-    for (const bad of [null, {}, { results: 'nope' }, 'text']) {
+    assert.deepEqual(parseSuggest({ releases: [] }, base), []);
+    for (const bad of [null, {}, { releases: 'nope' }, 'text', { results: [] }]) {
       assert.throws(() => parseSuggest(bad, base), (err) => err instanceof MusicTableError && /couldn't read/.test(err.message));
     }
   });
@@ -182,7 +191,7 @@ describe('MusicTable client', () => {
   test('getPost returns only the audio files, and none for a video-only post', async () => {
     const t = table();
     const shabbos = await t.getPost('yoely-weiss-shabbos');
-    assert.equal(shabbos.id, 'id-yoely-weiss-shabbos');
+    assert.equal(shabbos.id, 'yoely-weiss-shabbos');
     assert.equal(shabbos.title, 'Yoely Weiss - Shabbos');
     assert.deepEqual(shabbos.files.map((file) => file.name), ['Yoely Weiss - Shabbos.mp3']);
     assert.equal((await t.getPost('yoely-weiss-wedding-clip')).files.length, 0);
@@ -207,20 +216,10 @@ describe('MusicTable client', () => {
     await assert.rejects(t.getPost('nope/../../etc'), (err) => err instanceof MusicTableError);
   });
 
-  test('one visitor token serves many calls; a rejected one is replaced once and the call repeated', async () => {
-    const t = table();
-    await t.getPost('yoely-weiss-shabbos');
-    await t.getPost('mendy-weiss-album');
-    assert.equal(site.tokensIssued, 1);
-    site.expireTokens();
-    await t.getPost('yoely-weiss-purim-26');
-    assert.equal(site.tokensIssued, 2);
-  });
-
-  test('gives up, with the status in the message, when a fresh token is refused too', async () => {
+  test('a site that turns the bot away is reported with its status, in words fit for the user', async () => {
     site.rejectAll = true;
-    await assert.rejects(table().getPost('yoely-weiss-shabbos'), (err) => err instanceof MusicTableError && /HTTP 401/.test(err.message));
-    assert.equal(site.tokensIssued, 2);
+    await assert.rejects(table().getPost('yoely-weiss-shabbos'), (err) => err instanceof MusicTableError && /HTTP 403/.test(err.message));
+    await assert.rejects(table().listReleases(), (err) => err instanceof MusicTableError && /HTTP 403/.test(err.message));
   });
 
   test('requests are spaced out, not sent back to back', async () => {
@@ -238,8 +237,8 @@ describe('MusicTable client', () => {
     await t.search('a');
     await t.search('b');
     await t.search('c');
-    // The first request fetches the visitor session; each search then starts 500 ms after the one before.
-    assert.deepEqual(waits, [500, 500, 500]);
+    // The first goes at once; each search then starts 500 ms after the one before.
+    assert.deepEqual(waits, [500, 500]);
   });
 
   test('a small burst goes out at once, then the pace applies, and the burst comes back after a quiet spell', async () => {
@@ -254,14 +253,16 @@ describe('MusicTable client', () => {
         clock += ms;
       },
     });
-    await t.search('a'); // the visitor session and this search use the two free starts
-    await t.search('b'); // so this one waits for the pace
+    await t.search('a'); // these two use the two free starts
+    await t.search('b');
+    assert.deepEqual(waits, []);
+    await t.search('c'); // so this one waits for the pace
     assert.deepEqual(waits, [1000]);
     clock += 10_000; // a quiet spell fills the burst up again
-    await t.search('c');
     await t.search('d');
-    assert.deepEqual(waits, [1000], 'two more starts went out without waiting');
     await t.search('e');
+    assert.deepEqual(waits, [1000], 'two more starts went out without waiting');
+    await t.search('f');
     assert.deepEqual(waits, [1000, 1000]);
   });
 
@@ -295,9 +296,8 @@ describe('MusicTable client', () => {
   test('resolveUrl turns a post address into a direct, signed link and leaves other URLs alone', async () => {
     const t = table();
     const link = await t.resolveUrl(t.trackUrl({ slug: 'yoely-weiss-shabbos' }, 0));
-    assert.ok(link.startsWith(`${site.url}/files/inst-1/`), link);
-    assert.match(link, /token=T1/);
-    assert.ok(!link.includes(' '), 'spaces in the site’s raw link are encoded');
+    assert.ok(link.startsWith(`${site.url}/api/download/`), link);
+    assert.equal(site.signed, 1);
     assert.equal(await t.resolveUrl('https://cdn.example.test/a.mp3'), 'https://cdn.example.test/a.mp3');
     assert.equal(await t.resolveUrl(`${site.url}/new-music`), `${site.url}/new-music`);
   });
@@ -322,42 +322,33 @@ describe('MusicTable client', () => {
     );
     await assert.rejects(
       t.resolveUrl(t.trackUrl({ slug: 'mendy-weiss-album' }, 5)),
-      (err) => err instanceof MusicTableError && /no longer on the post/.test(err.message),
+      (err) => err instanceof MusicTableError && /no longer on the release/.test(err.message),
     );
   });
 
-  test('by default it refuses a download link that is not on the site’s own https file hosts', async () => {
-    const strict = new MusicTable({ baseUrl: site.url, minIntervalMs: 0 });
-    await assert.rejects(
-      strict.resolveUrl(strict.trackUrl({ slug: 'yoely-weiss-shabbos' }, 0)),
-      (err) => err instanceof MusicTableError && /do not trust/.test(err.message),
-    );
-
-    const stub = (link: string): typeof fetch =>
-      (async (input: string | URL | Request) => {
-        const { pathname } = new URL(String(input));
-        if (pathname === '/_api/v1/access-tokens') return Response.json({ apps: { [BLOG_APP_ID]: { instance: 't' } } });
-        if (pathname.startsWith('/_api/communities-blog-node-api/_api/posts/')) {
-          const file = { name: 'B.mp3', mimeType: 'audio/mpeg', path: '/x/B.mp3', size: 5 };
-          return Response.json({ id: 'p1', title: 'A - B', richContent: { nodes: [{ type: 10, fileData: file }] } });
-        }
-        if (pathname.endsWith('/files/download-url')) return Response.json({ url: link });
-        return new Response('nope', { status: 404 });
-      }) as typeof fetch;
+  test('by default it accepts only a download link on the site itself (which redirects to its storage)', async () => {
     const via = (link: string) => {
-      const t = new MusicTable({ fetch: stub(link), minIntervalMs: 0 });
-      return t.resolveUrl(t.trackUrl({ slug: 'a-b' }, 0));
+      const stub = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (new URL(String(input)).pathname === '/api/downloads') return Response.json({ url: link });
+        return fetch(input, init);
+      }) as typeof fetch;
+      const t = new MusicTable({ baseUrl: site.url, fetch: stub, minIntervalMs: 0 });
+      return t.resolveUrl(t.trackUrl({ slug: 'yoely-weiss-shabbos' }, 0));
     };
-    assert.match(await via('https://wixmp-abc.wixmp.com/p/B.mp3?token=1'), /^https:\/\/wixmp-abc\.wixmp\.com\//);
-    for (const bad of [
-      'http://wixmp-abc.wixmp.com/p/B.mp3',
-      'https://evil.example/B.mp3',
-      'https://notwixmp.com/x.mp3',
-      'https://wixmp.com.evil.example/x.mp3',
-      'not a url',
-    ]) {
+    assert.equal(await via('/api/download/abc'), `${site.url}/api/download/abc`);
+    assert.equal(await via(`${site.url}/api/download/def`), `${site.url}/api/download/def`);
+    for (const bad of ['https://evil.example/B.mp3', site.url.replace('http://', 'https://') + '/api/download/x', 'javascript:alert(1)']) {
       await assert.rejects(via(bad), (err) => err instanceof MusicTableError, bad);
     }
+  });
+
+  test('downloads go through the site’s redirect to its storage, and arrive whole', async () => {
+    const t = table();
+    const link = await t.resolveUrl(t.trackUrl({ slug: 'mendy-weiss-album' }, 1));
+    const res = await fetch(link);
+    assert.equal(res.status, 200);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), site.bytes('mendy-weiss-album', 1));
+    assert.deepEqual(site.fileRequests, ['GET /files/mendy-weiss-album/1/Two.mp3']);
   });
 
   test('musicTableFromEnv is on unless MUSIC_TABLE says off, and can be pointed elsewhere', () => {
@@ -397,7 +388,7 @@ describe('resolvingAudio', () => {
     assert.deepEqual(await wrapped.checkAudio(url), { ok: true, type: 'audio/mpeg', bytes: site.bytes('yoely-weiss-shabbos').length });
     assert.deepEqual(calls, [], 'no separate request is made just to check it');
     await wrapped.fetchAudio(url, 'Yoely Weiss — Shabbos');
-    assert.match(calls[0]!, new RegExp(`^fetch ${site.url}/files/inst-1/.*token=T1.* as Yoely Weiss — Shabbos$`));
+    assert.match(calls[0]!, new RegExp(`^fetch ${site.url}/api/download/\\S+ as Yoely Weiss — Shabbos$`));
     await wrapped.checkAudio('https://cdn.example.test/a.mp3');
     assert.equal(calls[1], 'check https://cdn.example.test/a.mp3');
   });
@@ -553,7 +544,7 @@ describe('looking things up on the site from the bot', () => {
       posts[0]!.gone = true;
       const later = setup({ site: mine, catalog }); // a fresh client, as after a restart
       assert.deepEqual(await later.ask('a song'), [
-        { kind: 'text', text: 'I can\'t send "Some Band — A Song": that post is gone from music-table.com.' },
+        { kind: 'text', text: 'I can\'t send "Some Band — A Song": that release is gone from music-table.com.' },
       ]);
     } finally {
       await mine.close();
@@ -752,33 +743,11 @@ describe('how the lookup chooses and reads', () => {
     assert.equal(site.searches.length, 2);
   });
 
-  test('one visitor session is fetched however many requests start together', async () => {
-    const { table } = make();
-    await Promise.all([table.getPost('yoely-weiss-shabbos'), table.getPost('mendy-weiss-album'), table.getPost('yoely-weiss-purim-26')]);
-    assert.equal(site.tokensIssued, 1);
-  });
-
   test('asking for the same post twice at once reads it once', async () => {
     site.postDelayMs = 40;
     const { table } = make();
     await Promise.all([table.getPost('yoely-weiss-shabbos'), table.getPost('yoely-weiss-shabbos')]);
     assert.equal(site.postReads.length, 1);
-  });
-
-  test('warm gets the session ahead of the first request and never throws', async () => {
-    const { table } = make();
-    await table.warm();
-    assert.equal(site.tokensIssued, 1);
-    await table.getPost('yoely-weiss-shabbos');
-    assert.equal(site.tokensIssued, 1, 'the first real request did not have to wait for it');
-    const dead = new MusicTable({
-      baseUrl: site.url,
-      minIntervalMs: 0,
-      fetch: async () => {
-        throw new TypeError('down');
-      },
-    });
-    await dead.warm();
   });
 
   test('reports what it did, and what it already knew, to a listener that may even be broken', async () => {
@@ -790,9 +759,9 @@ describe('how the lookup chooses and reads', () => {
     await table.resolveUrl(url);
     assert.deepEqual(
       events.map((event) => `${event.kind}${event.cached ? ' (memory)' : ''}`),
-      ['token', 'search', 'search (memory)', 'post', 'link', 'link (memory)'],
+      ['search', 'search (memory)', 'post', 'link', 'link (memory)'],
     );
-    assert.equal(events[3]?.note, '1 MP3');
+    assert.equal(events[2]?.note, '1 MP3');
 
     const broken = new MusicTable({
       baseUrl: site.url,
@@ -807,7 +776,7 @@ describe('how the lookup chooses and reads', () => {
   test('inspect gives a site file’s signed link, type and size, and nothing for other URLs', async () => {
     const { table } = make();
     const info = await table.inspect(table.trackUrl({ slug: 'yoely-weiss-shabbos' }, 0));
-    assert.ok(info?.link.startsWith(`${site.url}/files/`));
+    assert.ok(info?.link.startsWith(`${site.url}/api/download/`));
     assert.equal(info?.type, 'audio/mpeg');
     assert.equal(info?.bytes, site.bytes('yoely-weiss-shabbos').length);
     assert.equal(await table.inspect('https://cdn.example.test/a.mp3'), undefined);
@@ -868,68 +837,68 @@ describe('music-table.com over Matrix, end to end', () => {
   });
 });
 
-describe('posts that offer the MP3 as a download button', () => {
-  const button = (text: string, url: string) => ({ type: 19, buttonData: { text, link: { url } } });
-  const post = (title: string, nodes: unknown[]) => ({ id: 'p1', title, richContent: { nodes } });
-  const WIX = 'https://static.wixstatic.com/mp3/1ce022_cb5b5696e53a4434b70164944fd3e377.mp3';
-  const DRIVE = 'https://drive.google.com/file/d/1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM/view?usp=sharing';
-
-  /** A site whose one post is `body`; the download-url API fails the test if it is asked for anything. */
-  function siteWith(body: unknown): MusicTable {
-    const stub = (async (input: string | URL | Request) => {
-      const { pathname } = new URL(String(input));
-      if (pathname === '/_api/v1/access-tokens') return Response.json({ apps: { [BLOG_APP_ID]: { instance: 't' } } });
-      if (pathname.startsWith('/_api/communities-blog-node-api/_api/posts/')) return Response.json(body);
-      if (pathname.endsWith('/files/download-url')) assert.fail('a direct link needs no signing');
-      return new Response('nope', { status: 404 });
-    }) as typeof fetch;
-    return new MusicTable({ fetch: stub, minIntervalMs: 0 });
-  }
-
-  test('a button linking to an MP3 on the site’s storage is a song, and its link is used as it is', async () => {
-    const table = siteWith(post('Avraham Fried & Ari Stern - Chibas Yerushalayim', [button('To Download', WIX)]));
-    const found = await table.getPost('a-b');
-    assert.equal(found.files.length, 1);
-    assert.equal(found.files[0]!.name, 'Avraham Fried & Ari Stern - Chibas Yerushalayim.mp3');
-    assert.equal(found.files[0]!.mimeType, 'audio/mpeg');
-    assert.equal(await table.resolveUrl(table.trackUrl({ slug: 'a-b' }, 0)), WIX);
-    assert.deepEqual(tracksOf(table, found).map((t) => [t.artist, t.title]), [['Avraham Fried & Ari Stern', 'Chibas Yerushalayim']]);
+describe('the site’s release pages and lists', () => {
+  const RELEASES: MockPost[] = [
+    { slug: 'new-single', title: 'Avrumi - Vay Lon', files: [{ name: 'Avrumi - Vay Lon.mp3' }], publishedAt: '2026-10-15T15:43:37.000Z', views: 1234, coverId: 'vay-lon.jpg', category: 'Singles' },
+    { slug: 'chanukah-song', title: 'Shira Choir - Haneiros', files: [{ name: 'Haneiros.mp3' }], publishedAt: '2025-12-21T19:00:47.000Z', views: 5532, category: 'Videos', categoryPages: ['chanukah'] },
+    { slug: 'sold-album', title: 'Big Star - Paid Album', files: [{ name: '01 One.mp3' }, { name: '02 Two.mp3' }], price: 999, publishedAt: '2025-11-01T00:00:00.000Z', views: 80 },
+    { slug: 'just-a-video', title: 'Someone - A Clip', publishedAt: '2025-10-01T00:00:00.000Z', category: 'Videos', views: 9000 },
+  ];
+  let site: MockMusicTable;
+  before(async () => {
+    site = await startMockMusicTable(RELEASES);
   });
+  after(() => site.close());
+  beforeEach(() => site.reset());
+  const table = () => new MusicTable({ baseUrl: site.url, minIntervalMs: 0 });
 
-  test('a button on a Google Drive file that says Mp3 is a song, downloaded from Drive’s download address', async () => {
-    const table = siteWith(post('Gad Elbaz - Higale Na', [button('Mp3', DRIVE), button('Mp4', 'https://drive.google.com/file/d/1apYuXyNsZc4C-bdTwbZv-M6kVgjY2aAA/view?usp=sharing')]));
-    const found = await table.getPost('a-b');
-    assert.equal(found.files.length, 1, 'the Mp4 button is the video, not a song');
-    assert.equal(
-      await table.resolveUrl(table.trackUrl({ slug: 'a-b' }, 0)),
-      'https://drive.usercontent.google.com/download?id=1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM&export=download&confirm=t',
-    );
-    assert.deepEqual(await table.inspect(table.trackUrl({ slug: 'a-b' }, 0)), {
-      link: 'https://drive.usercontent.google.com/download?id=1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM&export=download&confirm=t',
-      type: 'audio/mpeg',
-      bytes: 0,
+  test('a release page gives the release’s name, files, picture, views and date', async () => {
+    const post = await table().getPost('new-single');
+    assert.deepEqual(post, {
+      id: 'new-single',
+      slug: 'new-single',
+      title: 'Avrumi - Vay Lon',
+      url: `${site.url}/post/new-single`,
+      files: [{ name: 'Avrumi - Vay Lon.mp3', path: 'f0-10', size: site.bytes('new-single').length, mimeType: 'audio/mpeg' }],
+      cover: `${site.url}/media/covers/vay-lon.jpg`,
+      views: 1234,
+      publishedAt: '2026-10-15T15:43:37.000Z',
     });
+    assert.throws(() => parsePostPage('<html>a page with no release</html>', 'x', site.url), (err) => err instanceof MusicTableError && /couldn't read/.test(err.message));
   });
 
-  test('buttons that are not a song are left alone: folders, tickets, other hosts, plain http, videos', async () => {
-    const table = siteWith(
-      post('A - B', [
-        button('Google Drive', 'https://drive.google.com/drive/folders/14LcWriDEKnZa_uWkyBQHqZqThM5RTFS1?usp=sharing'),
-        button('To Buy Tickets', 'https://tickets.example.com/show'),
-        button('Mp3', 'https://evil.example/song.mp3'),
-        button('Mp3', 'http://static.wixstatic.com/mp3/x.mp3'),
-        button('To Download', 'https://static.wixstatic.com/video/x.mp4'),
-        button('Download the video', 'https://drive.google.com/file/d/1apYuXyNsZc4C-bdTwbZv-M6kVgjY2aAA/view'),
-        button('Mp3', 'not a url'),
-      ]),
-    );
-    assert.deepEqual((await table.getPost('a-b')).files, []);
+  test('a release the site sells is no song here: its files are known but not offered, and not downloaded', async () => {
+    const t = table();
+    const sold = await t.getPost('sold-album');
+    assert.equal(sold.forSale, true);
+    assert.equal(sold.files.length, 2);
+    assert.deepEqual(tracksOf(t, sold), []);
+    await assert.rejects(t.resolveUrl(t.trackUrl(sold, 0)), (err) => err instanceof MusicTableError && /sold on music-table\.com/.test(err.message));
+    assert.equal(site.signed, 0, 'it never asked for a link');
   });
 
-  test('a post that has both an attached file and a button keeps both, and a repeated button counts once', async () => {
-    const file = { name: 'B.mp3', mimeType: 'audio/mpeg', path: '/x/B.mp3', size: 5 };
-    const table = siteWith(post('A - B', [{ type: 10, fileData: file }, button('Mp3', DRIVE), button('Mp3', DRIVE)]));
-    const found = await table.getPost('a-b');
-    assert.deepEqual(found.files.map((f) => f.url ?? 'attached'), ['attached', 'https://drive.usercontent.google.com/download?id=1-5pv_iP0w4t6znEiJXHhpcE5jVQvxymM&export=download&confirm=t']);
+  test('lists come a page at a time, newest first or most viewed first, and for one category', async () => {
+    site.perPage = 2;
+    const t = table();
+    const first = await t.listReleases();
+    assert.deepEqual([first.page, first.pages], [1, 2]);
+    assert.deepEqual(first.releases.map((release) => release.slug), ['new-single', 'chanukah-song']);
+    assert.deepEqual(first.releases[1], {
+      slug: 'chanukah-song',
+      title: 'Shira Choir - Haneiros',
+      url: `${site.url}/post/chanukah-song`,
+      categories: ['videos', 'chanukah'],
+      views: 5532,
+      publishedAt: '2025-12-21T19:00:47.000Z',
+    });
+    const second = await t.listReleases(2);
+    assert.deepEqual(second.releases.map((release) => [release.slug, release.forSale ?? false]), [['sold-album', true], ['just-a-video', false]]);
+    assert.deepEqual((await t.listReleases(1, { sort: 'views' })).releases.map((release) => release.slug), ['just-a-video', 'chanukah-song']);
+    assert.deepEqual((await t.listReleases(1, { category: 'chanukah' })).releases.map((release) => release.slug), ['chanukah-song']);
+    await assert.rejects(t.listReleases(1, { category: 'no/such' }), (err) => err instanceof MusicTableError);
+  });
+
+  test('a list page that has changed shape is an error, not an empty list', () => {
+    assert.throws(() => parseReleaseList('<html>nothing here</html>', site.url), (err) => err instanceof MusicTableError && /may have changed/.test(err.message));
   });
 });

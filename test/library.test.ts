@@ -13,7 +13,7 @@ import { AudioCache, cachedCheck, cachedFetch, prefetch, songsToKeep } from '../
 import { buildDigest, categoryLabel } from '../src/library/digest.ts';
 import { LibraryJobs, localDay, parseDailyTime, STATE } from '../src/library/jobs.ts';
 import { syncSite } from '../src/library/sync.ts';
-import { coverUrl, MusicTable, parseFeed } from '../src/sources/music-table.ts';
+import { MusicTable, MusicTableError, parseFeed } from '../src/sources/music-table.ts';
 import type { Reply, Track } from '../src/types.ts';
 import { startMockMusicTable, type MockMusicTable, type MockPost } from './helpers/mock-music-table.ts';
 
@@ -152,34 +152,24 @@ describe('library: reading the site', () => {
     ]);
   });
 
-  test('coverUrl asks the image host for a chat-sized JPEG, and refuses odd ids', () => {
-    assert.equal(
-      coverUrl('0ba30e_dd79~mv2.png'),
-      'https://static.wixstatic.com/media/0ba30e_dd79~mv2.png/v1/fill/w_640,h_360,al_c,q_80/cover.jpg',
-    );
-    assert.equal(coverUrl('../../etc/passwd'), undefined);
-    assert.equal(coverUrl('a b'), undefined);
-  });
-
-  test('listPosts reads files, pictures, views and dates for many posts in one request', async () => {
+  test('listReleases gives each release’s picture, views, date and categories in one request; its files come from its page', async () => {
     const site = await startMockMusicTable([
-      { slug: 'new-one', title: 'Band - New One', files: [{ name: 'New One.mp3' }], views: 552, publishedAt: '2026-10-05T17:37:57.000Z', coverId: 'img1~mv2.png' },
-      { slug: 'clip', title: 'Band - Clip', video: true, views: 790, publishedAt: '2026-10-05T12:41:50.000Z' },
+      { slug: 'new-one', title: 'Band - New One', files: [{ name: 'New One.mp3' }], views: 552, publishedAt: '2026-10-05T17:37:57.000Z', coverId: 'img1~mv2.png', category: 'Singles' },
+      { slug: 'clip', title: 'Band - Clip', video: true, views: 790, publishedAt: '2026-10-05T12:41:50.000Z', category: 'Videos' },
     ]);
     try {
       const table = new MusicTable({ baseUrl: site.url, minIntervalMs: 0 });
-      const posts = await table.listPosts();
+      const list = await table.listReleases();
       assert.equal(site.listReads, 1);
       assert.deepEqual(
-        posts.map((p) => ({ slug: p.slug, files: p.files.length, views: p.views, publishedAt: p.publishedAt, cover: p.cover })),
+        list.releases.map((r) => ({ slug: r.slug, categories: r.categories, views: r.views, publishedAt: r.publishedAt, cover: r.cover })),
         [
-          { slug: 'new-one', files: 1, views: 552, publishedAt: '2026-10-05T17:37:57.000Z', cover: coverUrl('img1~mv2.png') },
-          { slug: 'clip', files: 0, views: 790, publishedAt: '2026-10-05T12:41:50.000Z', cover: undefined },
+          { slug: 'new-one', categories: ['singles'], views: 552, publishedAt: '2026-10-05T17:37:57.000Z', cover: `${site.url}/media/covers/img1~mv2.png` },
+          { slug: 'clip', categories: ['videos'], views: 790, publishedAt: '2026-10-05T12:41:50.000Z', cover: undefined },
         ],
       );
-      // Read already, so reading one of them again is free.
-      await table.getPost('new-one');
-      assert.deepEqual(site.postReads, []);
+      assert.deepEqual(site.postReads, [], 'a list reads no release pages');
+      assert.equal((await table.getPost('new-one')).files.length, 1);
     } finally {
       await site.close();
     }
@@ -222,36 +212,44 @@ describe('library: keeping the catalog in step with the site', () => {
     assert.equal(result.fresh.length, 5);
     assert.equal(result.songs, 5, 'one song each, two for the album, none for the clip');
     assert.equal(site.listReads, 1);
-    assert.equal(site.feedReads, 1);
+    assert.equal(site.feedReads, 0, 'the list says each release’s category; the feed is not needed');
+    assert.equal(site.postReads.length, 5, 'each new release’s page, for its files');
     assert.equal(catalog.sitePost('hershey-makdim')?.category, 'Videos');
     assert.equal(catalog.sitePost('clip-only')?.audioFiles, 0);
     const song = catalog.byUrl(table.trackUrl({ slug: 'oizer-ana-elech' }, 0));
     assert.deepEqual(song && { title: song.title, artist: song.artist, cover: song.cover }, {
       title: 'Ana Elech',
       artist: 'Oizer Oberlander',
-      cover: coverUrl('img1~mv2.png'),
+      cover: `${site.url}/media/covers/img1~mv2.png`,
     });
     assert.deepEqual(catalog.search('tyh nation').map((t) => t.title).sort(), ['One', 'Two']);
   });
 
-  test('only the first sync calls a post new; later syncs refresh what changed', async () => {
+  test('only the first sync calls a post new; later syncs refresh what changed, without reading the pages again', async () => {
     await syncSite({ musicTable: table, catalog });
+    const reads = site.postReads.length;
     const again = await syncSite({ musicTable: table, catalog });
     assert.equal(again.fresh.length, 0);
+    assert.equal(site.postReads.length, reads);
     assert.equal(catalog.count(), 5, 'no songs twice');
   });
 
-  test('when the feed fails the posts still sync, without category names', async () => {
-    const broken = {
-      listPosts: table.listPosts.bind(table),
+  test('a release whose page will not open now is left for the next sync, not recorded without its songs', async () => {
+    const flaky = {
+      listReleases: table.listReleases.bind(table),
       trackUrl: table.trackUrl.bind(table),
-      feed: async () => {
-        throw new Error('feed down');
+      getPost: async (slug: string) => {
+        if (slug === 'yumi-mi-adir') throw new MusicTableError('music-table.com answered HTTP 503');
+        return table.getPost(slug);
       },
     };
-    const result = await syncSite({ musicTable: broken, catalog });
+    const result = await syncSite({ musicTable: flaky, catalog });
     assert.equal(result.seen, 5);
-    assert.equal(catalog.sitePost('oizer-ana-elech')?.category, '');
+    assert.equal(result.fresh.length, 4);
+    assert.equal(catalog.sitePost('yumi-mi-adir'), undefined);
+    const later = await syncSite({ musicTable: table, catalog });
+    assert.deepEqual(later.fresh.map((post) => post.slug), ['yumi-mi-adir']);
+    assert.ok(catalog.byUrl(table.trackUrl({ slug: 'yumi-mi-adir' }, 0)));
   });
 });
 
@@ -1015,7 +1013,7 @@ describe('library: reading the whole site', () => {
     const table = new MusicTable({ baseUrl: site.url, minIntervalMs: 0 });
     const jobs = new LibraryJobs({ musicTable: table, catalog, announce: async () => {}, fetchAudio: async () => { throw new Error('no'); }, now: () => at(6, 12) });
     await jobs.scanStep(2);
-    assert.equal(catalog.getState(STATE.scanOffset), '100');
+    assert.equal(catalog.getState(STATE.scanOffset), '96');
     assert.equal(catalog.getState(STATE.scanDone), undefined);
     // A new run of the bot carries on from there.
     const again = new LibraryJobs({ musicTable: table, catalog, announce: async () => {}, fetchAudio: async () => { throw new Error('no'); }, now: () => at(6, 13) });
@@ -1044,7 +1042,7 @@ describe('library: reading the whole site', () => {
     });
     const seen: number[] = [];
     assert.equal(await jobs.scanAll({ pauseMs: 500, progress: (n) => seen.push(n) }), 120);
-    assert.deepEqual(seen, [50, 100, 120]);
+    assert.deepEqual(seen, [48, 96, 120]);
     assert.deepEqual(pauses, [500, 500]);
     assert.equal(site.listReads, 3);
     assert.equal(catalog.count(), 120);

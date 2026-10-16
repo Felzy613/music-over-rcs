@@ -30,7 +30,6 @@ if (demo) {
   for (const track of DEMO_TRACKS) catalog.add(track);
 }
 const musicTable = offline ? undefined : musicTableFromEnv();
-void musicTable?.warm();
 const youTube = offline ? undefined : youTubeMusicFromEnv();
 const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
 void whitelist?.warm();

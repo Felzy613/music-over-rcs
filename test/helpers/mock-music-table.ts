@@ -1,9 +1,6 @@
 import { editDistance } from '../../src/sources/relevance.ts';
 import { listen, readText, type Listening } from './servers.ts';
 
-const BLOG_APP_ID = '14bcded7-0066-7c35-14d7-466cb3f09103';
-const SEARCH_APP_ID = '1484cb44-49cd-5b39-9681-75188ab429de';
-
 export interface MockFile {
   name: string;
   mimeType?: string;
@@ -12,27 +9,28 @@ export interface MockFile {
 
 export interface MockPost {
   slug: string;
+  /** "Artist - Title", as the site's releases are named. */
   title: string;
   files?: MockFile[];
-  /** Adds an embedded YouTube video, like the real posts have under "To Listen". */
+  /** A video-only release (no files) says nothing more than having no files; kept so older tests read the same. */
   video?: boolean;
   /** Listed by the search but gone when its page is read. */
   gone?: boolean;
-  /** When it was first published (ISO). Posts are listed newest first, in the order given. */
+  /** When it was published (ISO). Releases are listed newest first, in the order given. */
   publishedAt?: string;
   views?: number;
-  /** The category name the RSS feed gives ("Singles", "Videos"…). */
+  /** Its kind as the bot names it: "Singles", "Videos" or "Weddings & Events" (the site's "singles", "videos", "weddings"). */
   category?: string;
-  /** The id of its picture on the image host. */
+  /** Its picture, served at /media/covers/<coverId>. */
   coverId?: string;
-  /** The site's category ids it's in (24 hex digits each); "cat1" style ids are left out of the API. */
-  categoryIds?: string[];
-  /** The category pages that list it, by slug ("chanukah"). */
+  /** Other categories of the site it's in ("chanukah", "vocal"). */
   categoryPages?: string[];
+  /** The site sells it (its price in cents); its files can't be downloaded. */
+  price?: number;
 }
 
 export interface MockMusicTable extends Listening {
-  tokensIssued: number;
+  /** How many download links were handed out. */
   signed: number;
   /** The words of every search, quick or page, in the order they arrived. */
   searches: string[];
@@ -41,28 +39,28 @@ export interface MockMusicTable extends Listening {
   postReads: string[];
   /** Every request for a file's bytes (HEAD or GET), as "METHOD /path", so tests can tell checking from downloading. */
   fileRequests: string[];
-  /** How many times the post list and the feed were read. */
+  /** How many times a list page and the feed were read. */
   listReads: number;
   feedReads: number;
   failSearch: boolean;
-  /** The fast JSON search is available (the default). Turn it off to see the client fall back to the search page. */
+  /** The search box's quick answer is available (the default). Turn it off to see the client fall back to the search page. */
   quickSearch: boolean;
-  /** The search page forgives typos (a word one edit away still matches), like the real one. */
+  /** The search page forgives typos (a word one edit away still matches). */
   fuzzyPage: boolean;
-  /** Like the real search, which lists a post when it matches any one of the words. */
+  /** Lists a release when it matches any one of the words. */
   looseSearch: boolean;
   /** Decides what a search returns, for tests that need the site to behave a certain way. */
   searchOverride: ((query: string) => MockPost[] | undefined) | undefined;
-  /** How long reading a post takes, and the most posts that were being read at the same moment. */
+  /** How long reading a release takes, and the most releases that were being read at the same moment. */
   postDelayMs: number;
   readonly maxInFlightPosts: number;
-  /** Every authorized call is refused, however fresh the token. */
+  /** Every request is refused (403), like a site that turned the bot away. */
   rejectAll: boolean;
-  /** Points download links at this address instead of this server. */
+  /** Where download links end up (the site's storage): this server unless set. */
   linkBase: string | undefined;
-  /** Makes every token handed out so far stop working. */
-  expireTokens(): void;
-  /** What a file's download link serves. */
+  /** Releases per list page (48 on the real site). */
+  perPage: number;
+  /** What a file's download serves. */
   bytes(slug: string, index?: number): Buffer;
   reset(): void;
 }
@@ -70,11 +68,19 @@ export interface MockMusicTable extends Listening {
 const esc = (text: string) =>
   text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;').replace(/</g, '&lt;');
 
-/** A pretend music-table.com: the search page, the visitor token, the blog API, and the host that serves the files. */
+/** How the real pages carry their data: a run of `self.__next_f.push([1, "…"])` scripts, each a JSON string. */
+const pageWith = (data: string, extraHead = ''): string => {
+  const chunks: string[] = [];
+  for (let at = 0; at < data.length; at += 700) chunks.push(data.slice(at, at + 700));
+  const scripts = chunks.map((chunk) => `<script>self.__next_f.push([1,${JSON.stringify(chunk).replace(/</g, '\\u003c')}])</script>`).join('');
+  return `<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/>${extraHead}</head><body><div id="app"></div>${scripts}</body></html>`;
+};
+
+const SITE_CATEGORY: Record<string, string> = { Singles: 'singles', Videos: 'videos', 'Weddings & Events': 'weddings' };
+
+/** A pretend music-table.com: its search box and search page, release pages, lists, feed, download links, and storage. */
 export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicTable> {
-  const valid = new Set<string>();
   const state = {
-    tokensIssued: 0,
     signed: 0,
     searches: [] as string[],
     searchKinds: [] as ('quick' | 'page')[],
@@ -92,48 +98,36 @@ export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicT
     maxInFlight: 0,
     rejectAll: false,
     linkBase: undefined as string | undefined,
+    perPage: 48,
   };
 
-  const filePath = (post: MockPost, index: number) => `/inst-1/${index}ab${post.slug.length}-${post.files![index]!.name}`;
-  const idOf = (post: MockPost) => `id-${post.slug}`;
   const bytesOf = (post: MockPost, index: number) =>
     post.files?.[index]?.data ?? Buffer.from(`${post.slug}-${index}-audio-bytes`.repeat(30));
-  /** A post the way the blog API sends it: its MP3s as file nodes, its picture, views and date, and a video when asked. */
-  const postJson = (post: MockPost, withContent: boolean) => {
-    const nodes: unknown[] = [{ type: 0, id: 'p1', nodes: [{ type: 1, id: 't1', nodes: [], textData: { text: post.title } }] }];
-    post.files?.forEach((file, index) =>
-      nodes.push({
-        type: 10,
-        id: `f${index}`,
-        nodes: [],
-        fileData: {
-          name: file.name,
-          type: file.name.split('.').pop(),
-          size: bytesOf(post, index).length,
-          mimeType: file.mimeType ?? 'audio/mpeg',
-          path: filePath(post, index),
-          src: { id: `src${index}`, private: false },
-        },
-      }),
-    );
-    if (post.video) nodes.push({ type: 8, id: 'v', nodes: [], videoData: { video: { src: { url: 'https://youtu.be/abc' } } } });
-    return {
-      id: idOf(post),
-      title: post.title,
-      slug: post.slug,
-      categoryIds: post.categoryIds ?? ['cat1'],
-      ...(post.views !== undefined ? { viewCount: post.views } : {}),
-      ...(post.publishedAt ? { firstPublishedDate: post.publishedAt } : {}),
-      ...(post.coverId ? { coverImage: { src: { id: post.coverId, width: 1280, height: 720 } } } : {}),
-      ...(withContent ? { richContent: { nodes } } : {}),
-    };
+  const split = (title: string) => {
+    const at = title.indexOf(' - ');
+    return at < 0 ? { artist: '', name: title } : { artist: title.slice(0, at), name: title.slice(at + 3) };
   };
+  const categoriesOf = (post: MockPost) => [...new Set([...(post.category && SITE_CATEGORY[post.category] ? [SITE_CATEGORY[post.category]!] : []), ...(post.categoryPages ?? [])])];
+  const coverOf = (post: MockPost) => (post.coverId ? `/media/covers/${post.coverId}` : null);
+  /** A release the way the lists show it. */
+  const listed = (post: MockPost) => ({
+    slug: post.slug,
+    title: split(post.title).name,
+    artist: split(post.title).artist,
+    cover: coverOf(post),
+    categories: categoriesOf(post),
+    price: post.price ? post.price / 100 : null,
+    publishedAt: post.publishedAt ?? null,
+    views: post.views ?? 0,
+    rating: null,
+    ratingCount: 0,
+    likes: 0,
+  });
 
   const wordsOf = (text: string) => text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  const queryWords = (q: string) => wordsOf(q);
   /** The quick search: every word has to start a word of the title (any one word, when `looseSearch` is on). */
   const quickMatches = (q: string) => {
-    const words = queryWords(q);
+    const words = wordsOf(q);
     return posts.filter((post) => {
       const titleWords = wordsOf(post.title);
       const has = (word: string) => titleWords.some((candidate) => candidate.startsWith(word));
@@ -142,7 +136,7 @@ export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicT
   };
   /** The search page: a substring match, or with `fuzzyPage` a word one edit away still counts. */
   const pageMatches = (q: string) => {
-    const words = queryWords(q);
+    const words = wordsOf(q);
     return posts.filter((post) => {
       const title = post.title.toLowerCase();
       const titleWords = wordsOf(post.title);
@@ -159,146 +153,146 @@ export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicT
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(body));
     };
-    const authorized = () => !state.rejectAll && valid.has(String(req.headers.authorization ?? ''));
+    const html = (status: number, body: string) => {
+      res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(body);
+    };
     const mine = (path: string) => url.pathname === path;
 
-    if (mine('/search')) {
+    if (state.rejectAll && !url.pathname.startsWith('/files/')) return json(403, { error: 'forbidden' });
+
+    if (mine('/api/suggest')) {
+      if (!state.quickSearch) return html(404, pageWith('{"notFound":true}'));
+      const q = url.searchParams.get('q') ?? '';
+      state.searches.push(q);
+      state.searchKinds.push('quick');
+      if (state.failSearch) return json(500, { error: 'boom' });
+      const matches = state.searchOverride?.(q) ?? quickMatches(q);
+      json(200, {
+        completions: [],
+        corrected: null,
+        artists: [],
+        releases: matches.slice(0, 20).map((post) => ({
+          key: post.slug,
+          title: split(post.title).name,
+          subtitle: split(post.title).artist,
+          image: `${base}/_next/image?url=x`,
+          href: `${base}/post/${post.slug}`,
+        })),
+        channels: [],
+        videos: [],
+        albums: [],
+        downloads: [],
+      });
+    } else if (mine('/search')) {
       const q = url.searchParams.get('q') ?? '';
       state.searches.push(q);
       state.searchKinds.push('page');
-      if (state.failSearch) {
-        res.writeHead(500);
-        res.end('boom');
-        return;
-      }
+      if (state.failSearch) return html(500, 'boom');
       const matches = state.searchOverride?.(q) ?? pageMatches(q);
-      const items = matches
-        .map(
-          (post) =>
-            `<li><a aria-hidden="true" tabindex="-1" title="${esc(post.title)}" href="${base}/post/${post.slug}"><img src="x"></a>` +
-            `<div><a href="${base}/post/${post.slug}">${esc(post.title)}</a></div></li>`,
-        )
-        .join('');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(
-        `<html><body><a href="${base}/new-music" title="NEW MUSIC">NEW MUSIC</a><ul aria-label="New Music search results">${items}</ul></body></html>`,
-      );
-    } else if (mine('/_api/v1/access-tokens')) {
-      state.tokensIssued += 1;
-      const token = `tok-${state.tokensIssued}`;
-      const searchToken = `stok-${state.tokensIssued}`;
-      valid.add(token);
-      valid.add(searchToken);
-      json(200, {
-        visitorId: 'v',
-        apps: { [BLOG_APP_ID]: { instance: token, intId: 1 }, [SEARCH_APP_ID]: { instance: searchToken, intId: 2 }, 'other-app': { instance: 'zzz' } },
-      });
-    } else if (mine('/_api/search-services-sitesearch/v1/suggest/federated') && req.method === 'POST') {
-      if (!state.quickSearch) return json(404, { message: 'no such route' });
-      if (!authorized()) return json(401, { message: 'unauthorized' });
-      const payload = JSON.parse(await readText(req)) as { query?: string; limit?: number };
-      const q = payload.query ?? '';
-      state.searches.push(q);
-      state.searchKinds.push('quick');
-      if (state.failSearch) return json(500, { message: 'boom' });
-      const matches = state.searchOverride?.(q) ?? quickMatches(q);
-      json(200, {
-        results: [
-          { documentType: 'public/stores/products', documents: [] },
-          {
-            documentType: 'public/blog/posts',
-            documents: matches.slice(0, payload.limit ?? 20).map((post, index) => ({ _score: 200 - index, title: post.title, url: `/post/${post.slug}`, id: post.slug })),
-          },
-        ],
-      });
-    } else if (url.pathname.startsWith('/_api/communities-blog-node-api/_api/posts/')) {
-      if (!authorized()) return json(401, { message: 'unauthorized' });
-      const slug = decodeURIComponent(url.pathname.split('/').pop() ?? '');
+      const items = matches.map((post) => ({ key: post.slug, node: ['$', '$L52', null, { release: listed(post) }] }));
+      html(200, pageWith(`44:["$","$L48",null,{"title":"Releases","href":"/new-music?q=${encodeURIComponent(q)}","items":${JSON.stringify(items)}}]\n`));
+    } else if (url.pathname.startsWith('/post/')) {
+      const slug = decodeURIComponent(url.pathname.slice('/post/'.length));
       const post = posts.find((candidate) => candidate.slug === slug);
-      if (!post || post.gone) return json(404, { message: 'not found' });
+      if (!post || post.gone) return html(404, pageWith('{"notFound":true}'));
       state.postReads.push(slug);
       state.inFlight += 1;
       state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
       if (state.postDelayMs) await new Promise((resolve) => setTimeout(resolve, state.postDelayMs));
       state.inFlight -= 1;
-      json(200, postJson(post, url.searchParams.get('fieldsets') === 'content'));
-    } else if (mine('/_api/communities-blog-node-api/_api/posts')) {
-      if (!authorized()) return json(401, { message: 'unauthorized' });
+      const { artist, name } = split(post.title);
+      const files = (post.files ?? []).map((file, index) => ({
+        id: `f${index}-${post.slug.length}`,
+        name: file.name,
+        type: file.name.split('.').pop(),
+        sizeBytes: bytesOf(post, index).length,
+      }));
+      const linked = {
+        '@context': 'https://schema.org',
+        '@type': 'MusicRecording',
+        name,
+        byArtist: artist ? [{ '@type': 'MusicGroup', name: artist }] : [],
+        ...(post.publishedAt ? { datePublished: post.publishedAt } : {}),
+        url: `${base}/post/${post.slug}`,
+        offers: { '@type': 'Offer', price: ((post.price ?? 0) / 100).toFixed(2), priceCurrency: 'USD' },
+      };
+      const views = post.views !== undefined ? `["$","p",null,{"children":["Single"," · ",null,"Sep 8, 2026"," · ","${post.views.toLocaleString('en-US')}"," ","views"]}]` : 'null';
+      const data =
+        `42:["$","$L45",null,${JSON.stringify({ release: { slug: post.slug, title: name, artist, cover: coverOf(post) }, files })}]\n` +
+        `43:["$","$L46",null,{"slug":"${post.slug}","priceCents":${post.price ?? 0},"children":${views}}]\n`;
+      html(200, pageWith(data, `<script type="application/ld+json">${JSON.stringify([linked])}</script>`));
+    } else if (mine('/new-music')) {
       state.listReads += 1;
-      const offset = Number(url.searchParams.get('offset') ?? 0);
-      const size = Number(url.searchParams.get('size') ?? 20);
-      const content = url.searchParams.get('fieldsets') === 'content';
-      const only = url.searchParams.get('categoryIds');
-      const listed = posts.filter((post) => !post.gone && (!only || (post.categoryIds ?? []).includes(only)));
-      json(200, listed.slice(offset, offset + size).map((post) => postJson(post, content)));
-    } else if (url.pathname.startsWith('/new-music/categories/')) {
-      const slug = url.pathname.split('/').pop() ?? '';
-      const inIt = posts.filter((post) => post.categoryPages?.includes(slug));
-      if (inIt.length === 0) {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end(`<html><body>${inIt.map((post) => `<a href="${base}/post/${post.slug}">${esc(post.title)}</a>`).join('')}</body></html>`);
-    } else if (mine('/blog-feed.xml')) {
+      const category = url.searchParams.get('category');
+      const page = Math.max(1, Number(url.searchParams.get('page') ?? 1) || 1);
+      let all = posts.filter((post) => !post.gone && (!category || categoriesOf(post).includes(category)));
+      if (url.searchParams.get('sort') === 'views') all = [...all].sort((a, b) => (b.views ?? 0) - (a.views ?? 0));
+      const pages = Math.max(1, Math.ceil(all.length / state.perPage));
+      const shown = all.slice((page - 1) * state.perPage, page * state.perPage).map(listed);
+      const query = { featuredOnly: false, category: category ?? '$undefined', sort: url.searchParams.get('sort') ?? 'newest' };
+      html(200, pageWith(`43:["$","$L46","/new-music",{"storageKey":"/new-music","initial":${JSON.stringify(shown)},"page":${page},"pages":${pages},"query":${JSON.stringify(query)},"perPage":${state.perPage}}]\n`));
+    } else if (mine('/feed.xml')) {
       state.feedReads += 1;
       const items = posts
         .filter((post) => !post.gone)
         .slice(0, 20)
         .map(
           (post) =>
-            `<item><title><![CDATA[${post.title}]]></title><link>${base}/post/${post.slug}</link>` +
-            `<category><![CDATA[${post.category ?? ''}]]></category><pubDate>${new Date(post.publishedAt ?? 0).toUTCString()}</pubDate></item>`,
+            `<item><title>${esc(post.title)}</title><link>${base}/post/${post.slug}</link>` +
+            `<pubDate>${new Date(post.publishedAt ?? 0).toUTCString()}</pubDate></item>`,
         )
         .join('');
-      res.writeHead(200, { 'content-type': 'text/xml; charset=UTF-8' });
-      res.end(`<?xml version="1.0"?><rss><channel><title>Music Table</title>${items}</channel></rss>`);
-    } else if (mine('/_api/communities-blog-node-api/v2/files/download-url') && req.method === 'POST') {
-      if (!authorized()) return json(401, { message: 'unauthorized' });
-      const body = JSON.parse(await readText(req)) as { postId?: string; filePath?: string };
-      const post = posts.find((candidate) => idOf(candidate) === body.postId);
-      const index = post?.files?.findIndex((_, i) => filePath(post, i) === body.filePath) ?? -1;
-      if (!post || index < 0) return json(404, { message: 'Media resource not found.' });
+      res.writeHead(200, { 'content-type': 'application/rss+xml; charset=utf-8' });
+      res.end(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Music Table</title>${items}</channel></rss>`);
+    } else if (mine('/api/downloads') && req.method === 'POST') {
+      const body = JSON.parse(await readText(req)) as { type?: string; slug?: string; index?: number };
+      const post = posts.find((candidate) => candidate.slug === body.slug && !candidate.gone);
+      const index = Number(body.index);
+      if (!post || !post.files?.[index]) return json(404, { error: "This file isn't available." });
+      if (post.price) return json(402, { error: 'buy' });
       state.signed += 1;
-      // Like the real site, the address comes back raw: spaces and all.
-      json(200, { url: `${state.linkBase ?? base}/files${filePath(post, index)}?token=T${state.signed}&filename=${post.files![index]!.name}` });
+      const token = Buffer.from(JSON.stringify({ type: 'release', slug: post.slug, index, n: state.signed })).toString('base64url');
+      json(200, { url: `/api/download/${token}` });
+    } else if (url.pathname.startsWith('/api/download/')) {
+      let ref: { slug?: string; index?: number; n?: number } = {};
+      try {
+        ref = JSON.parse(Buffer.from(url.pathname.slice('/api/download/'.length), 'base64url').toString()) as typeof ref;
+      } catch {
+        return json(400, { error: 'bad link' });
+      }
+      const post = posts.find((candidate) => candidate.slug === ref.slug);
+      const file = post?.files?.[Number(ref.index)];
+      if (!post || !file) return json(404, { error: 'gone' });
+      // Like the real site: a redirect to the file in its storage, with a signature that lasts a few minutes.
+      res.writeHead(302, { location: `${state.linkBase ?? base}/files/${post.slug}/${ref.index}/${encodeURIComponent(file.name)}?X-Amz-Signature=S${ref.n}` });
+      res.end();
     } else if (url.pathname.startsWith('/files/')) {
       state.fileRequests.push(`${req.method} ${decodeURIComponent(url.pathname)}`);
-      if (!url.searchParams.get('token')) {
+      if (!url.searchParams.get('X-Amz-Signature')) {
         res.writeHead(403);
         res.end();
         return;
       }
-      const wanted = decodeURIComponent(url.pathname).slice('/files'.length);
-      let data: Buffer | undefined;
-      let mimeType = 'audio/mpeg';
-      for (const post of posts) {
-        post.files?.forEach((file, index) => {
-          if (filePath(post, index) === wanted) {
-            data = bytesOf(post, index);
-            mimeType = file.mimeType ?? 'audio/mpeg';
-          }
-        });
-      }
-      if (!data) {
+      const [, , slug, indexText] = decodeURIComponent(url.pathname).split('/');
+      const post = posts.find((candidate) => candidate.slug === slug);
+      const index = Number(indexText);
+      const file = post?.files?.[index];
+      if (!post || !file) {
         res.writeHead(404);
         res.end();
         return;
       }
-      res.writeHead(200, { 'content-type': mimeType, 'content-length': String(data.length) });
+      const data = bytesOf(post, index);
+      res.writeHead(200, { 'content-type': file.mimeType ?? 'audio/mpeg', 'content-length': String(data.length) });
       res.end(req.method === 'HEAD' ? undefined : data);
     } else {
-      res.writeHead(404);
-      res.end();
+      html(404, pageWith('{"notFound":true}'));
     }
   });
 
   return {
     ...server,
-    get tokensIssued() {
-      return state.tokensIssued;
-    },
     get signed() {
       return state.signed;
     },
@@ -371,11 +365,14 @@ export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicT
     set linkBase(value: string | undefined) {
       state.linkBase = value;
     },
-    expireTokens: () => valid.clear(),
+    get perPage() {
+      return state.perPage;
+    },
+    set perPage(value: number) {
+      state.perPage = value;
+    },
     bytes: (slug, index = 0) => bytesOf(posts.find((post) => post.slug === slug)!, index),
     reset() {
-      valid.clear();
-      state.tokensIssued = 0;
       state.signed = 0;
       state.searches.length = 0;
       state.postReads.length = 0;
@@ -393,6 +390,7 @@ export async function startMockMusicTable(posts: MockPost[]): Promise<MockMusicT
       state.maxInFlight = 0;
       state.rejectAll = false;
       state.linkBase = undefined;
+      state.perPage = 48;
     },
   };
 }

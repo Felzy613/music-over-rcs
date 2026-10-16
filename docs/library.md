@@ -8,7 +8,7 @@ Everything the bot knows lives in one SQLite file, the **catalog** (`CATALOG_DB`
 | --- | --- |
 | **Songs**: title, artist credit, address, album art, the post it's from, release date | Answering requests without searching the site |
 | **Artists**, split out of each credit ("Mendy Weiss, Yoely Davidowitz & Yoely Samuel" is three) | Artist lists |
-| **Posts** from music-table.com: title, category, the site's category ids, publish date, views, picture, how many MP3s, whether it was announced | Trending, new, holiday lists, the daily message, alerts |
+| **Posts** from music-table.com: title, kind (single, video, wedding), the site's categories, publish date, views, picture, how many MP3s, whether it was announced | Trending, new, holiday lists, the daily message, alerts |
 | **Plays**: each song sent to you, and when | Keeping your most played songs ready; following an artist after three of their songs |
 | **Artists you follow**, whether you chose them or your plays did, and the ones you unfollowed | New-song alerts |
 | **Songs kept ready**: which files are on disk, and when each was last used | Sending without downloading |
@@ -28,10 +28,10 @@ Page links (a video site's watch page, say) are refused on purpose. `check` test
 
 ## Keeping up with the site
 
-- **Sync, every three hours:** one request for the 50 newest posts (files, album art, view counts and dates included) and one for the RSS feed (category names). New MP3s become songs; view counts are refreshed, which is what keeps `trending` current. A failed sync is tried again an hour later.
-- **The whole site, once:** on its first run the bot reads every post (about 3,600, in pages of 50), a few pages a minute in the background, and picks up where it left off after a restart. After that the sync keeps it current. `npm run library -- scan` reads it all at once, pausing a second between requests (about two minutes).
+- **Sync, every three hours:** one request for the 48 newest releases (their categories, album art, view counts and dates), plus one for the page of each release the catalog hasn't seen, for its files. New MP3s become songs; view counts are refreshed, which is what keeps `trending` current. A failed sync is tried again an hour later.
+- **The whole site, once:** on its first run the bot reads every release (several thousand, in pages of 48, plus each release's page once), a few pages a minute in the background, and picks up where it left off after a restart. After that the sync keeps it current. `npm run library -- scan` reads it all at once, pausing a second between requests (about two minutes).
 - **While you follow anyone, the feed every 15 minutes:** one small request for the RSS feed; when it shows a post the catalog doesn't have, a sync right away. That's what makes alerts quick. Following no one, this doesn't run.
-- **A holiday list, the first time you ask:** the site lists posts by category id but names its categories only on their pages, so the bot reads the category's page once, looks at a few of its posts, and remembers the id they share (the rarest one, since almost everything is also "Singles"). Then it reads the whole category (up to 20 pages of 50; Weddings, the biggest, is about 340 posts) and, after that, the newest hundred at most once a day.
+- **A holiday list, the first time you ask:** the bot reads the whole category from the site's list (`chanukah`, `purim`, `weddings`, `vocal`; up to 10 pages of 48, Weddings being the biggest) and, after that, its two newest pages at most once a day.
 
 ## Songs kept ready
 

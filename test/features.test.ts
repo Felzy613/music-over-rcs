@@ -19,9 +19,9 @@ const day = (y: number, m: number, d: number, hour = 12, minute = 0) => new Date
 const iso = (date: Date) => date.toISOString();
 const texts = (replies: Reply[]) => replies.flatMap((reply) => (reply.kind === 'text' ? [reply.text] : []));
 
-const CHANUKAH = '692ef1952612b1d9793d92e2';
-const SINGLES = '5d2c506d874cd9041c2ecab4';
-const VOCAL = '5f0000000000000000000001';
+/** The site's own names for its categories, as the catalog keeps them. */
+const SINGLES = 'singles';
+const VOCAL = 'vocal';
 
 describe('seasons', () => {
   test('Chanukah, Purim (Adar II in a leap year), Sefirah and the Three Weeks, by the Jewish calendar', () => {
@@ -56,9 +56,9 @@ describe('holiday and category lists', () => {
   });
 
   const posts: MockPost[] = [
-    { slug: 'maoz-tzur', title: 'Leiby Moskowitz - Maoz Tzur 2.0', files: [{ name: 'a.mp3' }], categoryIds: [SINGLES, CHANUKAH], categoryPages: ['chanukah'], views: 900, publishedAt: '2025-12-10T12:00:00.000Z' },
-    { slug: 'haneiros', title: 'Yisroel Adler - Haneiros Hallolu', files: [{ name: 'b.mp3' }], categoryIds: [SINGLES, CHANUKAH], categoryPages: ['chanukah'], views: 4000, publishedAt: '2024-12-20T12:00:00.000Z' },
-    { slug: 'summer-hit', title: 'Band - Summer Hit', files: [{ name: 'c.mp3' }], categoryIds: [SINGLES], views: 99_000, publishedAt: '2026-07-01T12:00:00.000Z' },
+    { slug: 'maoz-tzur', title: 'Leiby Moskowitz - Maoz Tzur 2.0', files: [{ name: 'a.mp3' }], category: 'Singles', categoryPages: ['chanukah'], views: 900, publishedAt: '2025-12-10T12:00:00.000Z' },
+    { slug: 'haneiros', title: 'Yisroel Adler - Haneiros Hallolu', files: [{ name: 'b.mp3' }], category: 'Singles', categoryPages: ['chanukah'], views: 4000, publishedAt: '2024-12-20T12:00:00.000Z' },
+    { slug: 'summer-hit', title: 'Band - Summer Hit', files: [{ name: 'c.mp3' }], category: 'Singles', views: 99_000, publishedAt: '2026-07-01T12:00:00.000Z' },
   ];
 
   const setUp = async () => {
@@ -70,13 +70,12 @@ describe('holiday and category lists', () => {
     return { musicTable, categories, site, catalog, setClock: (date: Date) => (clock = date) };
   };
 
-  test("a category's id is learned once, from the posts its page lists: the one they share, and the rarest if several", async () => {
+  test("a category is filed under the site's own name for it, without asking the site", async () => {
     const { categories, site } = await setUp();
-    assert.equal(await categories.id('chanukah'), CHANUKAH, 'both posts are Singles too, but Chanukah is the rare one');
-    const reads = site.postReads.length;
-    assert.equal(await categories.id('chanukah'), CHANUKAH);
-    assert.equal(site.postReads.length, reads, 'remembered');
-    assert.equal(await categories.id('purim'), undefined, 'a category with no page answers nothing');
+    assert.equal(await categories.id('chanukah'), 'chanukah');
+    assert.equal(categories.knownId('purim'), 'purim');
+    assert.equal(await categories.id('no/such'), undefined);
+    assert.deepEqual([site.listReads, site.postReads.length], [0, 0]);
   });
 
   test('a category list is its posts, most viewed first, read from the site at most once a day', async () => {
