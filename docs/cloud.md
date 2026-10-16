@@ -149,7 +149,8 @@ Then set `BOT_ENABLED` to `on` in Render (changing the environment restarts the 
 
 - **`/status`** (the same password) reports the phase, bridge login state, problems, memory, the lease, what the Worker last saw, and bytes sent this month. **`/pair`** is also where you re-link Google Messages if it ever unlinks.
 - **Email**: the bot's problem reports (bridge unlinked, site not answering, OneDrive sign-in lost) reach you within five minutes, mailed by the Worker; the Worker adds "the host isn't answering" (three missed checks in a row) and "the bot isn't running" (up but not answering for 30 minutes). A problem is repeated at most every six hours.
-- **Deploys** are manual (`autoDeploy: false`). A deploy briefly runs the new copy beside the old; the lease holds it until the old one has stopped.
+- **Deploys** are manual (`autoDeploy: false`). A deploy briefly runs the new copy beside the old; the lease holds it until the old one has stopped. Render stops the old copy only once the new one has opened its port, so while the new copy waits for the lease it answers on the web port itself (`/healthz` ok, everything else 503; `src/cloud/waiting-door.ts`) and closes that door as soon as the lease is its own. Without that, a deploy would wait on itself forever.
+- **Uptime monitor (Better Stack and the like)**: watch `https://<service>.onrender.com/ping` and treat **HTTP 500** as up. `/ping` answers 500 on purpose, and neither Render's "starting up" page nor its gateway errors (502/503) nor the waiting door above ever say 500, so only the running web door passes; a sleeping service just keeps failing the check until it has woken. `/healthz` (200) stays what the Worker uses.
 - **Re-pairing** can change the chat's room. `/pair` lets you choose it again; no environment change is needed.
 - **Logs** are in the Render dashboard; each line is prefixed with the process (`[bot]`, `[bridge]`, `[synapse]`, `[litestream]`).
 
@@ -161,7 +162,7 @@ The ones that matter for the cloud host. The bot's own settings (`DIGEST_TIME`, 
 |---|---|
 | `SECRET_KEY` | Master secret the homeserver's and bridge's secrets are derived from (so they're the same at every start). Keep it; changing it logs the bot out of the homeserver |
 | `MATRIX_USER`, `MATRIX_PASSWORD` | The bot's account (default user `me`); created on first start |
-| `ADMIN_TOKEN` | Password for `/status`, `/pair` and the rest. Without it only `/healthz` answers |
+| `ADMIN_TOKEN` | Password for `/status`, `/pair` and the rest. Without it only `/healthz` and `/ping` answer |
 | `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The bucket: backups, the lease, the alerts. Without them **nothing is backed up, there is no lease and no alert**, and the start says so |
 | `R2_REGION` | `auto` (the default) for R2; another S3 server may want a named region |
 | `ONEDRIVE_CLIENT_ID` | The Azure app's client id. Empty or `none`: nothing is saved to OneDrive |

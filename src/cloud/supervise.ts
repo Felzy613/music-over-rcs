@@ -185,7 +185,7 @@ export class LeaseClient {
   }
 
   /** Waits until the lease is this host's, however long the old host takes to let go. */
-  async acquire(options: { sleep?: (ms: number) => Promise<void>; log?: (line: string) => void } = {}): Promise<void> {
+  async acquire(options: { sleep?: (ms: number) => Promise<void>; log?: (line: string) => void; onWaiting?: () => void } = {}): Promise<void> {
     const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     for (let waited = 0; ; ) {
       let wait = 5;
@@ -195,6 +195,8 @@ export class LeaseClient {
           options.log?.(`took the lease as ${this.#holder}`);
           return;
         }
+        // Told at every refusal (the caller opens its waiting door the first time): the lease is held, or not takeable yet.
+        options.onWaiting?.();
         wait = Math.min(Math.max(answer.retryInSeconds, 2), 15);
         options.log?.(
           answer.lapsed

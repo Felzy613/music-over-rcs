@@ -70,6 +70,15 @@ describe('the cloud web door', () => {
     assert.equal((await fetch(web.url + '/healthz', { method: 'HEAD' })).status, 200);
   });
 
+  test('/ping is open and answers 500 on purpose, so a monitor that expects it only sees the running app', async () => {
+    const res = await get('/ping');
+    assert.equal(res.status, 500);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    assert.match(await res.text(), /^pong/);
+    assert.equal((await fetch(web.url + '/ping', { method: 'HEAD' })).status, 500);
+    assert.equal((await fetch(web.url + '/ping', { method: 'POST' })).status, 401, 'only GET and HEAD, the rest needs the password');
+  });
+
   test('everything else needs the password, as Basic (any user name) or Bearer', async () => {
     assert.equal((await get('/status')).status, 401);
     const wrong = await get('/status', basic('nope'));
@@ -81,10 +90,11 @@ describe('the cloud web door', () => {
     assert.equal((await get('/nothing-here', basic('open-sesame'))).status, 404);
   });
 
-  test('without an ADMIN_TOKEN nothing but /healthz answers', async () => {
+  test('without an ADMIN_TOKEN nothing but /healthz and /ping answers', async () => {
     const closed = await serve(createCloudWeb({ ...deps(), adminToken: undefined }));
     try {
       assert.equal((await fetch(closed.url + '/healthz')).status, 200);
+      assert.equal((await fetch(closed.url + '/ping')).status, 500);
       assert.equal((await fetch(closed.url + '/status', { headers: { authorization: basic('') } })).status, 503);
       assert.equal((await fetch(closed.url + '/pair')).status, 503);
     } finally {

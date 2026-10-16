@@ -205,6 +205,26 @@ describe('the lease client', () => {
     assert.match(logs.at(-1)!, /took the lease as host-1/);
   });
 
+  test('tells the caller each time it has to wait (so it can open a waiting door), and never when the lease is free', async () => {
+    const free = new LeaseClient({ store: memoryLeaseStore(), holder: 'host-1' });
+    let calls = 0;
+    await free.acquire({ sleep: async () => {}, onWaiting: () => void calls++ });
+    assert.equal(calls, 0);
+
+    const store = memoryLeaseStore();
+    await acquire(store, 'old', 90, 0);
+    let now = 0;
+    const waiting = new LeaseClient({ store, holder: 'host-2', now: () => now });
+    let told = 0;
+    await waiting.acquire({
+      sleep: async () => {
+        now += 40_000;
+      },
+      onWaiting: () => void told++,
+    });
+    assert.equal(told, 3, 'refused at 0 s, 40 s and 80 s, then the lease lapsed at 90 s');
+  });
+
   test('keeps trying through errors from R2, however many', async () => {
     let failures = 3;
     const real = memoryLeaseStore();

@@ -5,6 +5,7 @@ import { boot, readCloudConfig, type Booted, type BootSys } from '../../src/clou
 import { s3LeaseStore } from '../../src/cloud/lease.ts';
 import { s3FromEnv } from '../../src/cloud/s3.ts';
 import { LeaseClient, Supervisor } from '../../src/cloud/supervise.ts';
+import { withWaitingDoor } from '../../src/cloud/waiting-door.ts';
 
 // The container's PID 1 work: see docs/cloud.md. It takes the lease, restores the databases, writes the settings and keeps
 // the replicator, homeserver, bridge and bot running; on SIGTERM it stops them in order and lets the lease go.
@@ -38,7 +39,11 @@ const sys: BootSys = {
 };
 
 const bucket = s3FromEnv(process.env, { log });
-const lease = bucket ? new LeaseClient({ store: s3LeaseStore(bucket), holder: config.holder }) : undefined;
+const leaseClient = bucket ? new LeaseClient({ store: s3LeaseStore(bucket), holder: config.holder }) : undefined;
+// Render stops the old instance of a deploy only once the new one has opened its port, and the old one's stopping is what lets
+// go of the lease. So while waiting for it, answer on the web port (/healthz ok, the rest 503), and close that door the moment the
+// lease is ours so the bot can open the real one. With the lease free there is no wait and no door.
+const lease = leaseClient && withWaitingDoor(leaseClient, { port: Number(process.env.PORT?.trim() || 8080), log });
 // Render allows 30 s between SIGTERM and SIGKILL, and four processes are stopped one after another.
 const supervisor = new Supervisor({ log, graceMs: 6000 });
 

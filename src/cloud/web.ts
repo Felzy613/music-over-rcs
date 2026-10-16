@@ -14,7 +14,7 @@ export interface PairLine {
 
 /** What the cloud web server needs from the rest of the bot. Everything else it asks for here, it gets from these. */
 export interface CloudDeps {
-  /** The password for everything but /healthz. Without one those routes answer 503 instead of being open. */
+  /** The password for everything but /healthz and /ping. Without one those routes answer 503 instead of being open. */
   adminToken: string | undefined;
   /** What /status reports. */
   status(): Promise<Record<string, unknown>> | Record<string, unknown>;
@@ -105,7 +105,13 @@ export function createCloudWeb(deps: CloudDeps): Server {
         res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
         return void res.end(req.method === 'HEAD' ? undefined : 'ok');
       }
-      if (!deps.adminToken) return send(res, 503, { error: 'ADMIN_TOKEN is not set, so nothing but /healthz is available' });
+      // For a monitor that wants to see the app itself answer: 500 on purpose, which neither Render's "starting up" page nor its
+      // gateway errors (502/503) ever say, so only a running web door gets through.
+      if (path === '/ping' && (req.method === 'GET' || req.method === 'HEAD')) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
+        return void res.end(req.method === 'HEAD' ? undefined : 'pong (this answers 500 on purpose, for a monitor that expects it)');
+      }
+      if (!deps.adminToken) return send(res, 503, { error: 'ADMIN_TOKEN is not set, so nothing but /healthz and /ping is available' });
       const given = passwordIn(req.headers.authorization);
       if (given === undefined || !sameSecret(given, deps.adminToken)) {
         await new Promise((resolve) => setTimeout(resolve, 300));
