@@ -15,9 +15,11 @@ Phone <-> Google <-> [ one Docker container on Render's free plan ]
                         |- the bridge   127.0.0.1 only
                         '- the bot      + a web door on $PORT (src/cloud-main.ts)
 Cloudflare
-  R2 bucket "mors-state"   the database backups, the lease, and the alerts waiting to be mailed
+  R2 bucket "mors-state"   the database backups, the lease, the alerts waiting to be mailed,
+                           and YouTube songs on their way (yt/)
   Worker "mors-edge"       every 5 min: asks the web door if it is up (which also keeps Render's
-                           free service awake), and mails what the bot left in alerts/
+                           free service awake), and mails what the bot left in alerts/;
+                           at once, through the "mors-yt" queue: fetches the YouTube songs the bot asks for
 ```
 
 Why these pieces:
@@ -25,6 +27,7 @@ Why these pieces:
 - **Render's free plan** sleeps after 15 minutes without a request, may restart at any time, and wipes its disk when it does. The Worker's check every five minutes keeps it awake, and the databases (Synapse's, the bridge's, the bot's catalog) are backed up to R2 every minute and restored at each start, so a wiped disk loses at most about a minute of changes.
 - **The lease** is what stops two copies running at once. Render starts a new copy before it stops the old one on a deploy; two bridges on one Google login would unpair the phone, and two writers on one backup would corrupt it. It is a file in the bucket, changed only with R2's conditional writes; the new copy waits until the old one lets go (it does when it is stopped) or its lease runs out (it crashed).
 - **The host and the Worker never call each other's front door.** Cloudflare puts a bot challenge in front of every automated client on `workers.dev`, so a host calling the Worker would be turned away. They meet in the bucket instead: the host writes its alerts there, and the Worker reads them. (The Worker does call the host, and that direction is fine.)
+- **YouTube Music songs come by way of Cloudflare.** YouTube asks Render's datacenter address to "confirm you're not a bot" before it gives out a song's audio (search still works), but answers Cloudflare's network. So the bot leaves a request in the bucket (`yt/req/`); R2 tells the Worker through the `mors-yt` queue; the Worker fetches the song from YouTube Music and puts it in the bucket; the bot takes it and sends it, and removes all three files. A song takes a few seconds longer than a direct download (6 to 9 seconds measured). If YouTube turns Cloudflare away too, the bot asks once more, then leaves YouTube aside for 15 minutes and searches music-table.com instead. `src/cloud/youtube-relay.ts`, `cloudflare/youtube.ts`; on with `YOUTUBE_RELAY=r2`, the cloud host's default.
 - **Songs** are not kept on the host (its disk is wiped); each one is fetched when asked for. With OneDrive set up (step 5), every song sent is also saved to your OneDrive, tagged and sorted as `Artist/Album/01 Title.mp3`, in the app's own folder.
 - **A restart** takes under a minute (36 seconds measured, restore included). Texts sent meanwhile are answered when the bot is back: it remembers how far it got (`src/runner.ts`, "resume").
 
@@ -59,7 +62,14 @@ Create an R2 API token: R2, *Manage API tokens*, *Create API token*, permission 
 
 For email, onboard a domain for Email Service (Compute, Email Service, Email Sending, *Onboard Domain*) and add your own address as a verified destination (Email Routing, Destination addresses). Without a domain, delete the `send_email` block in `cloudflare/wrangler.jsonc` and set an `NTFY_TOPIC` secret instead (install the ntfy app and subscribe to a topic nobody could guess).
 
-Deploy the Worker and give it your addresses:
+Make the queue YouTube songs are asked for through, and have the bucket tell it about each request (once):
+
+```bash
+npx wrangler queues create mors-yt
+npx wrangler r2 bucket notification create mors-state --event-type object-create --prefix yt/req/ --queue mors-yt
+```
+
+Deploy the Worker (it is the queue's consumer) and give it your addresses:
 
 ```bash
 npx wrangler deploy
@@ -160,6 +170,7 @@ The ones that matter for the cloud host. The bot's own settings (`DIGEST_TIME`, 
 | `SECRET_KEY` | Master secret the homeserver's and bridge's secrets are derived from (so they're the same at every start). Keep it; changing it logs the bot out of the homeserver |
 | `MATRIX_USER`, `MATRIX_PASSWORD` | The bot's account (default user `me`); created on first start |
 | `ADMIN_TOKEN` | Password for `/status`, `/pair` and the rest. Without it only `/healthz` and `/ping` answer |
+| `YOUTUBE_RELAY` | `r2` (the cloud host's default): YouTube Music songs come by way of the Worker, through the bucket. Empty or `off`: the host asks YouTube itself, which it turns away |
 | `STARTUP_MESSAGE` | `once` (the cloud host's default), `always` or `off`. A word in the chat when the bot is up and the bridge can deliver it, once per catalog (`hello.sent` in the catalog) or at every start. Off everywhere else |
 | `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The bucket: backups, the lease, the alerts. Without them **nothing is backed up, there is no lease and no alert**, and the start says so |
 | `R2_REGION` | `auto` (the default) for R2; another S3 server may want a named region |

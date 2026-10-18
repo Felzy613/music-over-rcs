@@ -172,6 +172,8 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     botEnv.BOT_MEMORY_MB ??= '220';
     // The first start in the cloud says hello in the chat (once; STARTUP_MESSAGE=off or always changes that).
     botEnv.STARTUP_MESSAGE ??= 'once';
+    // YouTube asks this host's address to prove it isn't a bot, so its songs come by way of Cloudflare (src/cloud/youtube-relay.ts).
+    botEnv.YOUTUBE_RELAY ??= 'r2';
     // Big buffers (a song) go straight back to the system when freed, so the bot's memory use follows what it really holds.
     botEnv.MALLOC_ARENA_MAX ??= '2';
     botEnv.MALLOC_MMAP_THRESHOLD_ ??= '262144';

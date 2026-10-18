@@ -126,6 +126,17 @@ export class S3 {
     return { text: await res.text(), etag: strongETag(res.headers.get('etag') ?? '') };
   }
 
+  /** An object's bytes (audio, say) and ETag, or nothing when it doesn't exist. */
+  async getBytes(key: string): Promise<{ data: Uint8Array; etag: string } | undefined> {
+    const res = await this.#send('GET', key);
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => {});
+      return undefined;
+    }
+    if (!res.ok) return this.#fail(res, `reading ${key}`);
+    return { data: new Uint8Array(await res.arrayBuffer()), etag: strongETag(res.headers.get('etag') ?? '') };
+  }
+
   /** Writes an object. With a condition, returns false (and writes nothing) when it isn't met; otherwise true with the new ETag. */
   async put(key: string, body: string | Uint8Array, condition: WriteCondition = {}): Promise<{ ok: true; etag: string } | { ok: false }> {
     const headers: Record<string, string> = {};

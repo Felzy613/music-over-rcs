@@ -8,6 +8,10 @@
   "compatibility_date": "2026-10-01",
   "triggers": { "crons": ["*/5 * * * *"] },
   "r2_buckets": [{ "binding": "STATE", "bucket_name": "mors-state" }],
+  // Song requests from the host: R2 tells this queue about every object created under yt/req/ (an event notification
+  // set up once with `npx wrangler r2 bucket notification create mors-state --event-type object-create --prefix yt/req/
+  // --queue mors-yt`), and this Worker answers each at once. See cloudflare/youtube.ts.
+  "queues": { "consumers": [{ "queue": "mors-yt", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 1 }] },
   // Email alerts. Needs a domain on Cloudflare DNS with Email Service set up; delete this block and set the NTFY_TOPIC
   // secret instead to get alerts through ntfy.sh.
   "send_email": [{ "name": "EMAIL" }]
