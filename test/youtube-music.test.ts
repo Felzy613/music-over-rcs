@@ -631,18 +631,28 @@ describe('songs through a relay (for a host YouTube turns away at its player)', 
     youtube.firstAcceptedVisitor = 99;
   });
 
-  /** A relay that answers with the mock's own audio for each song, or as `answer` says, and keeps what it was asked. */
+  /**
+   * A relay that answers with the mock's own audio for each song, or as `answer` says, and keeps what it was asked. The
+   * relay's later checks wait in `timers` until a test runs them.
+   */
   const make = (answer?: (videoId: string) => Promise<RelayedSong>, options: { now?: () => number } = {}) => {
     const asks: Array<{ videoId: string; maxBytes?: number }> = [];
     const lines: string[] = [];
+    const timers: Array<{ run: () => void; ms: number }> = [];
     const relay: SongRelay = async (videoId, opts = {}) => {
       asks.push({ videoId, ...opts });
       if (answer) return answer(videoId);
       const data = new Uint8Array(youtube.bytes(videoId));
       return { data, type: 'audio/mp4', bytes: data.byteLength };
     };
-    const youTube = new YouTubeMusic({ baseUrl: youtube.url, relay, log: (line) => lines.push(line), ...options });
-    return { asks, lines, youTube };
+    const youTube = new YouTubeMusic({ baseUrl: youtube.url, relay, log: (line) => lines.push(line), setTimer: (run, ms) => void timers.push({ run, ms }), ...options });
+    return { asks, lines, timers, youTube };
+  };
+
+  /** Lets a check that a timer started run to its end (the relay here answers at once). */
+  const waitFor = async (done: () => boolean) => {
+    for (let i = 0; i < 50 && !done(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(done(), 'the check did not finish');
   };
 
   test('a song comes through the relay, and neither the player nor the media server is asked from here', async () => {
@@ -721,13 +731,14 @@ describe('songs through a relay (for a host YouTube turns away at its player)', 
     assert.deepEqual(await youTube.checkStreams(), { ok: false, problem: "the relay couldn't get that song" });
   });
 
-  test('when YouTube turns the relay away too, YouTube songs are left aside for a while, as on a host it turns away', async () => {
+  test('when YouTube turns the relay away too, YouTube songs are left aside for a minute, and the relay is checked then', async () => {
     let clock = 1_000_000;
     let turnedAway = true;
-    const { asks, youTube } = make(
+    const { asks, lines, timers, youTube } = make(
       async (videoId) => {
         if (turnedAway) throw Object.assign(new Error("Sign in to confirm you're not a bot"), { turnedAway: true });
-        const data = new Uint8Array(youtube.bytes(videoId));
+        // The check's short video isn't one of the mock's songs.
+        const data = videoId === 'jNQXAC9IVRw' ? new Uint8Array([1, 2, 3]) : new Uint8Array(youtube.bytes(videoId));
         return { data, type: 'audio/mp4', bytes: data.byteLength };
       },
       { now: () => clock },
@@ -737,10 +748,66 @@ describe('songs through a relay (for a host YouTube turns away at its player)', 
     await assert.rejects(youTube.download(youTube.trackUrl('aaaaaaaaaa2')), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
     await assert.rejects(youTube.inspect(youTube.trackUrl('aaaaaaaaaa2')), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
     assert.equal(asks.length, 1, 'the relay is not asked again meanwhile');
+    assert.deepEqual(timers.map((timer) => timer.ms), [60_000], 'one check, a minute on');
+    assert.ok(lines.includes('YouTube Music turns the relay away too; YouTube songs are left aside for 1 minute, then the relay is checked again'), lines.join('\n'));
 
+    // The check still meets the bot check: twice as long this time, and another check at its end.
+    clock += 60_000;
+    timers.shift()!.run();
+    await waitFor(() => timers.length === 1);
+    assert.deepEqual(asks.at(-1), { videoId: 'jNQXAC9IVRw' });
+    assert.equal(timers[0]!.ms, 120_000);
+    assert.equal(youTube.turnsThisHostAway, true);
+
+    // Then it comes through: YouTube songs are back at once, before the two minutes are up.
     turnedAway = false;
-    clock += 16 * 60_000;
+    clock += 60_000;
+    timers.shift()!.run();
+    await waitFor(() => !youTube.turnsThisHostAway);
+    assert.ok(lines.includes('YouTube Music lets the relay through again; YouTube songs are back'), lines.join('\n'));
     assert.equal((await youTube.download(youTube.trackUrl('aaaaaaaaaa1'))).bytes, youtube.bytes('aaaaaaaaaa1').length);
+    assert.equal(timers.length, 0, 'no check is left waiting');
+
+    // The next time starts again at a minute.
+    turnedAway = true;
+    await assert.rejects(youTube.download(youTube.trackUrl('aaaaaaaaaa2')), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
+    assert.deepEqual(timers.map((timer) => timer.ms), [60_000]);
+  });
+
+  test('each time in a row the relay is left aside twice as long, never longer than turnedAwayMs; songs failing together count once', async () => {
+    let clock = 1_000_000;
+    const { timers, youTube } = make(
+      async () => {
+        throw Object.assign(new Error("Sign in to confirm you're not a bot"), { turnedAway: true });
+      },
+      { now: () => clock },
+    );
+    // An album's songs, asked for together, meet the same check.
+    await Promise.all(['aaaaaaaaaa1', 'aaaaaaaaaa2', 'aaaaaaaaaa3'].map((id) => assert.rejects(youTube.download(youTube.trackUrl(id)))));
+    const waits = [timers[0]!.ms];
+    assert.equal(timers.length, 1);
+    for (let i = 0; i < 5; i += 1) {
+      clock += timers[0]!.ms;
+      timers.shift()!.run();
+      await waitFor(() => timers.length === 1);
+      waits.push(timers[0]!.ms);
+    }
+    assert.deepEqual(waits.map((ms) => ms / 60_000), [1, 2, 4, 8, 15, 15]);
+  });
+
+  test('a start-up check that meets the bot check leaves YouTube songs aside for a minute, not a quarter of an hour', async () => {
+    let clock = 1_000_000;
+    const { timers, youTube } = make(
+      async () => {
+        throw Object.assign(new Error("Sign in to confirm you're not a bot"), { turnedAway: true });
+      },
+      { now: () => clock },
+    );
+    assert.deepEqual(await youTube.checkStreams(), { ok: false, problem: TURNED_AWAY });
+    assert.equal(youTube.turnsThisHostAway, true);
+    assert.deepEqual(timers.map((timer) => timer.ms), [60_000]);
+    clock += 60_000;
+    assert.equal(youTube.turnsThisHostAway, false);
   });
 
   test('the start-up check asks the relay for its short video, and says in the log how it went', async () => {

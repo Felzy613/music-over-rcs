@@ -17,7 +17,8 @@ export interface RelayedAudio {
 
 /**
  * Gets one song's audio by its YouTube video id. Rejects with a message fit to show the user, in lower case so it reads
- * after a colon; when YouTube's bot check met Cloudflare too (twice), the error carries `turnedAway: true`.
+ * after a colon; when YouTube's bot check met Cloudflare every time it was asked (see RETRY_WAITS_MS), the error carries
+ * `turnedAway: true`.
  */
 export type YouTubeRelay = (videoId: string, options?: { maxBytes?: number }) => Promise<RelayedAudio>;
 
@@ -26,6 +27,8 @@ export interface YouTubeRelayOptions {
   timeoutMs?: number;
   /** How soon to look for it first (default 750 ms); each later look waits half as long again, up to 3 s. */
   pollMs?: number;
+  /** How long to wait before each new ask when YouTube turned Cloudflare away (default RETRY_WAITS_MS). */
+  retryWaitsMs?: number[];
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   log?: (line: string) => void;
@@ -34,8 +37,14 @@ export interface YouTubeRelayOptions {
 const REQUESTS = 'yt/req/';
 const RESULTS = 'yt/res/';
 const AUDIO = 'yt/audio/';
+/**
+ * YouTube's bot check meets Cloudflare now and then, for a minute or two (docs/youtube-music.md has what was measured on
+ * 2026-10-18). An ask made straight after a turned-away one was turned away too, while one 15 seconds later often came
+ * through, so a turned-away song is asked for again after a wait, not at once: 5 seconds, then 15 more.
+ */
+const RETRY_WAITS_MS = [5_000, 15_000];
 
-/** The Worker's answer when YouTube turned Cloudflare's address away too (now and then it does): worth one more try. */
+/** The Worker's answer when YouTube turned Cloudflare's address away too (now and then it does): worth asking again later. */
 class TurnedAway extends Error {}
 
 export function createYouTubeRelay(bucket: Pick<S3, 'put' | 'get' | 'getBytes' | 'delete'>, options: YouTubeRelayOptions = {}): YouTubeRelay {
@@ -79,18 +88,21 @@ export function createYouTubeRelay(bucket: Pick<S3, 'put' | 'get' | 'getBytes' |
       await Promise.all(Object.values(keys).map((key) => bucket.delete(key).catch(() => {})));
     }
   };
+  const waits = options.retryWaitsMs ?? RETRY_WAITS_MS;
   return async (videoId, { maxBytes } = {}) => {
-    try {
-      return await once(videoId, maxBytes);
-    } catch (err) {
-      if (!(err instanceof TurnedAway)) throw err;
-      // Cloudflare's addresses are usually let through; another request is often answered from another one.
-      options.log?.(`YouTube Music turned Cloudflare away for ${videoId} once (${err.message}); asking again`);
+    for (let attempt = 0; ; attempt += 1) {
       try {
         return await once(videoId, maxBytes);
-      } catch (again) {
-        // Marked, so the host leaves YouTube songs aside for a while and searches music-table.com instead.
-        throw again instanceof TurnedAway ? Object.assign(new Error(again.message), { turnedAway: true as const }) : again;
+      } catch (err) {
+        if (!(err instanceof TurnedAway)) throw err;
+        const wait = waits[attempt];
+        if (wait === undefined) {
+          options.log?.(`YouTube Music turned Cloudflare away for ${videoId} ${attempt + 1} times in a row (${err.message})`);
+          // Marked, so the host leaves YouTube songs aside for a while and searches music-table.com instead.
+          throw Object.assign(new Error(err.message), { turnedAway: true as const });
+        }
+        options.log?.(`YouTube Music turned Cloudflare away for ${videoId} (${err.message}); asking again in ${Math.round(wait / 1000)} s`);
+        await sleep(wait);
       }
     }
   };

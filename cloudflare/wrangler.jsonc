@@ -12,6 +12,9 @@
   // set up once with `npx wrangler r2 bucket notification create mors-state --event-type object-create --prefix yt/req/
   // --queue mors-yt`), and this Worker answers each at once. See cloudflare/youtube.ts.
   "queues": { "consumers": [{ "queue": "mors-yt", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 1 }] },
+  // Keeps the Worker's log lines (one per song request, saying whether YouTube turned Cloudflare away) for three days:
+  // dashboard → Workers & Pages → mors-edge → Observability. Well within the free plan's 200,000 a day.
+  "observability": { "enabled": true },
   // Email alerts. Needs a domain on Cloudflare DNS with Email Service set up; delete this block and set the NTFY_TOPIC
   // secret instead to get alerts through ntfy.sh.
   "send_email": [{ "name": "EMAIL" }]

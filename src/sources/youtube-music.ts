@@ -51,6 +51,12 @@ const MAX_ROUNDS = 3;
  * offering songs that can't be sent), then it is asked again.
  */
 const TURNED_AWAY_MS = 15 * 60_000;
+/**
+ * Through a relay the bot check comes and goes within minutes (src/cloud/youtube-relay.ts), so when the relay is turned
+ * away anyway, YouTube songs are left aside for only this long, twice as long each time after up to TURNED_AWAY_MS, and
+ * the relay is asked for the short video at the end of each: the first time it comes through, YouTube songs are back.
+ */
+const RELAY_TURNED_AWAY_MS = 60_000;
 /** What is said when YouTube turns this host away; it ends up in the chat ("I can't send …: <this>"). */
 export const TURNED_AWAY = "YouTube Music is turning this server away for now (it asks to confirm it isn't a bot)";
 /** A short, well-known video ("Me at the zoo", 19 s): asked for once at start to learn whether YouTube serves this host. */
@@ -141,8 +147,13 @@ export interface YouTubeMusicOptions {
   timeoutMs?: number;
   /** How long a resolved stream link is reused, so checking a song and then sending it asks YouTube once. */
   streamTtlMs?: number;
-  /** How long YouTube songs are left aside once YouTube turns this host away with its bot check. */
+  /**
+   * How long YouTube songs are left aside once YouTube turns this host away with its bot check. Through a relay it is
+   * the longest they are left aside (see RELAY_TURNED_AWAY_MS).
+   */
   turnedAwayMs?: number;
+  /** Runs the relay's next check later; by default a timer that doesn't keep the process running. */
+  setTimer?: (run: () => void, ms: number) => void;
   /** Hears what went wrong (a search, an album page, a song's link), so the host's log shows it. */
   log?: (line: string) => void;
   /**
@@ -388,6 +399,10 @@ export class YouTubeMusic {
 
   #turnedAwayFor: number;
   #turnedAwayUntil = 0;
+  /** How many times in a row the relay has been turned away (each leaves YouTube songs aside twice as long). */
+  #relayStrikes = 0;
+  #relayCheckDue = false;
+  #setTimer: (run: () => void, ms: number) => void;
   #log: (line: string) => void;
   #relay: SongRelay | undefined;
 
@@ -399,6 +414,7 @@ export class YouTubeMusic {
     this.#streamTtl = options.streamTtlMs ?? 30 * 60_000;
     this.#now = options.now ?? Date.now;
     this.#turnedAwayFor = options.turnedAwayMs ?? TURNED_AWAY_MS;
+    this.#setTimer = options.setTimer ?? ((run, ms) => void setTimeout(run, ms).unref());
     this.#log = options.log ?? (() => {});
     this.#relay = options.relay;
     // Pointed somewhere else (the tests), the media comes from there too.
@@ -436,11 +452,12 @@ export class YouTubeMusic {
   /**
    * Asks once for a short, well-known video's audio, to learn (and log) whether YouTube serves this host at all. On a
    * host it turns away, YouTube songs are then left aside from the start instead of after someone's request fails.
+   * Through a relay this is also the check made at the end of each set-aside (RELAY_TURNED_AWAY_MS).
    */
   async checkStreams(): Promise<{ ok: true } | { ok: false; problem: string }> {
     const how = this.#relay ? 'through the relay' : 'from this host';
     try {
-      if (this.#relay) await this.#fromRelay(this.#relay, PROBE_VIDEO);
+      if (this.#relay) await this.#fromRelay(this.#relay, PROBE_VIDEO, undefined, undefined, { check: true });
       else await this.stream(PROBE_VIDEO);
       this.#log(`YouTube Music: songs can be had ${how}`);
       return { ok: true };
@@ -538,9 +555,12 @@ export class YouTubeMusic {
     }
   }
 
-  /** A song through the relay, held to the same rules as a download from here: audio, not empty, within the limit. */
-  async #fromRelay(relay: SongRelay, videoId: string, title?: string, maxBytes?: number): Promise<DownloadedAudio> {
-    if (this.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);
+  /**
+   * A song through the relay, held to the same rules as a download from here: audio, not empty, within the limit. A
+   * `check` (the start-up check, or the one at the end of a set-aside) is asked even while YouTube songs are left aside.
+   */
+  async #fromRelay(relay: SongRelay, videoId: string, title?: string, maxBytes?: number, { check = false } = {}): Promise<DownloadedAudio> {
+    if (this.turnsThisHostAway && !check) throw new YouTubeMusicError(TURNED_AWAY);
     const started = this.#now();
     let song: RelayedSong;
     try {
@@ -549,8 +569,7 @@ export class YouTubeMusic {
       const message = err instanceof Error ? err.message : String(err);
       this.#log(`YouTube Music: the relay couldn't get ${videoId}: ${message}`);
       if (err !== null && typeof err === 'object' && (err as { turnedAway?: unknown }).turnedAway === true) {
-        this.#turnedAwayUntil = this.#now() + this.#turnedAwayFor;
-        this.#log(`YouTube Music turns the relay away too; YouTube songs are left aside for ${Math.round(this.#turnedAwayFor / 60_000)} minutes`);
+        this.#relayTurnedAway(check);
         throw new YouTubeMusicError(TURNED_AWAY);
       }
       // A bug, or a network failure nobody put into words, is in the log; the chat hears it plainly.
@@ -571,7 +590,32 @@ export class YouTubeMusic {
         ? song.data.slice(0, bytes, type)
         : new Blob([song.data] as unknown as ConstructorParameters<typeof Blob>[0], { type });
     this.#log(`YouTube Music: ${videoId} came through the relay (${megabytes(bytes)} MB in ${Math.round((this.#now() - started) / 100) / 10} s)`);
+    if (this.#relayStrikes > 0) {
+      this.#relayStrikes = 0;
+      this.#turnedAwayUntil = 0;
+      this.#log('YouTube Music lets the relay through again; YouTube songs are back');
+    }
     return { data, fileName: fileNameFor(title, new URL(this.trackUrl(videoId)), type), mimeType: type, bytes };
+  }
+
+  /**
+   * The relay met YouTube's bot check every time it asked: YouTube songs are left aside for a minute, twice as long each
+   * time it happens again in a row (up to `turnedAwayMs`), and the relay is checked at the end of it.
+   */
+  #relayTurnedAway(check: boolean): void {
+    // Songs asked for together meet the same bot check: that is one time, not several.
+    if (this.turnsThisHostAway && !check) return;
+    const ms = Math.min(this.#turnedAwayFor, RELAY_TURNED_AWAY_MS * 2 ** this.#relayStrikes);
+    this.#relayStrikes += 1;
+    this.#turnedAwayUntil = this.#now() + ms;
+    const minutes = Math.round(ms / 60_000);
+    this.#log(`YouTube Music turns the relay away too; YouTube songs are left aside for ${minutes} minute${minutes === 1 ? '' : 's'}, then the relay is checked again`);
+    if (this.#relayCheckDue) return;
+    this.#relayCheckDue = true;
+    this.#setTimer(() => {
+      this.#relayCheckDue = false;
+      void this.checkStreams().catch(() => {});
+    }, ms);
   }
 
   async #post(endpoint: string, client: InnerTubeClient, body: Record<string, unknown>, visitor?: string, query: Record<string, string> = {}): Promise<unknown> {

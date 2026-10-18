@@ -7,10 +7,10 @@ import { FakeBucket } from './helpers/fake-bucket.ts';
 
 const SONG = Uint8Array.from({ length: 64 }, (_, i) => i);
 
-type Behaviour = 'ok' | 'bot' | 'refuse-link' | 'unplayable';
+type Behaviour = 'ok' | 'bot' | 'refuse-link' | 'unplayable' | 'http403' | 'http400';
 
 /** A pretend YouTube Music: a session id, the player (each client version can be told how to behave), and the media host. */
-function fakeYouTube(options: { byVersion?: Record<string, Behaviour>; sizeOf?: number; refuseFirstRound?: boolean } = {}) {
+function fakeYouTube(options: { byVersion?: Record<string, Behaviour>; sizeOf?: number; refuseFirstRound?: boolean; visitorStatus?: number } = {}) {
   const calls: string[] = [];
   let visitors = 0;
   const doFetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -18,6 +18,7 @@ function fakeYouTube(options: { byVersion?: Record<string, Behaviour>; sizeOf?: 
     if (url.pathname.endsWith('/visitor_id')) {
       visitors += 1;
       calls.push('visitor');
+      if (options.visitorStatus) return new Response('no', { status: options.visitorStatus });
       return Response.json({ responseContext: { visitorData: `CgtWaXNpdG9y${visitors}%3D%3D` } });
     }
     if (url.pathname.endsWith('/player')) {
@@ -26,6 +27,8 @@ function fakeYouTube(options: { byVersion?: Record<string, Behaviour>; sizeOf?: 
       calls.push(`player ${version}`);
       assert.equal(new Headers(init?.headers).get('X-Goog-Visitor-Id'), body.context.client.visitorData, 'the session goes in the header and the context alike');
       const behaviour = options.byVersion?.[version] ?? 'ok';
+      if (behaviour === 'http403') return new Response('no', { status: 403 });
+      if (behaviour === 'http400') return new Response('retired', { status: 400 });
       if (behaviour === 'bot') return Response.json({ playabilityStatus: { status: 'LOGIN_REQUIRED', reason: 'Sign in to confirm you’re not a bot' } });
       if (behaviour === 'unplayable') return Response.json({ playabilityStatus: { status: 'UNPLAYABLE', reason: 'This video is unavailable' } });
       const refuse = behaviour === 'refuse-link' || (options.refuseFirstRound && visitors === 1);
@@ -83,6 +86,43 @@ describe('the Worker side of the YouTube relay', () => {
     assert.deepEqual(result, { ok: false, error: 'Sign in to confirm you’re not a bot', turnedAway: true });
     assert.equal(bucket.objects.size, 0);
     assert.equal(yt.calls.filter((call) => call === 'visitor').length, 1, 'a new session does not get past a bot check');
+  });
+
+  test('HTTP 403 from YouTube Music, at the player or for a session, is being turned away too', async () => {
+    const everywhere = fakeYouTube({ byVersion: { '1.02': 'http403', '1.03': 'http403', '1.01': 'http403' } });
+    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: everywhere.fetch, bucket: new FakeBucket().binding, audioKey: 'a' }), {
+      ok: false,
+      error: 'YouTube Music answered HTTP 403',
+      turnedAway: true,
+    });
+    assert.deepEqual(everywhere.calls, ['visitor', 'player 1.02'], 'it is the address that is refused, so no other version is asked');
+    const session = fakeYouTube({ visitorStatus: 403 });
+    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: session.fetch, bucket: new FakeBucket().binding, audioKey: 'a' }), {
+      ok: false,
+      error: 'YouTube Music answered HTTP 403',
+      turnedAway: true,
+    });
+  });
+
+  test('a retired client version (HTTP 400) is passed over for the next, and is not being turned away', async () => {
+    const yt = fakeYouTube({ byVersion: { '1.02': 'http400' } });
+    assert.equal((await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a' })).ok, true);
+    assert.deepEqual(yt.calls, ['visitor', 'player 1.02', 'player 1.03', 'media 1.03']);
+    const all = fakeYouTube({ byVersion: { '1.02': 'http400', '1.03': 'http400', '1.01': 'http400' } });
+    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: all.fetch, bucket: new FakeBucket().binding, audioKey: 'a' }), { ok: false, error: 'YouTube Music answered HTTP 400' });
+  });
+
+  test('every request leaves one line in the log, saying whether YouTube turned Cloudflare away', async () => {
+    const lines: string[] = [];
+    const bucket = new FakeBucket();
+    await bucket.binding.put('yt/req/dX7fqa8Z2Gs-ab12.json', JSON.stringify({ videoId: 'dX7fqa8Z2Gs' }));
+    await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12.json', { bucket: bucket.binding, fetch: fakeYouTube().fetch, log: (line) => lines.push(line) });
+    await bucket.binding.put('yt/req/dX7fqa8Z2Gs-cd34.json', JSON.stringify({ videoId: 'dX7fqa8Z2Gs' }));
+    const bot = fakeYouTube({ byVersion: { '1.02': 'bot', '1.03': 'bot', '1.01': 'bot' } });
+    await handleRelayRequest('yt/req/dX7fqa8Z2Gs-cd34.json', { bucket: bucket.binding, fetch: bot.fetch, log: (line) => lines.push(line) });
+    assert.equal(lines.length, 2, lines.join('\n'));
+    assert.match(lines[0]!, /^YouTube relay: dX7fqa8Z2Gs-ab12: 0\.0 MB in \d+\.\d s$/);
+    assert.match(lines[1]!, /^YouTube relay: dX7fqa8Z2Gs-cd34: turned away: Sign in to confirm you’re not a bot \(\d+\.\d s\)$/);
   });
 
   test('a song over the limit is refused before anything is downloaded; a bad id is refused at once', async () => {
@@ -165,9 +205,9 @@ describe('the host side of the YouTube relay', () => {
     assert.equal(bucket.objects.size, 0);
   });
 
-  test('when YouTube turns Cloudflare away it asks once more, and then says why', async () => {
+  test('when YouTube turns Cloudflare away it asks again 5 seconds later, then 15 more, and then says why', async () => {
     const bucket = new FakeBucket();
-    let turned = 1;
+    let turned = 2;
     const sometimes = fakeYouTube();
     const flaky = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).includes('/player') && turned > 0) {
@@ -176,12 +216,40 @@ describe('the host side of the YouTube relay', () => {
       }
       return sometimes.fetch(input, init);
     }) as typeof fetch;
-    assert.deepEqual((await wired(bucket, { fetch: flaky, calls: [] })('dX7fqa8Z2Gs')).bytes, SONG.length);
+    const lines: string[] = [];
+    const waits: number[] = [];
+    let clock = 0;
+    const relay = (yt: { fetch: typeof fetch }) =>
+      createYouTubeRelay(bucket.s3, {
+        now: () => clock,
+        pollMs: 1000,
+        log: (line) => lines.push(line),
+        sleep: async (ms) => {
+          clock += ms;
+          // The relay's own waits between asks are the long ones; the looks for an answer are a second.
+          if (ms > 1000) waits.push(ms);
+          for (const key of [...bucket.objects.keys()].filter((k) => k.startsWith('yt/req/'))) await handleRelayRequest(key, { bucket: bucket.binding, fetch: yt.fetch });
+        },
+      });
+    assert.deepEqual((await relay({ fetch: flaky })('dX7fqa8Z2Gs')).bytes, SONG.length, 'the third ask comes through');
+    assert.deepEqual(waits, [5000, 15_000]);
+    assert.ok(lines.includes('YouTube Music turned Cloudflare away for dX7fqa8Z2Gs (Sign in to confirm you’re not a bot); asking again in 5 s'), lines.join('\n'));
+
+    waits.length = 0;
     await assert.rejects(
-      wired(bucket, fakeYouTube({ byVersion: { '1.02': 'bot', '1.03': 'bot', '1.01': 'bot' } }))('dX7fqa8Z2Gs'),
+      relay(fakeYouTube({ byVersion: { '1.02': 'bot', '1.03': 'bot', '1.01': 'bot' } }))('dX7fqa8Z2Gs'),
       (err: unknown) => err instanceof Error && /not a bot/.test(err.message) && (err as { turnedAway?: boolean }).turnedAway === true,
     );
+    assert.deepEqual(waits, [5000, 15_000], 'three asks in all');
+    assert.ok(lines.includes('YouTube Music turned Cloudflare away for dX7fqa8Z2Gs 3 times in a row (Sign in to confirm you’re not a bot)'), lines.join('\n'));
     assert.equal(bucket.objects.size, 0);
+  });
+
+  test('a failure that is not YouTube turning Cloudflare away is not asked again', async () => {
+    const bucket = new FakeBucket();
+    const yt = fakeYouTube({ byVersion: { '1.02': 'unplayable', '1.03': 'unplayable', '1.01': 'unplayable' } });
+    await assert.rejects(wired(bucket, yt)('dX7fqa8Z2Gs'), /This video is unavailable/);
+    assert.equal(yt.calls.filter((call) => call === 'visitor').length, 1);
   });
 
   test('looks for the answer less and less often while it waits, up to every 3 seconds', async () => {

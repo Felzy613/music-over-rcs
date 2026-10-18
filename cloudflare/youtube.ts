@@ -60,6 +60,21 @@ const STREAM_CLIENTS = ['1.02', '1.03', '1.01'].map(visionOs);
 
 const VIDEO_ID = /^[\w-]{11}$/;
 
+/** YouTube Music answering with an HTTP error. */
+class HttpError extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`YouTube Music answered HTTP ${status}`);
+    this.status = status;
+  }
+}
+
+/**
+ * Whether an HTTP error is YouTube turning Cloudflare's address away: besides its bot check it answers 403 (and 429 when
+ * it counts too many), as it did through a spell of bot checks on 2026-10-18. A retired client version answers 400.
+ */
+const refusesAddress = (err: unknown): err is HttpError => err instanceof HttpError && (err.status === 403 || err.status === 429);
+
 async function post(doFetch: typeof fetch, endpoint: string, client: Client, body: Record<string, unknown>, visitor?: string): Promise<unknown> {
   const context = { client: { clientName: client.name, clientVersion: client.version, hl: 'en', gl: 'US', ...(client.os ?? {}), ...(visitor ? { visitorData: visitor } : {}) } };
   const res = await doFetch(`${API}${endpoint}?prettyPrint=false`, {
@@ -78,7 +93,7 @@ async function post(doFetch: typeof fetch, endpoint: string, client: Client, bod
   });
   if (!res.ok) {
     await res.body?.cancel().catch(() => {});
-    throw new Error(`YouTube Music answered HTTP ${res.status}`);
+    throw new HttpError(res.status);
   }
   return res.json();
 }
@@ -116,7 +131,8 @@ function storable(res: Response, length: number): ReadableStream | Promise<Array
  * Gets one song's audio from YouTube Music into the bucket at `audioKey`, the way the bot would on a friendlier network:
  * a session, then the player as each VISIONOS client in turn, then the audio. A link that refuses the whole song (about one
  * in fifteen will only serve its first megabyte or two) is dropped for the next client's, and after a round of refusals
- * once more with a new session. A song over `maxBytes` is refused before anything is downloaded.
+ * once more with a new session. A song over `maxBytes` is refused before anything is downloaded. The bot check, or
+ * HTTP 403 or 429 from YouTube Music, makes the answer `turnedAway`, which the host asks again about later.
  */
 export async function relaySong(request: RelayRequest, deps: { fetch: typeof fetch; bucket: Pick<RelayBucket, 'put'>; audioKey: string }): Promise<RelayResult> {
   if (!VIDEO_ID.test(request.videoId)) return { ok: false, error: "that isn't a YouTube song" };
@@ -125,13 +141,26 @@ export async function relaySong(request: RelayRequest, deps: { fetch: typeof fet
   let problem = 'no client gave a link';
   let turnedAway = false;
   for (let round = 0; round < 2; round += 1) {
-    const visitor = await visitorId(doFetch);
+    let visitor: string;
+    try {
+      visitor = await visitorId(doFetch);
+    } catch (err) {
+      if (refusesAddress(err)) return { ok: false, error: err.message, turnedAway: true };
+      throw err;
+    }
     let refused = false;
     for (const client of STREAM_CLIENTS) {
-      const answer = (await post(doFetch, 'player', client, { videoId: request.videoId, contentCheckOk: true, racyCheckOk: true }, visitor)) as {
-        playabilityStatus?: { status?: string; reason?: string };
-        streamingData?: { adaptiveFormats?: Format[] };
-      };
+      let answer: { playabilityStatus?: { status?: string; reason?: string }; streamingData?: { adaptiveFormats?: Format[] } };
+      try {
+        answer = (await post(doFetch, 'player', client, { videoId: request.videoId, contentCheckOk: true, racyCheckOk: true }, visitor)) as typeof answer;
+      } catch (err) {
+        // A refusal of the address won't change with the client version (and these were slow: about 8 seconds each).
+        if (refusesAddress(err)) return { ok: false, error: err.message, turnedAway: true };
+        if (!(err instanceof HttpError)) throw err;
+        // A retired client version answers with an error, and the next one may still work, as on the host.
+        problem = err.message;
+        continue;
+      }
       const status = answer?.playabilityStatus?.status;
       if (status !== 'OK') {
         problem = answer?.playabilityStatus?.reason || status || 'no reason given';
@@ -168,7 +197,8 @@ export async function relaySong(request: RelayRequest, deps: { fetch: typeof fet
       await deps.bucket.put(deps.audioKey, await storable(res, size));
       return { ok: true, type, bytes: size };
     }
-    // A new session only helps with refused links; a bot check or a missing song won't change with one.
+    // A new session only helps with refused links; a bot check or a missing song won't change with one (asked straight
+    // after one, the bot check came again: the host waits a little before asking again instead).
     if (!refused) break;
   }
   return turnedAway ? { ok: false, error: problem, turnedAway: true } : { ok: false, error: problem };
@@ -187,6 +217,7 @@ export async function handleRelayRequest(key: string, deps: { bucket: RelayBucke
   if (!/^[\w-]{1,80}$/.test(name)) return undefined;
   const object = await deps.bucket.get(key);
   if (!object) return undefined; // answered already (a repeated notification)
+  const started = Date.now();
   let result: RelayResult;
   try {
     const request = JSON.parse(await object.text()) as Partial<RelayRequest>;
@@ -198,7 +229,13 @@ export async function handleRelayRequest(key: string, deps: { bucket: RelayBucke
   } catch (err) {
     result = { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  if (!result.ok) deps.log?.(`YouTube relay: ${name}: ${result.error}`);
+  // One line for every request, so the Worker's logs show how often YouTube turns Cloudflare away.
+  const took = `${((Date.now() - started) / 1000).toFixed(1)} s`;
+  deps.log?.(
+    result.ok
+      ? `YouTube relay: ${name}: ${(result.bytes / 1_048_576).toFixed(1)} MB in ${took}`
+      : `YouTube relay: ${name}: ${result.turnedAway ? 'turned away: ' : ''}${result.error} (${took})`,
+  );
   await deps.bucket.put(`${RELAY_RESULTS}${name}.json`, JSON.stringify(result));
   return result;
 }
