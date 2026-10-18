@@ -172,7 +172,7 @@ describe('the lease client', () => {
     assert.deepEqual((await store.read())?.record, { holder: 'host-1', expiresAt: at() + 60_000 });
   });
 
-  test('waits while another host holds it, for as long as it is told (2 to 15 seconds), and tries again', async () => {
+  test('waits while another host holds it, looking again every couple of seconds (not when it lapses, which is up to 90 s away)', async () => {
     const { client, store, at, advance } = setUp();
     await acquire(store, 'old', 90, at());
     const waits: number[] = [];
@@ -184,7 +184,7 @@ describe('the lease client', () => {
       },
       log: (line) => logs.push(line),
     });
-    assert.deepEqual(waits, [15_000, 15_000]);
+    assert.deepEqual(waits, [2_000, 2_000]);
     assert.ok(logs.some((line) => /old/.test(line)));
     assert.equal((await store.read())?.record.holder, 'host-1');
   });
@@ -205,7 +205,7 @@ describe('the lease client', () => {
     assert.match(logs.at(-1)!, /took the lease as host-1/);
   });
 
-  test('tells the caller each time it has to wait (so it can open a waiting door), and never when the lease is free', async () => {
+  test('tells the caller each time it has to wait (so it can say so on its starting page), and never when the lease is free', async () => {
     const free = new LeaseClient({ store: memoryLeaseStore(), holder: 'host-1' });
     let calls = 0;
     await free.acquire({ sleep: async () => {}, onWaiting: () => void calls++ });

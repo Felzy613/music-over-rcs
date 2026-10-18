@@ -28,9 +28,13 @@ interface Setup {
   /** Lets `lease.acquire` finish when the test says. */
   grantLease(): void;
   renewals: LeaseState[];
+  /** What the start said it was doing, for the front door's page. */
+  phases: string[];
+  /** The most database restores that were running at the same moment. */
+  restoreOverlap(): number;
 }
 
-function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string } } = {}): Setup {
+function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; keysCode?: number; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string } } = {}): Setup {
   const env = { ...ENV, ...options.env } as NodeJS.ProcessEnv;
   if (options.backup === false) for (const name of ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) delete env[name];
   const config = readCloudConfig(env);
@@ -42,6 +46,9 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
   let grant!: () => void;
   const granted = new Promise<void>((resolve) => (grant = resolve));
   const renewals: LeaseState[] = [];
+  const phases: string[] = [];
+  let restoring = 0;
+  let widest = 0;
   const sys: BootSys = {
     mkdir: async (path) => void events.push(`mkdir ${path}`),
     writeFile: async (path, text) => {
@@ -55,6 +62,10 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
       const name = command.split('/').pop()!;
       events.push(`run ${name} ${args[0] ?? ''}`.trim());
       if (name === 'litestream' && args[0] === 'restore') {
+        restoring++;
+        widest = Math.max(widest, restoring);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        restoring--;
         if (options.restoreCode) return { code: options.restoreCode, output: 'R2 said no' };
         if (options.replicaExists) files.set(args.at(-1)!, 'database');
         return { code: 0, output: '' };
@@ -63,6 +74,7 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
         files.set(paths.bridgeConfig, EXAMPLE);
         return { code: 0, output: '' };
       }
+      if (name === 'python' && args.includes('--generate-keys') && options.keysCode) return { code: options.keysCode, output: 'no signing key for you' };
       if (name === 'register_new_matrix_user') return options.accountOutput ?? { code: 0, output: '' };
       return { code: 0, output: '' };
     },
@@ -85,8 +97,9 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
       options.lease === false
         ? undefined
         : {
-            acquire: async () => {
+            acquire: async (acquireOptions) => {
               events.push('lease.acquire');
+              if (options.holdLease) acquireOptions?.onWaiting?.();
               await granted;
               events.push('lease.granted');
             },
@@ -94,11 +107,12 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
             release: async () => void events.push('lease.release'),
           },
     onLost: () => void events.push('onLost'),
+    onPhase: (text) => void phases.push(text),
     renewEveryMs: 10,
   };
   // The lease is granted at once unless a test wants to hold it back.
   if (!options.holdLease) grant();
-  return { events, files, specs, commands, deps, grantLease: grant, renewals };
+  return { events, files, specs, commands, deps, grantLease: grant, renewals, phases, restoreOverlap: () => widest };
 }
 
 const settle = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,25 +124,36 @@ const at = (events: string[], needle: string): number => {
 };
 
 describe('the boot sequence', () => {
-  test('touches nothing until the lease is this host’s', async () => {
+  test('touches no database and starts no process until the lease is this host’s, but makes the settings while it waits', async () => {
     const s = setUp({ holdLease: true });
     const booting = boot(s.deps);
-    await settle(20);
-    assert.deepEqual(s.events.filter((event) => !event.startsWith('log')), ['lease.acquire'], 'no directory, no restore, no process before the lease');
+    await settle(30);
+    const before = s.events.filter((event) => !event.startsWith('log'));
+    assert.ok(before.includes('lease.acquire'));
+    assert.ok(!before.some((event) => event.startsWith('run litestream')), 'no restore before the lease');
+    assert.ok(!before.includes('supervisor.start'), 'no process before the lease');
+    const paths = pathsFor('/data');
+    for (const needle of [`write ${paths.synapseConfig}`, `write ${paths.bridgeRegistration}`, `write ${paths.bridgeConfig}`, 'run mautrix-gmessages', 'run python']) at(before, needle);
+    assert.deepEqual(s.phases, ['waiting for the previous copy to let go']);
     s.grantLease();
     await booting;
     assert.ok(s.events.includes('supervisor.start'));
   });
 
-  test('restores the three databases, in order, before writing settings or starting anything', async () => {
+  test('restores the three databases, all at once, after the lease and before starting anything', async () => {
     const s = setUp({ replicaExists: true });
     await boot(s.deps);
     const paths = pathsFor('/data');
     const restores = s.commands.filter((c) => c.args[0] === 'restore');
     assert.deepEqual(restores.map((c) => c.args.at(-1)), databasesOf(paths));
     assert.deepEqual(restores[0]!.args.slice(0, 4), ['restore', '-config', '/etc/litestream.yml', '-if-replica-exists']);
-    const sequence = ['lease.granted', 'run litestream restore', `write ${paths.synapseConfig}`, 'run mautrix-gmessages', 'run python', 'supervisor.start'].map((needle) => at(s.events, needle));
+    assert.equal(s.restoreOverlap(), 3, 'each restore is mostly waiting on R2, so they do not wait for one another');
+    const sequence = ['lease.granted', 'run litestream restore', 'supervisor.start'].map((needle) => at(s.events, needle));
     assert.deepEqual(sequence, [...sequence].sort((a, b) => a - b), s.events.join('\n'));
+    const settings = [`write ${paths.synapseConfig}`, 'run mautrix-gmessages', 'run python'].map((needle) => at(s.events, needle));
+    assert.ok(Math.max(...settings) < at(s.events, 'supervisor.start'), 'the settings are all made before anything starts');
+    assert.deepEqual(s.phases, ['restoring the databases', 'starting the services']);
+    for (const db of databasesOf(paths)) assert.ok(s.events.some((event) => event.includes(`restored ${db}`)), `${db} restored`);
   });
 
   test('does not restore over a database that is already there', async () => {
@@ -138,11 +163,18 @@ describe('the boot sequence', () => {
     assert.deepEqual(s.commands.filter((c) => c.args[0] === 'restore').map((c) => c.args.at(-1)), [pathsFor('/data').synapseDb, pathsFor('/data').bridgeDb]);
   });
 
-  test('a restore that fails stops the start before anything is written or started, and lets the lease go', async () => {
+  test('a restore that fails stops the start before anything is started, and lets the lease go', async () => {
     const s = setUp({ restoreCode: 1 });
     await assert.rejects(() => boot(s.deps), /could not restore .*homeserver\.db.*R2 said no/);
     assert.ok(!s.events.includes('supervisor.start'));
-    assert.ok(!s.events.some((event) => event.startsWith('write ')), 'no settings written');
+    assert.deepEqual(s.events.filter((event) => event.startsWith('supervisor.') || event.startsWith('lease.')).slice(-2), ['supervisor.stop', 'lease.release']);
+  });
+
+  test('settings that cannot be made are reported once the lease is this host’s, with no restore and no process, and the lease is let go', async () => {
+    const s = setUp({ keysCode: 1 });
+    await assert.rejects(() => boot(s.deps), /Synapse could not make its signing key \(exit 1\).*no signing key for you/);
+    assert.ok(!s.commands.some((c) => c.args[0] === 'restore'), 'nothing restored over a start that cannot finish');
+    assert.ok(!s.events.includes('supervisor.start'));
     assert.deepEqual(s.events.filter((event) => event.startsWith('supervisor.') || event.startsWith('lease.')).slice(-2), ['supervisor.stop', 'lease.release']);
   });
 
@@ -185,8 +217,22 @@ describe('the boot sequence', () => {
     assert.equal(env('bot').ADMIN_TOKEN, 'admin-token');
     assert.equal(env('bot').CATALOG_DB, '/data/catalog.db');
     assert.equal(env('bot').BRIDGE_PIDFILE, '/run/mors/bridge.pid');
+    assert.equal(env('bot').PORT, '8081', 'the bot’s web door is on its own port, behind the front door');
+    assert.equal(env('bot').HOST, '127.0.0.1', 'and on this machine only');
     assert.equal(env('bot').PREFETCH_MB, '0', 'nothing is kept on a disk that is wiped on every restart');
     assert.equal(env('bridge').GOMEMLIMIT, '64MiB');
+  });
+
+  test('the bot’s own port is not the one Render watches, whatever PORT is', async () => {
+    const s = setUp({ env: { PORT: '10000', HOST: '0.0.0.0' } });
+    assert.equal(s.deps.config.ports.front, 10000);
+    await boot(s.deps);
+    const bot = s.specs.find((spec) => spec.name === 'bot')!;
+    assert.equal(bot.env!.PORT, '8081');
+    assert.equal(bot.env!.HOST, '127.0.0.1');
+    const moved = setUp({ env: { PORT: '10000', BOT_WEB_PORT: '9001' } });
+    await boot(moved.deps);
+    assert.equal(moved.specs.find((spec) => spec.name === 'bot')!.env!.PORT, '9001');
   });
 
   test('the bot’s memory is capped, and the cap can be changed', async () => {
@@ -267,6 +313,8 @@ describe('the host settings', () => {
   test('reports every problem at once', () => {
     assert.throws(() => readCloudConfig({}), /SECRET_KEY is not set[\s\S]*MATRIX_PASSWORD is not set/);
     assert.throws(() => readCloudConfig({ SECRET_KEY: 'short', MATRIX_PASSWORD: 'x' }), /at least 16 characters/);
+    assert.throws(() => readCloudConfig({ SECRET_KEY: ENV.SECRET_KEY, MATRIX_PASSWORD: 'x', PORT: '8081' }), /BOT_WEB_PORT must differ from PORT/);
+    assert.throws(() => readCloudConfig({ SECRET_KEY: ENV.SECRET_KEY, MATRIX_PASSWORD: 'x', PORT: 'ten thousand' }), /PORT must be a port number/);
   });
 
   test('has defaults for a container, and takes the instance name from Render', () => {
@@ -276,6 +324,7 @@ describe('the host settings', () => {
     assert.equal(config.user, 'me');
     assert.equal(config.holder, 'srv-abc-12345');
     assert.equal(config.backup, false);
+    assert.deepEqual(config.ports, { homeserver: 8008, bridge: 29336, bot: 8081, front: 8080 });
     assert.match(readCloudConfig({ SECRET_KEY: ENV.SECRET_KEY, MATRIX_PASSWORD: 'x' }).holder, /-[0-9a-f]{6}$/);
   });
 });

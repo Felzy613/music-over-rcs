@@ -166,6 +166,9 @@ export class Supervisor {
 
 export type LeaseState = 'ok' | 'lost' | 'unreachable';
 
+/** How often a host waiting for the lease looks at it again, at most. */
+export const LEASE_POLL_SECONDS = 2;
+
 /** This host's hold on the lease (see lease.ts): at most one host runs at a time. */
 export class LeaseClient {
   #store: LeaseStore;
@@ -195,9 +198,12 @@ export class LeaseClient {
           options.log?.(`took the lease as ${this.#holder}`);
           return;
         }
-        // Told at every refusal (the caller opens its waiting door the first time): the lease is held, or not takeable yet.
+        // Told at every refusal (the caller says "waiting for the previous copy" on its starting page): the lease is held, or not takeable yet.
         options.onWaiting?.();
-        wait = Math.min(Math.max(answer.retryInSeconds, 2), 15);
+        // Asked again every second or two, not when the record says it lapses (up to 90 s away): on a deploy the old host lets go
+        // of the lease within a second of being stopped, and every second spent not noticing it is a second the bot is away.
+        // (A read of one small object, only while another host holds the lease.)
+        wait = Math.min(Math.max(answer.retryInSeconds, 1), LEASE_POLL_SECONDS);
         options.log?.(
           answer.lapsed
             ? `the lease (last held by ${answer.heldBy || 'unknown'}) has run out but R2 refused the update; trying again in ${wait} s (${waited} s so far)`

@@ -19,8 +19,11 @@ export interface CloudConfig {
   backup: boolean;
   runDir: string;
   appDir: string;
-  /** Where the homeserver and the bridge listen, on this machine only. */
-  ports: { homeserver: number; bridge: number };
+  /**
+   * Where the homeserver, the bridge and the bot's own web door listen, on this machine only; and the port the host's front door
+   * (src/cloud/front-door.ts) has open to the world, which Render names in PORT.
+   */
+  ports: { homeserver: number; bridge: number; bot: number; front: number };
   bins: { bridge: string; python: string; register: string; litestream: string; node: string };
   litestreamConfig: string;
 }
@@ -43,6 +46,9 @@ export function readCloudConfig(env: NodeJS.ProcessEnv): CloudConfig {
   };
   const homeserver = port('SYNAPSE_PORT', 8008);
   const bridgePort = port('BRIDGE_PORT', 29336);
+  const botPort = port('BOT_WEB_PORT', 8081);
+  const frontPort = port('PORT', 8080);
+  if (botPort === frontPort) problems.push(`BOT_WEB_PORT must differ from PORT (both ${frontPort}): the front door is on PORT and passes requests to the bot on BOT_WEB_PORT`);
   const backup = Boolean(env.R2_ENDPOINT?.trim() && env.R2_BUCKET?.trim() && env.R2_ACCESS_KEY_ID?.trim() && env.R2_SECRET_ACCESS_KEY?.trim());
   if (problems.length > 0) throw new Error(`Configuration problems:\n  - ${problems.join('\n  - ')}`);
   return {
@@ -55,7 +61,7 @@ export function readCloudConfig(env: NodeJS.ProcessEnv): CloudConfig {
     backup,
     runDir: env.RUN_DIR?.trim() || '/run/mors',
     appDir: env.APP_DIR?.trim() || '/app',
-    ports: { homeserver, bridge: bridgePort },
+    ports: { homeserver, bridge: bridgePort, bot: botPort, front: frontPort },
     bins: {
       bridge: env.BRIDGE_BIN?.trim() || '/usr/local/bin/mautrix-gmessages',
       python: env.SYNAPSE_PYTHON?.trim() || '/opt/venv/bin/python',
@@ -84,9 +90,11 @@ export interface BootDeps {
   log: (line: string) => void;
   sys: BootSys;
   supervisor: { start(specs: ChildSpec[]): void; stop(): Promise<void> };
-  lease: { acquire(options?: { log?: (line: string) => void }): Promise<void>; renew(): Promise<LeaseState>; release(): Promise<void> } | undefined;
+  lease: { acquire(options?: { log?: (line: string) => void; onWaiting?: () => void }): Promise<void>; renew(): Promise<LeaseState>; release(): Promise<void> } | undefined;
   /** Called, after everything has been stopped, when the lease is found to belong to another host. */
   onLost: () => void;
+  /** Told what the start is doing ("restoring the databases"), for the front door's "starting up" page. */
+  onPhase?: (text: string) => void;
   renewEveryMs?: number;
 }
 
@@ -117,8 +125,40 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     }
   };
 
-  // 1. Nothing else happens until no other host can be using Google's session or writing the backup.
-  if (deps.lease) await deps.lease.acquire({ log });
+  const phase = (text: string): void => deps.onPhase?.(text);
+  const bridge: BridgeOptions = {
+    domain: config.serverName,
+    homeserverUrl: HOMESERVER,
+    appserviceUrl: BRIDGE,
+    port: config.ports.bridge,
+    master: config.master,
+    user: config.user,
+    databaseUri: `file:${paths.bridgeDb}?_txlock=immediate`,
+  };
+
+  // The settings come first, and beside the wait for the lease. They touch neither the databases nor Google's session, only this
+  // container's own disk, and making them is slow on a tenth of a CPU (Synapse's start-up check alone is 15 seconds), so doing it
+  // while the old host is still letting go keeps it out of the time the bot is away. A failure is held until the lease is ours,
+  // so it is reported and cleaned up the same way as any other.
+  const provision = async (): Promise<void> => {
+    for (const dir of [paths.data, paths.synapseDir, paths.bridgeDir, paths.mediaStore, config.runDir]) await sys.mkdir(dir);
+    // Write the homeserver's and the bridge's settings (the same every start), and let Synapse make its signing key.
+    await sys.writeFile(paths.synapseLog, SYNAPSE_LOG_CONFIG);
+    await sys.writeFile(paths.synapseConfig, synapseConfig({ serverName: config.serverName, paths, master: config.master, port: config.ports.homeserver }), 0o600);
+    await sys.writeFile(paths.bridgeRegistration, bridgeRegistration(bridge), 0o600);
+    const generated = await sys.run(config.bins.bridge, ['-c', paths.bridgeConfig, '-e'], { cwd: paths.bridgeDir });
+    if (generated.code !== 0 || !(await sys.exists(paths.bridgeConfig))) throw new Error(`the bridge could not write its example config (exit ${generated.code}): ${generated.output.trim().split('\n').slice(-3).join(' | ')}`);
+    await sys.writeFile(paths.bridgeConfig, patchBridgeConfig(await sys.readFile(paths.bridgeConfig), bridge), 0o600);
+    const keys = await sys.run(config.bins.python, ['-m', 'synapse.app.homeserver', '-c', paths.synapseConfig, '--generate-keys']);
+    if (keys.code !== 0) throw new Error(`Synapse could not make its signing key (exit ${keys.code}): ${keys.output.trim().split('\n').slice(-3).join(' | ')}`);
+  };
+  const provisioned: Promise<unknown> = provision().then(
+    () => undefined,
+    (err: unknown) => err ?? new Error('could not write the settings'),
+  );
+
+  // 1. Nothing touches a database, or starts a process, until no other host can be using Google's session or writing the backup.
+  if (deps.lease) await deps.lease.acquire({ log, onWaiting: () => phase('waiting for the previous copy to let go') });
   else log('NO LEASE (it needs the R2 settings): only run one copy of this host at a time');
 
   const shutdown = async (): Promise<void> => {
@@ -131,40 +171,30 @@ export async function boot(deps: BootDeps): Promise<Booted> {
   };
 
   try {
-    // 2. Bring the databases back from the backup. A failed restore stops the start: going on with empty databases would
-    //    begin a backup of nothing on top of the real one.
-    for (const dir of [paths.data, paths.synapseDir, paths.bridgeDir, paths.mediaStore, config.runDir]) await sys.mkdir(dir);
+    const failure = await provisioned;
+    if (failure) throw failure;
+
+    // 2. Bring the databases back from the backup, the three at once (each is mostly waiting on R2). A failed restore stops the
+    //    start: going on with empty databases would begin a backup of nothing on top of the real one.
     if (config.backup) {
-      for (const db of databasesOf(paths)) {
-        if (await sys.exists(db)) continue;
-        const result = await sys.run(config.bins.litestream, ['restore', '-config', config.litestreamConfig, '-if-replica-exists', db]);
-        if (result.code !== 0) throw new Error(`could not restore ${db} from the backup (exit ${result.code}): ${result.output.trim().split('\n').slice(-3).join(' | ')}`);
-        log(`${(await sys.exists(db)) ? 'restored' : 'no backup yet for'} ${db}`);
-      }
+      phase('restoring the databases');
+      const results = await Promise.allSettled(
+        databasesOf(paths).map(async (db) => {
+          if (await sys.exists(db)) return;
+          const result = await sys.run(config.bins.litestream, ['restore', '-config', config.litestreamConfig, '-if-replica-exists', db]);
+          if (result.code !== 0) throw new Error(`could not restore ${db} from the backup (exit ${result.code}): ${result.output.trim().split('\n').slice(-3).join(' | ')}`);
+          log(`${(await sys.exists(db)) ? 'restored' : 'no backup yet for'} ${db}`);
+        }),
+      );
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failed) throw failed.reason;
     } else {
       log('NOTHING IS BACKED UP: set R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY');
     }
 
-    // 3. Write the homeserver's and the bridge's settings (the same every start), and let Synapse make its signing key.
-    const bridge: BridgeOptions = {
-      domain: config.serverName,
-      homeserverUrl: HOMESERVER,
-      appserviceUrl: BRIDGE,
-      port: config.ports.bridge,
-      master: config.master,
-      user: config.user,
-      databaseUri: `file:${paths.bridgeDb}?_txlock=immediate`,
-    };
-    await sys.writeFile(paths.synapseLog, SYNAPSE_LOG_CONFIG);
-    await sys.writeFile(paths.synapseConfig, synapseConfig({ serverName: config.serverName, paths, master: config.master, port: config.ports.homeserver }), 0o600);
-    await sys.writeFile(paths.bridgeRegistration, bridgeRegistration(bridge), 0o600);
-    const generated = await sys.run(config.bins.bridge, ['-c', paths.bridgeConfig, '-e'], { cwd: paths.bridgeDir });
-    if (generated.code !== 0 || !(await sys.exists(paths.bridgeConfig))) throw new Error(`the bridge could not write its example config (exit ${generated.code}): ${generated.output.trim().split('\n').slice(-3).join(' | ')}`);
-    await sys.writeFile(paths.bridgeConfig, patchBridgeConfig(await sys.readFile(paths.bridgeConfig), bridge), 0o600);
-    const keys = await sys.run(config.bins.python, ['-m', 'synapse.app.homeserver', '-c', paths.synapseConfig, '--generate-keys']);
-    if (keys.code !== 0) throw new Error(`Synapse could not make its signing key (exit ${keys.code}): ${keys.output.trim().split('\n').slice(-3).join(' | ')}`);
+    phase('starting the services');
 
-    // 4. Start everything. The bridge waits for the homeserver; the bot's own start waits for it too (src/cloud-main.ts).
+    // 3. Start everything. The bridge waits for the homeserver; the bot's own start waits for it too (src/cloud-main.ts).
     //    Each process gets only the secrets it needs: the homeserver and the bridge get none.
     const base = pick(deps.env, ['PATH', 'HOME', 'TZ', 'LANG', 'LC_ALL']);
     const botEnv: NodeJS.ProcessEnv = { ...deps.env, MATRIX_HOMESERVER: HOMESERVER, BRIDGE_URL: BRIDGE, MATRIX_USER: config.user, CATALOG_DB: paths.catalog, BRIDGE_DB: paths.bridgeDb, BRIDGE_PIDFILE: join(config.runDir, 'bridge.pid'), PREFETCH_MB: deps.env.PREFETCH_MB ?? '0' };
@@ -179,6 +209,10 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     botEnv.MALLOC_MMAP_THRESHOLD_ ??= '262144';
     // The bot can't derive the homeserver's secrets. It keeps the R2 settings: its alerts go into the bucket for the Worker to mail.
     delete botEnv.SECRET_KEY;
+    // The bot's web door is on a port of its own, on this machine only: the front door (src/cloud/front-door.ts) holds the port Render
+    // watches, so that port is never closed while the bot starts, restarts or is replaced.
+    botEnv.PORT = String(config.ports.bot);
+    botEnv.HOST = '127.0.0.1';
     const specs: ChildSpec[] = [
       ...(config.backup
         ? [{ name: 'litestream', command: config.bins.litestream, args: ['replicate', '-config', config.litestreamConfig], env: { ...base, ...pick(deps.env, ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']), R2_REGION: deps.env.R2_REGION?.trim() || 'auto' }, stopRank: 4 } satisfies ChildSpec]
@@ -189,7 +223,7 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     ];
     deps.supervisor.start(specs);
 
-    // 5. The bot's account, made once the homeserver is up (nothing happens if it exists).
+    // 4. The bot's account, made once the homeserver is up (nothing happens if it exists).
     void (async () => {
       while (!stopped && !(await homeserverUp())) await sys.sleep(2000);
       for (let attempt = 1; !stopped && attempt <= 5; attempt++) {
@@ -201,7 +235,7 @@ export async function boot(deps: BootDeps): Promise<Booted> {
       }
     })();
 
-    // 6. Keep the lease. Losing it means another host has taken over: stop everything now rather than fight it.
+    // 5. Keep the lease. Losing it means another host has taken over: stop everything now rather than fight it.
     if (deps.lease) {
       renewing = setInterval(() => {
         void deps.lease!.renew().then(async (state) => {

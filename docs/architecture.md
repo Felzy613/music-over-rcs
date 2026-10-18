@@ -63,7 +63,7 @@ src/main.ts, server.ts  the RCS for Business webhook server (npm start)
 src/simulate*.ts        the terminal and browser simulators
 scripts/                command-line tools: catalog, library, music-table, cloud-check, beeper-*, send-test, invite-tester
 src/cloud-main.ts      the cloud host's entry: the web door (/healthz, /ping, /status, /pair, /admin/*), signing in, then matrix-main.ts
-src/cloud/              the host's parts: boot (the start-up sequence), supervise (keeps the processes running; the lease client), lease and s3 (the lease in R2), provision (Synapse's and the bridge's settings), waiting-door, web, pairing, memory, check
+src/cloud/              the host's parts: boot (the start-up sequence), supervise (keeps the processes running; the lease client), lease and s3 (the lease in R2), provision (Synapse's and the bridge's settings), front-door (the web port, open from the first moment), web, pairing, memory, check
 src/alert.ts            problems left as files in the bucket's alerts/ folder, for the Worker to mail
 src/archive/            saving each sent song to OneDrive (onedrive.ts: Microsoft's device-code sign-in and upload sessions; archiver.ts: the queue, the memory guard, the monthly allowance)
 src/startup-message.ts  the one hello in the chat when the cloud bot first comes up

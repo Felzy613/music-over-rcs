@@ -23,7 +23,7 @@ When something the bot depends on breaks, an email arrives within about five min
 | The Google Messages bridge isn't answering | The host restarts the bridge after two minutes, and again every few minutes. If it still says so, restart the service in Render. |
 | The bot can't reach the Matrix homeserver | The homeserver inside the container isn't answering. The host restarts it by itself; if this lasts, restart the service in Render. |
 | music-table.com isn't answering the bot | Usually the site is down or slow; songs already in the catalog still work. If it lasts, the reason in the alert helps. |
-| The host isn't answering (from the Worker) | Three checks in a row (15 minutes) got no answer from the service. The free plan restarts it at times and a restart takes about a minute and a half; if this lasts, look at Render's Events and Logs. |
+| The host isn't answering (from the Worker) | Three checks in a row (15 minutes) got no answer from the service. The free plan restarts it at times and a restart takes a minute or so; if this lasts, look at Render's Events and Logs. |
 | The bot isn't running (from the Worker) | The host answers but the bot hasn't for 30 minutes. `cloud:check` says why: the bridge is unlinked, no chat is chosen, `BOT_ENABLED` is off, or the bot is crashing (see the logs). |
 | OneDrive sign-in lost | Microsoft revoked it (a password change can). Open `/pair` and press **Sign in to OneDrive** again. |
 
@@ -31,8 +31,8 @@ A problem that lasts is repeated every six hours. **No emails at all?** `cloud:c
 
 ## The host and the bridge
 
-- **A page shows Render's "starting up" screen, or 502/503:** the service is waking or restarting (about a minute and a half). `/healthz` answers 200 as soon as the host is up; an uptime monitor can watch `/ping`, which answers 500 on purpose.
-- **A deploy sits at "In progress":** the new copy is waiting for the old one's lease and the old one has not been told to stop (Render stops it only once the new one has opened its port, which the waiting door does; see [How it runs](cloud.md)). Render fails it after about 15 minutes; *Cancel deploy* in the Events list starts the next one at once.
+- **A page shows "Starting up" (503), or Render's own "starting up" screen or a 502:** the service is waking or restarting (a minute or so). The host's own page says what it is doing and reloads itself; a 502 from Render's gateway means no copy of the host was listening at all, which the front door is there to prevent, so if you still see one note the time and look in Render's Events for `server_failed`. `/healthz` answers 200 as soon as the host is up; an uptime monitor can watch `/ping`, which answers 500 on purpose. Do not press deploy again while it restarts: each deploy starts the whole sequence over.
+- **A deploy sits at "In progress":** the new copy is waiting for the old one's lease and the old one has not been told to stop (Render stops it only once the new one has opened its port, which the front door does; see [How it runs](cloud.md)). Render fails it after about 15 minutes; *Cancel deploy* in the Events list starts the next one at once.
 - **"Can't reach the Matrix homeserver":** Synapse isn't up yet (the first minute of a start) or has stopped; the host restarts it. Right after a restart the bot may start a moment before it and restarts itself 15 seconds later.
 - **"The homeserver rejected the access token":** the host signs in again at every start, so restart the service. If it keeps happening, `MATRIX_PASSWORD` or `SECRET_KEY` was changed.
 - **The bot ignores a change:** it runs the last commit that was deployed (or the environment as it was at the last restart). Push to `main` and deploy, or change the variable in Render.

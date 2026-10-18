@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { boot, readCloudConfig, type Booted, type BootSys } from '../../src/cloud/boot.ts';
+import { openFrontDoor, type FrontDoor } from '../../src/cloud/front-door.ts';
 import { s3LeaseStore } from '../../src/cloud/lease.ts';
 import { s3FromEnv } from '../../src/cloud/s3.ts';
 import { LeaseClient, Supervisor } from '../../src/cloud/supervise.ts';
-import { withWaitingDoor } from '../../src/cloud/waiting-door.ts';
 
 // The container's PID 1 work: see docs/cloud.md. It takes the lease, restores the databases, writes the settings and keeps
 // the replicator, homeserver, bridge and bot running; on SIGTERM it stops them in order and lets the lease go.
@@ -38,12 +38,21 @@ const sys: BootSys = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
+// The web port is open from the first moment to the last (src/cloud/front-door.ts). Render sends traffic to a new instance, and stops
+// the old one, as soon as the port accepts a connection, and the old one's stopping is what lets go of the lease; so the port must
+// be open while this copy waits for the lease, and stay open while it restores and starts, or visitors get "Bad Gateway" and Render
+// restarts the instance for refusing connections. Everything but /healthz is passed to the bot's own door, once that is open.
+let door: FrontDoor;
+try {
+  door = await openFrontDoor({ port: config.ports.front, upstream: { port: config.ports.bot }, phase: 'starting' });
+  log(`front door open on port ${door.port}`);
+} catch (err) {
+  console.error(`cannot open the web port ${config.ports.front}: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+
 const bucket = s3FromEnv(process.env, { log });
-const leaseClient = bucket ? new LeaseClient({ store: s3LeaseStore(bucket), holder: config.holder }) : undefined;
-// Render stops the old instance of a deploy only once the new one has opened its port, and the old one's stopping is what lets
-// go of the lease. So while waiting for it, answer on the web port (/healthz ok, the rest 503), and close that door the moment the
-// lease is ours so the bot can open the real one. With the lease free there is no wait and no door.
-const lease = leaseClient && withWaitingDoor(leaseClient, { port: Number(process.env.PORT?.trim() || 8080), log });
+const lease = bucket ? new LeaseClient({ store: s3LeaseStore(bucket), holder: config.holder }) : undefined;
 // Render allows 30 s between SIGTERM and SIGKILL, and four processes are stopped one after another.
 const supervisor = new Supervisor({ log, graceMs: 6000 });
 
@@ -64,7 +73,7 @@ process.on('SIGTERM', () => void terminate('SIGTERM'));
 process.on('SIGINT', () => void terminate('SIGINT'));
 
 try {
-  booted = await boot({ config, env: process.env, log, sys, supervisor, lease, onLost: () => process.exit(1) });
+  booted = await boot({ config, env: process.env, log, sys, supervisor, lease, onLost: () => process.exit(1), onPhase: (text) => door.setPhase(text) });
   log(`up as ${config.holder}`);
 } catch (err) {
   console.error(`cannot start: ${err instanceof Error ? err.message : String(err)}`);
