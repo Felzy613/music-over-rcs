@@ -99,13 +99,15 @@ describe('id3: the tags inside an MP3', () => {
       url: 'https://x.test/post/elul#2',
       post: { slug: 'elul', title: 'Yumi Gelb Ft. Braunstein - Elul Collection (Live)', songs: 8, category: '' },
     });
+    // Every artist goes in the artist tag, the guests the title names among them (and out of the title).
     assert.deepEqual(songTags(albumSong), {
-      title: 'Elul Melodies (feat. Chaim Horowitz)',
-      artist: 'Yumi Gelb',
+      title: 'Elul Melodies',
+      artist: 'Yumi Gelb; Chaim Horowitz',
       albumArtist: 'Yumi Gelb',
       album: 'Elul Collection (Live)',
       track: '3/8',
     });
+    assert.equal(songTags(albumSong, { artist: 'Yumi Gelb Ft. Braunstein' }).artist, 'Yumi Gelb; Braunstein; Chaim Horowitz');
   });
 });
 

@@ -28,11 +28,13 @@
 | --- | --- | --- |
 | `CATALOG_DB` | `data/catalog.db` | The catalog file. On Render it is `/data/catalog.db`, backed up to R2 every minute. |
 | `MAX_DOWNLOAD_MB` | `100` | Largest file to download and send, up to 500. (Google Messages and the bridge take about 100.) An album's zip is split into parts of at most this size: on Render it is 30, so a 70 MB album arrives as three zips, "(part 1 of 3)" and so on. |
-| `YOUTUBE_MUSIC` | on | `off` stops all use of YouTube Music. See [YouTube Music](youtube-music.md). |
+| `YOUTUBE_MUSIC` | on | `off` stops all use of Zemer and YouTube Music (Zemer's songs are YouTube Music's). See [Zemer and YouTube Music](youtube-music.md). |
+| `ZEMER_SEARCH` | on | `off` stops asking Zemer's catalog (`search.zemer.io`); searches then use YouTube Music's own search, with no artist pages. |
+| `ZEMER_SEARCH_URL` | `https://search.zemer.io` | Where Zemer's catalog is asked; only the tests change it. |
 | `YOUTUBE_MUSIC_URL` | `https://music.youtube.com` | Where the YouTube Music lookups go; only the tests change it. |
 | `YOUTUBE_RELAY` | none (`r2` on the cloud host) | `r2` gets each YouTube song's audio by way of the Cloudflare Worker, through the R2 bucket (needs the `R2_*` settings), because YouTube turns the cloud host's address away. Search stays direct. See [How it runs](cloud.md). |
 | `ZEMER_CONTENT_URL` | `https://content.zemer.io` | Where Zemer's artist list is read from; only the tests change it. |
-| `SONG_SOURCES` | `youtube-music,music-table` | Which source a search asks first. With `youtube-music` first (the default) it is asked before your catalog, and music-table.com (the catalog, then the site) is used when it finds nothing that fits; the first to find anything answers. `music-table,youtube-music` asks the site first. |
+| `SONG_SOURCES` | `youtube-music,music-table` | Which source a search asks first. `youtube-music` (or `zemer`) is Zemer's catalog; first (the default), it is asked before your catalog, and music-table.com (the catalog, then the site) is used when it finds nothing that fits; the first to find anything answers. `music-table,youtube-music` asks the site first; leaving one out turns it off for searches. |
 | `MUSIC_TABLE` | on | `off` stops all use of music-table.com: lookups, sync, daily message. |
 | `MUSIC_TABLE_URL` | `https://www.music-table.com` | Where the site lookups go; only the tests change it. |
 | `DIGEST_TIME` | `09:00` | When the daily new-music message goes out, 24-hour, in the host's time zone (`TZ`; Render uses `America/New_York`). `off` for none. |

@@ -19,6 +19,22 @@ export interface NewTrack {
   releasedAt?: string | undefined;
   /** The channel ids of the artists credited on it, for songs found on YouTube Music (checked against Zemer's list when sent). */
   artistIds?: string[] | undefined;
+  /** The album it is on, for a song found on Zemer (a music-table.com song's album is its post). Kept when not given. */
+  album?: TrackAlbum | undefined;
+}
+
+/** A song's album, as far as it is known: its title, and once its page has been read, the song's place on it. */
+export interface TrackAlbum {
+  /** What opens it again (Zemer's album id). */
+  id?: string | undefined;
+  title: string;
+  /** Whose album it is (its album artist). */
+  artist?: string | undefined;
+  /** The song's number on it. */
+  number?: number | undefined;
+  /** How many songs it has: 1 for a single. */
+  songs?: number | undefined;
+  year?: number | undefined;
 }
 
 /** An artist found in the songs' credits, with how many songs they're on. */
@@ -156,6 +172,23 @@ const SCHEMA = `
 
 const TRACK_COLUMNS = 'id, title, artist, url, cover';
 
+/** A stored album (JSON), or undefined when there is none or it can't be read. */
+function parseAlbum(raw: unknown): TrackAlbum | undefined {
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object') return undefined;
+    const album = value as Record<string, unknown>;
+    if (typeof album.title !== 'string' || !album.title) return undefined;
+    const count = (n: unknown): number | undefined => (typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : undefined);
+    const words = (s: unknown): string | undefined => (typeof s === 'string' && s ? s : undefined);
+    const fields = { id: words(album.id), artist: words(album.artist), number: count(album.number), songs: count(album.songs), year: count(album.year) };
+    return { title: album.title, ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)) };
+  } catch {
+    return undefined;
+  }
+}
+
 /** node:sqlite returns rows with a null prototype; hand out plain Track objects instead. */
 const toTrack = (row: Record<string, unknown>): Track => ({
   id: Number(row.id),
@@ -209,6 +242,7 @@ export class Catalog {
     if (!columns.includes('post')) this.#db.exec('ALTER TABLE tracks ADD COLUMN post TEXT');
     if (!columns.includes('released_at')) this.#db.exec('ALTER TABLE tracks ADD COLUMN released_at TEXT');
     if (!columns.includes('artist_ids')) this.#db.exec('ALTER TABLE tracks ADD COLUMN artist_ids TEXT');
+    if (!columns.includes('album')) this.#db.exec('ALTER TABLE tracks ADD COLUMN album TEXT');
     this.#db.exec('CREATE INDEX IF NOT EXISTS tracks_by_post ON tracks (post)');
     const postColumns = this.#db.prepare('PRAGMA table_info(site_posts)').all().map((column) => String(column.name));
     if (!postColumns.includes('category_ids')) this.#db.exec('ALTER TABLE site_posts ADD COLUMN category_ids TEXT');
@@ -252,13 +286,26 @@ export class Catalog {
     const cover = input.cover?.trim() || null;
     const row = this.#db
       .prepare(
-        `INSERT INTO tracks (title, artist, url, cover, post, released_at, artist_ids) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO tracks (title, artist, url, cover, post, released_at, artist_ids, album) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (url) DO UPDATE SET title = excluded.title, artist = excluded.artist, cover = coalesce(excluded.cover, cover),
            post = coalesce(excluded.post, post), released_at = coalesce(excluded.released_at, released_at),
-           artist_ids = coalesce(excluded.artist_ids, artist_ids)
+           artist_ids = coalesce(excluded.artist_ids, artist_ids),
+           -- A song's place on its album, once known, isn't forgotten when a search finds it again without it.
+           album = CASE WHEN excluded.album IS NULL THEN album
+             WHEN album IS NOT NULL AND json_extract(excluded.album, '$.number') IS NULL AND json_extract(album, '$.number') IS NOT NULL THEN album
+             ELSE excluded.album END
          RETURNING ${TRACK_COLUMNS}`,
       )
-      .get(title, artist, url, cover, input.post ?? null, input.releasedAt ?? null, input.artistIds ? JSON.stringify(input.artistIds) : null);
+      .get(
+        title,
+        artist,
+        url,
+        cover,
+        input.post ?? null,
+        input.releasedAt ?? null,
+        input.artistIds ? JSON.stringify(input.artistIds) : null,
+        input.album?.title.trim() ? JSON.stringify(input.album) : null,
+      );
     const track = toTrack(row!);
     this.#linkArtists(track.id, artist);
     return track;
@@ -490,11 +537,16 @@ export class Catalog {
     );
   }
 
+  /** The album a song found on Zemer is on, as far as it is known. */
+  albumOf(url: string): TrackAlbum | undefined {
+    return parseAlbum(this.#db.prepare('SELECT album FROM tracks WHERE url = ?').get(url)?.album);
+  }
+
   /** What names a song's file: its credit and title, and the post (an album, when it has several songs) it's from. */
   songFacts(url: string): SongFacts | undefined {
     const row = this.#db
       .prepare(
-        `SELECT t.title, t.artist, t.url, t.post, t.cover, t.released_at, p.title AS post_title, p.category, p.cover AS post_cover, p.published_at,
+        `SELECT t.title, t.artist, t.url, t.post, t.cover, t.released_at, t.album, p.title AS post_title, p.category, p.cover AS post_cover, p.published_at,
            max(coalesce(p.audio_files, 0), (SELECT count(*) FROM tracks other WHERE other.post = t.post)) AS songs
          FROM tracks t LEFT JOIN site_posts p ON p.slug = t.post WHERE t.url = ?`,
       )
@@ -504,12 +556,14 @@ export class Catalog {
     const text = (...values: unknown[]) => values.find((value): value is string => typeof value === 'string' && value !== '');
     const releasedAt = text(row.released_at, row.published_at);
     const cover = text(row.cover, row.post_cover);
+    const album = slug ? undefined : parseAlbum(row.album);
     return {
       title: String(row.title),
       artist: String(row.artist),
       url: String(row.url),
       ...(releasedAt ? { releasedAt } : {}),
       ...(cover ? { cover } : {}),
+      ...(album ? { album } : {}),
       ...(slug ? { post: { slug, title: String(row.post_title ?? ''), songs: Number(row.songs) || 1, category: String(row.category ?? '') } } : {}),
     };
   }

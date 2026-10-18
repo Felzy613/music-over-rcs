@@ -35,11 +35,86 @@ export const correctableEdits = (length: number): number => (length >= 6 ? 2 : l
 /** True when `correct` could change this word: long enough, and written with letters the site's titles use. */
 export const canBeCorrected = (token: string): boolean => correctableEdits(token.length) > 0 && /\p{Script=Latin}/u.test(token);
 
-/** True when a title word is what the typed token means: it starts with the token, or is within the typo allowance. */
+/**
+ * True when a title word is what the typed token means: it starts with the token, or is within the typo allowance. A
+ * word in Hebrew letters is what a token in Latin letters means when it can be read that way ("vnusni" for "ונתנו").
+ */
 export function wordMatches(token: string, word: string): boolean {
   if (word.startsWith(token)) return true;
+  if (HEBREW.test(word)) return soundsLike(token, word);
   const edits = allowedEdits(token.length);
   return edits > 0 && Math.abs(word.length - token.length) <= edits && editDistance(token, word) <= edits;
+}
+
+// Hebrew and Yiddish typed in Latin letters. Many of Zemer's titles are in Hebrew letters ("אלעזר ליפא׳לע") while
+// requests are typed in Latin ones ("elazar lipa'le"), and there is no one way to spell a Hebrew word in Latin: vowels
+// are mostly left unwritten, א and ע are silent, ת is "t" or "s", ח is "ch" or "h". So a Hebrew word is read letter by
+// letter, each letter as any of the ways it is written, with any vowels in between.
+
+const HEBREW = /[א-תװ-ײ]/;
+const LATIN_VOWELS = new Set(['a', 'e', 'i', 'o', 'u', 'y']);
+/** How each letter may be written in Latin letters; '' for one that may not be written at all (a vowel, or silent). */
+const READINGS: Record<string, string[]> = {
+  א: [''],
+  ב: ['b', 'v', 'bh', 'w'],
+  ג: ['g', 'gh', 'j'],
+  ד: ['d', 'dh'],
+  ה: ['h', ''],
+  ו: ['v', 'w', ''],
+  ז: ['z', 's'],
+  ח: ['ch', 'kh', 'h', 'x', 'c'],
+  ט: ['t', 'th'],
+  י: ['y', 'j', ''],
+  כ: ['k', 'ch', 'kh', 'c', 'ck', 'q', 'h'],
+  ך: ['k', 'ch', 'kh', 'c', 'h'],
+  ל: ['l'],
+  מ: ['m'],
+  ם: ['m'],
+  נ: ['n'],
+  ן: ['n'],
+  ס: ['s', 'c', 'z'],
+  ע: [''],
+  פ: ['p', 'f', 'ph'],
+  ף: ['f', 'p', 'ph'],
+  צ: ['tz', 'ts', 'z', 'c', 's', 'tc'],
+  ץ: ['tz', 'ts', 'z', 'c', 's'],
+  ק: ['k', 'q', 'c', 'ck'],
+  ר: ['r'],
+  ש: ['sh', 's', 'sch', 'sz'],
+  ת: ['t', 's', 'th'],
+  װ: ['v', 'w'],
+  ױ: [''],
+  ײ: ['y', ''],
+};
+
+/**
+ * True when a token typed in Latin letters can be read as this word in Hebrew letters: "vnusni" as "ונתנו", "lipale" as
+ * "ליפא׳לע", "shabbos" as "שבת". Doubled letters count once ("shabbos" is "shabos"). A word of fewer than two letters
+ * that are written (not vowels or silent) is too short to tell anything apart and matches only itself.
+ */
+export function soundsLike(token: string, word: string): boolean {
+  const latin = token
+    .normalize('NFD')
+    .toLowerCase()
+    .replace(/[^a-z]/g, '')
+    .replace(/(.)\1+/g, '$1');
+  const letters = [...word.normalize('NFD').replace(/[^א-תװ-ײ]/g, '')];
+  if (latin.length < 2 || letters.length < 2 || /\p{Script=Latin}/u.test(word) || letters.some((letter) => !READINGS[letter])) return false;
+  if (letters.filter((letter) => READINGS[letter]!.some(Boolean)).length < 2 && latin.replace(/[aeiouy]/g, '').length > 1) return false;
+  // Which (Latin position, Hebrew position) pairs have been tried: each is tried once, so this is quick.
+  const tried = new Set<number>();
+  const width = letters.length + 1;
+  const walk = (at: number, letter: number): boolean => {
+    if (at === latin.length && letter === letters.length) return true;
+    const key = at * width + letter;
+    if (tried.has(key)) return false;
+    tried.add(key);
+    // An unwritten vowel in the Latin spelling.
+    if (at < latin.length && LATIN_VOWELS.has(latin[at]!) && walk(at + 1, letter)) return true;
+    if (letter === letters.length) return false;
+    return READINGS[letters[letter]!]!.some((reading) => latin.startsWith(reading, at) && walk(at + reading.length, letter + 1));
+  };
+  return walk(0, 0);
 }
 
 /** Apostrophes, hyphens and the like between two letters of one word: "V’Nusni", "Mi'Ma'amakim", "Yom-Tov". */
@@ -62,19 +137,33 @@ export function searchWords(text: string): string[] {
  * True when the words name this one song: its title as written, give or take apostrophes and spaces ("vnusni" for
  * "V’Nusni"), alone or with words of the artist's name before or after it ("lipa vnusni", "vnusni lipa schmeltzer").
  * The title must be all there and spelled right; the artist's words may be a typo off. A track number in front of
- * the title ("02 Kumzitz") may be left out.
+ * the title ("02 Kumzitz") may be left out, and a title in Hebrew letters is named by the words it can be read as
+ * ("elazar lipale" for "אלעזר ליפא׳לע").
  */
 export function namesSong(song: { title: string; artist: string }, wanted: string[]): boolean {
   const title = tokenize(fold(song.title));
   const forms = new Set([title.join('')]);
   if (title.length > 1 && /^\d+$/.test(title[0]!)) forms.add(title.slice(1).join(''));
+  // A title written in both alphabets is named by either one: "Higale Na הגלה נא" (one read as the other), or
+  // "ליפא פאַר א גוּט יאָר - Lipa’s Tekiyos" (one on each side of a dash). Not "אלעזר ליפא׳לע (Yinglish Version)".
+  const hebrew = title.filter((word) => HEBREW.test(word)).join('');
+  const latin = title.filter((word) => !HEBREW.test(word)).join('');
+  if (hebrew && latin) {
+    const sides = song.title.split(/\s[-–—|]\s/);
+    const halves = sides.length === 2 && sides.some((side) => !HEBREW.test(side)) && sides.some((side) => !/\p{Script=Latin}/u.test(side));
+    if (halves || soundsLike(latin, hebrew)) {
+      forms.add(hebrew);
+      forms.add(latin);
+    }
+  }
+  const isTitle = (typed: string): boolean => forms.has(typed) || [...forms].some((form) => HEBREW.test(form) && soundsLike(typed, form));
   const artist = searchWords(fold(song.artist));
   const tokens = wanted.map(fold);
   const byArtist = (token: string): boolean => artist.some((word) => wordMatches(token, word));
   // Words of the artist's name may lead (start) and trail (end); what's between them must be the title.
   for (let start = 0; start < tokens.length; start += 1) {
     for (let end = tokens.length; end > start; end -= 1) {
-      if (forms.has(tokens.slice(start, end).join(''))) return true;
+      if (isTitle(tokens.slice(start, end).join(''))) return true;
       if (!byArtist(tokens[end - 1]!)) break;
     }
     if (!byArtist(tokens[start]!)) break;
@@ -87,7 +176,8 @@ function closeness(token: string, words: string[]): number {
   let best = 0;
   for (const word of words) {
     if (word === token) return 3;
-    if (word.startsWith(token)) best = 2;
+    // A Hebrew word read the way the token spells it is as good as the start of one.
+    if (word.startsWith(token) || (HEBREW.test(word) && soundsLike(token, word))) best = 2;
     else if (best === 0 && wordMatches(token, word)) best = 1;
   }
   return best;

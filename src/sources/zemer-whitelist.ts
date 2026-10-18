@@ -32,6 +32,8 @@ export class ZemerWhitelistError extends SourceError {
 
 export interface WhitelistedArtist {
   name: string;
+  /** How the name is written in the other alphabet, when the list says ("Netanel Zalevski" for "נתנאל זלבסקי"). */
+  altName?: string;
   female: boolean;
 }
 
@@ -42,8 +44,8 @@ export type Verdict = { ok: true } | { ok: false; why: 'blocked' | 'female' | 'n
 interface Saved {
   gate: number;
   checkedAt: number;
-  /** [channel id, name, 1 if flagged female] */
-  artists: Array<[string, string, 0 | 1]>;
+  /** [channel id, name, 1 if flagged female, the name in the other alphabet] */
+  artists: Array<[string, string, 0 | 1] | [string, string, 0 | 1, string]>;
   blocked: string[];
 }
 
@@ -72,6 +74,8 @@ export class ZemerWhitelist {
   #retryAfter: number;
   #now: () => number;
   #artists = new Map<string, WhitelistedArtist>();
+  /** The artists by name, made when first asked for and again after the list changes. */
+  #byName: Map<string, string[]> | undefined;
   #blocked = new Set<string>();
   #gate: number | undefined;
   #checkedAt = 0;
@@ -162,6 +166,30 @@ export class ZemerWhitelist {
     return this.verdict(videoId, ids).ok;
   }
 
+  /** An artist on the list, by channel id. */
+  artist(id: string): WhitelistedArtist | undefined {
+    return this.#artists.get(id);
+  }
+
+  /**
+   * The channel ids of the artists on the list called this (by their name or the name in the other alphabet, any case),
+   * for a credit that comes as a name only. Empty when nobody on the list is.
+   */
+  idsNamed(name: string): string[] {
+    const wanted = name.trim().toLowerCase();
+    if (!wanted) return [];
+    if (!this.#byName) {
+      this.#byName = new Map();
+      for (const [id, artist] of this.#artists) {
+        for (const written of [artist.name, artist.altName]) {
+          const key = written?.trim().toLowerCase();
+          if (key) this.#byName.set(key, [...(this.#byName.get(key) ?? []), id]);
+        }
+      }
+    }
+    return this.#byName.get(wanted) ?? [];
+  }
+
   #refresh(): Promise<void> {
     this.#flight ??= this.#fetchList()
       .catch((err: unknown) => {
@@ -188,7 +216,8 @@ export class ZemerWhitelist {
         const entry = record(doc);
         const id = text(entry?.artistId) ?? text(entry?.id);
         const name = text(entry?.displayName) ?? text(entry?.name) ?? text(entry?.artistName);
-        if (id && name) artists.set(id, { name, female: entry?.isFemale === true });
+        const altName = text(entry?.altName);
+        if (id && name) artists.set(id, { name, ...(altName && altName !== name ? { altName } : {}), female: entry?.isFemale === true });
       }
       // An empty or broken answer must never replace a good list.
       if (artists.size === 0) throw new ZemerWhitelistError("Zemer's list came back empty");
@@ -205,6 +234,7 @@ export class ZemerWhitelist {
     }
 
     this.#artists = artists;
+    this.#byName = undefined;
     this.#blocked = blocked;
     this.#gate = gate;
     this.#checkedAt = this.#now();
@@ -234,7 +264,7 @@ export class ZemerWhitelist {
     const saved: Saved = {
       gate: this.#gate,
       checkedAt: this.#checkedAt,
-      artists: [...this.#artists].map(([id, artist]) => [id, artist.name, artist.female ? 1 : 0]),
+      artists: [...this.#artists].map(([id, artist]) => (artist.altName ? [id, artist.name, artist.female ? 1 : 0, artist.altName] : [id, artist.name, artist.female ? 1 : 0])),
       blocked: [...this.#blocked],
     };
     try {
@@ -254,7 +284,9 @@ export class ZemerWhitelist {
     }
     if (!saved || typeof saved.gate !== 'number' || !Array.isArray(saved.artists) || saved.artists.length === 0) return;
     for (const entry of saved.artists) {
-      if (Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1] === 'string') this.#artists.set(entry[0], { name: entry[1], female: entry[2] === 1 });
+      if (Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1] === 'string') {
+        this.#artists.set(entry[0], { name: entry[1], ...(typeof entry[3] === 'string' ? { altName: entry[3] } : {}), female: entry[2] === 1 });
+      }
     }
     this.#blocked = new Set((Array.isArray(saved.blocked) ? saved.blocked : []).filter((id): id is string => typeof id === 'string'));
     this.#gate = saved.gate;

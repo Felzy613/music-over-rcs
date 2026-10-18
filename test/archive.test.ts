@@ -231,10 +231,10 @@ describe('the monthly allowance setting', () => {
 });
 
 describe('the library offers each song it fetches to be sent', () => {
-  test('a fetched song comes back as it was and is saved in the background under its proper place', async () => {
+  test('a fetched song comes back with its tags written in, and is saved in the background under its proper place', async () => {
     const catalog = new Catalog(':memory:');
     const url = 'https://x.test/derech';
-    catalog.add({ title: 'Derech', artist: 'Ishay Ribo', url });
+    catalog.add({ title: 'Derech', artist: 'Ishay Ribo ft. Zusha', url });
     const drive = new FakeDrive();
     const logs: string[] = [];
     const library = setUpLibrary({
@@ -248,16 +248,23 @@ describe('the library offers each song it fetches to be sent', () => {
       log: (line) => logs.push(line),
     });
     const sent = await library.fetchAudio(url, 'Derech');
-    assert.match(sent.fileName, /Ishay Ribo - Derech\.mp3/, 'sent under its proper name');
-    assert.equal(sent.bytes, MPEG.length, 'sent without the tags the saved copy gets');
+    assert.match(sent.fileName, /Ishay Ribo - Derech \(feat\. Zusha\)\.mp3/, 'sent under its proper name');
+    const tags = readTextTags(new Uint8Array(await sent.data.arrayBuffer()));
+    assert.deepEqual(
+      [tags.TIT2, tags.TPE1, tags.TPE2, tags.TALB],
+      ['Derech', 'Ishay Ribo; Zusha', 'Ishay Ribo', 'Derech - Single'],
+      'every artist, so a music app lists it under each; the guest out of the title, since the artists say it',
+    );
     await library.archive!.idle();
-    assert.deepEqual(drive.uploads, ['Ishay Ribo/Singles/Derech.mp3']);
+    assert.deepEqual(drive.uploads, ['Ishay Ribo/Singles/Derech (feat. Zusha).mp3']);
     assert.match(library.summary, /songs sent are saved to OneDrive/);
   });
 
-  test('without a cloud folder nothing changes', async () => {
+  test('without a cloud folder nothing is saved, and a song is still sent tagged', async () => {
     const library = setUpLibrary({ catalog: new Catalog(':memory:'), musicTable: undefined, audio: { checkAudio: async () => ({ ok: true }) as never, fetchAudio: async () => song() }, dbPath: ':memory:', digestAt: undefined, prefetchMb: 0, log: () => {} });
     assert.equal(library.archive, undefined);
-    assert.equal((await library.fetchAudio('https://x.test/a')).bytes, MPEG.length);
+    const sent = await library.fetchAudio('https://x.test/a');
+    assert.ok(sent.bytes > MPEG.length);
+    assert.ok(readTextTags(new Uint8Array(await sent.data.arrayBuffer())).TIT2);
   });
 });

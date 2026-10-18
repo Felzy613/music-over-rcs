@@ -7,6 +7,8 @@ export interface MockArtist {
   /** Written the way some of the real list's documents are: with `artistId` and `artistName` instead of `id` and `name`. */
   legacyKeys?: boolean;
   displayName?: string;
+  /** The name in the other alphabet ("Lipa Schmeltzer" for "ליפא שמעלצער"). */
+  altName?: string;
 }
 
 export interface MockZemerContent extends Listening {
@@ -79,7 +81,7 @@ export async function startMockZemerContent(initial: MockArtist[]): Promise<Mock
           docId: artist.id,
           isDJ: false,
           isKids: false,
-          altName: artist.name,
+          altName: artist.altName ?? artist.name,
           isGroup: false,
           isVerified: true,
           isFemale: artist.female === true,

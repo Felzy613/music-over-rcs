@@ -4,9 +4,10 @@ import { createInterface } from 'node:readline/promises';
 import { checkAudio, MAX_BYTES } from './audio-check.ts';
 import { createBot, joinLists } from './bot.ts';
 import { Catalog } from './catalog.ts';
-import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
-import { arrangeSources, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
+import { songSources } from './sources/songs.ts';
+import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { zemerSearchFromEnv } from './sources/zemer.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 import type { Chip, Incoming, Reply } from './types.ts';
 
@@ -31,6 +32,7 @@ if (demo) {
 }
 const musicTable = offline ? undefined : musicTableFromEnv();
 const youTube = offline ? undefined : youTubeMusicFromEnv();
+const zemer = youTube && zemerSearchFromEnv();
 const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
 void whitelist?.warm();
 const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
@@ -48,19 +50,11 @@ const checkLink = resolvingYouTubeAudio(
   ),
   { maxBytes: MAX_BYTES },
 ).checkAudio;
-const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
-const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
-const { first, source } = arrangeSources(songSourceOrder(), {
-  'youtube-music': youTubeSongs,
-  'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
-});
+const sources = songSources({ catalog, musicTable, youTube, whitelist, zemer });
 const bot = createBot({
   catalog,
   checkAudio: offline ? async () => ({ ok: true, type: 'audio/mpeg' }) : gatedAudioCheck(gate, checkLink),
-  ...(first ? { first } : {}),
-  ...(source ? { source } : {}),
-  ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
-  ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
+  ...sources,
 });
 
 let chips: Chip[] = [];
@@ -91,10 +85,12 @@ function print(reply: Reply): void {
 
 const mode = demo
   ? 'demo: 3 made-up tracks'
-  : `${catalog.count()} tracks in ${dbPath}${offline ? ', URL checks skipped' : ''}${youTube ? ', YouTube Music on' : ''}${musicTable ? ', music-table.com on' : ''}`;
+  : `${catalog.count()} tracks in ${dbPath}${offline ? ', URL checks skipped' : ''}${zemer ? ', Zemer on' : youTube ? ', YouTube Music on' : ''}${musicTable ? ', music-table.com on' : ''}`;
 const intro = [`Local simulator (${mode})`];
-if (first || source) intro.push(`A search asks ${[first?.name, source ? `then ${source.name}` : ''].filter(Boolean).join(', ')}, and keeps what it finds.`);
-if (!demo && !first && !source && catalog.count() === 0) {
+const asked = [sources.finder?.name, sources.source?.name].filter((name): name is string => name !== undefined);
+if (sources.musicTableFirst) asked.reverse();
+if (asked.length > 0) intro.push(`A search asks ${asked.join(', then ')}, and keeps what it finds.`);
+if (!demo && asked.length === 0 && catalog.count() === 0) {
   intro.push('The catalog is empty, so every request will answer "No match".');
   intro.push('Add tracks first (see the README), or try the made-up catalog: npm run simulate -- --demo');
 }

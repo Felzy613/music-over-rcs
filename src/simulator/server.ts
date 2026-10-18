@@ -12,9 +12,10 @@ import { Categories } from '../library/categories.ts';
 import { catalogFollows } from '../library/follows.ts';
 import { LibraryJobs } from '../library/jobs.ts';
 import { createRunner, type Runner } from '../runner.ts';
-import { createMusicTableSource, resolvingAudio, type MusicTable } from '../sources/music-table.ts';
-import { arrangeSources, songSourceOrder } from '../sources/songs.ts';
-import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, type YouTubeMusic } from '../sources/youtube-music.ts';
+import { resolvingAudio, type MusicTable } from '../sources/music-table.ts';
+import { songSources } from '../sources/songs.ts';
+import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, type YouTubeMusic } from '../sources/youtube-music.ts';
+import type { ZemerSearch } from '../sources/zemer.ts';
 import type { ZemerWhitelist } from '../sources/zemer-whitelist.ts';
 import { SimulatedChat } from './chat.ts';
 import type { Trace, TraceItem, TraceRun } from './trace.ts';
@@ -22,8 +23,10 @@ import type { Trace, TraceItem, TraceRun } from './trace.ts';
 export interface SimulatorOptions {
   catalog: Catalog;
   musicTable: MusicTable | undefined;
-  /** YouTube Music, asked for songs before music-table.com unless SONG_SOURCES says otherwise. */
+  /** Where the audio of Zemer's songs comes from. Zemer is asked for songs before music-table.com unless SONG_SOURCES says otherwise. */
   youTube?: YouTubeMusic | undefined;
+  /** Zemer's catalog; without it, searches use YouTube Music's own search. */
+  zemer?: ZemerSearch | undefined;
   /** Zemer's artist list, which YouTube Music results are filtered by. Needed whenever `youTube` is. */
   whitelist?: ZemerWhitelist | undefined;
   trace: Trace;
@@ -76,7 +79,7 @@ const runSummary = (run: TraceRun) => ({
  * music-table.com lookup the phone setup uses, with a "behind the scenes" panel that shows each step and its time.
  */
 export function createSimulator(options: SimulatorOptions): Simulator {
-  const { catalog, musicTable, youTube, whitelist, trace } = options;
+  const { catalog, musicTable, youTube, whitelist, zemer, trace } = options;
   const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
   const now = options.now ?? Date.now;
   const maxBytes = options.maxBytes ?? 100 * 1024 * 1024;
@@ -125,12 +128,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
   };
 
   const onNote = (note: string): void => trace.add({ label: 'lookup', detail: note, tone: 'note' });
-  const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist, onNote }) : undefined;
-  const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist, onNote }) : undefined;
-  const { first, source } = arrangeSources(songSourceOrder(), {
-    'youtube-music': youTubeSongs,
-    'music-table': musicTable && createMusicTableSource({ musicTable, catalog, onNote }),
-  });
+  const sources = songSources({ catalog, musicTable, youTube, whitelist, zemer, onNote });
   const bot = createBot({
     catalog: tracedCatalog,
     checkAudio: async (url) => {
@@ -147,10 +145,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     onPlay: (track) => catalog.recordPlay(track.id),
     browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined),
     follows: catalogFollows(catalog),
-    ...(first ? { first } : {}),
-    ...(source ? { source } : {}),
-    ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
-    ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
+    ...sources,
   });
 
   /**

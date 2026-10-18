@@ -1,14 +1,27 @@
-import { SourceError, type LookupOptions, type TrackSource } from '../bot.ts';
+import { SourceError, type AlbumSource, type Finder, type LookupOptions, type TrackSource } from '../bot.ts';
+import type { NewTrack } from '../catalog.ts';
+import type { Track } from '../types.ts';
+import { createMusicTableSource, type MusicTable } from './music-table.ts';
+import { createYouTubeAlbumSource, createYouTubeMusicSource, type YouTubeMusic } from './youtube-music.ts';
+import { createZemerFinder, type ZemerSearch } from './zemer.ts';
+import type { ZemerWhitelist } from './zemer-whitelist.ts';
 
-/** The places a song can be looked up, by the names SONG_SOURCES uses. */
+/**
+ * The places a song can be looked up, by the names SONG_SOURCES uses: "youtube-music" is Zemer's catalog (songs whose
+ * audio comes from YouTube Music; "zemer" means the same), "music-table" is the catalog and music-table.com.
+ */
 export const SONG_SOURCES = ['youtube-music', 'music-table'] as const;
 export type SongSourceName = (typeof SONG_SOURCES)[number];
 
-/** Which sources a search asks, in order: SONG_SOURCES="music-table,youtube-music", or both with YouTube Music first. */
+/** Which sources a search asks, in order: SONG_SOURCES="music-table,youtube-music", or both with Zemer first. */
 export function songSourceOrder(env: NodeJS.ProcessEnv = process.env): SongSourceName[] {
   const raw = env.SONG_SOURCES?.trim();
   if (!raw) return [...SONG_SOURCES];
-  const names = raw.split(/[\s,]+/).filter(Boolean).map((name) => name.toLowerCase());
+  const names = raw
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map((name) => name.toLowerCase())
+    .map((name) => (name === 'zemer' ? 'youtube-music' : name));
   const unknown = names.filter((name) => !(SONG_SOURCES as readonly string[]).includes(name));
   if (unknown.length > 0) throw new Error(`SONG_SOURCES names ${unknown.join(', ')}, which I don't know; use ${SONG_SOURCES.join(' and ')}.`);
   return [...new Set(names)] as SongSourceName[];
@@ -41,21 +54,47 @@ export function combineSources(sources: TrackSource[]): TrackSource | undefined 
   };
 }
 
-/** The sources that are on, in the order SONG_SOURCES gives. */
-export function sourcesInOrder(order: SongSourceName[], available: Partial<Record<SongSourceName, TrackSource | undefined>>): TrackSource | undefined {
-  return combineSources(order.flatMap((name) => available[name] ?? []));
+export interface SongSourceParts {
+  catalog: { add(track: NewTrack): Track };
+  musicTable?: MusicTable | undefined;
+  /** Where the audio of Zemer's songs comes from; without it (YOUTUBE_MUSIC=off) there is no Zemer either. */
+  youTube?: YouTubeMusic | undefined;
+  /** Zemer's artist list. Needed whenever `youTube` is: nothing from Zemer or YouTube Music goes unchecked. */
+  whitelist?: ZemerWhitelist | undefined;
+  /** Zemer's catalog; without it (ZEMER_SEARCH=off) searches use YouTube Music's own search, held to the same list. */
+  zemer?: ZemerSearch | undefined;
+  order?: SongSourceName[];
+  /** Hears what each lookup decided, in plain words (the simulators show these). */
+  onNote?: (note: string) => void;
 }
 
 /**
- * The sources arranged for the bot. YouTube Music, when SONG_SOURCES puts it first (the default), is asked before the
- * catalog (`first`), so a search finds it there before anything stored from music-table.com; the others follow the
- * catalog as one `source`. With music-table.com first, nothing is asked before the catalog, as it always was.
+ * The sources the bot is given, put together the same way by every entry point: Zemer first (`finder`, with YouTube
+ * Music's own search behind it for when Zemer can't be reached), the catalog and music-table.com after it (`source`),
+ * and albums opened from Zemer (or YouTube Music). SONG_SOURCES can turn either off, or put music-table.com first.
  */
-export function arrangeSources(
-  order: SongSourceName[],
-  available: Partial<Record<SongSourceName, TrackSource | undefined>>,
-): { first?: TrackSource; source?: TrackSource } {
-  const leader = order[0] === 'youtube-music' ? available['youtube-music'] : undefined;
-  const source = sourcesInOrder(leader ? order.slice(1) : order, available);
-  return { ...(leader ? { first: leader } : {}), ...(source ? { source } : {}) };
+export function songSources(parts: SongSourceParts): { finder?: Finder; albums?: AlbumSource; source?: TrackSource; musicTableFirst?: boolean } {
+  const order = parts.order ?? songSourceOrder();
+  const { catalog, youTube, whitelist, onNote } = parts;
+  const notes = onNote ? { onNote } : {};
+  const zemer =
+    order.includes('youtube-music') && youTube && whitelist
+      ? createZemerFinder({
+          zemer: parts.zemer,
+          youTube,
+          catalog,
+          whitelist,
+          fallback: {
+            songs: createYouTubeMusicSource({ youTube, catalog, whitelist, ...notes }),
+            albums: createYouTubeAlbumSource({ youTube, catalog, whitelist, ...notes }),
+          },
+          ...notes,
+        })
+      : undefined;
+  const source = order.includes('music-table') && parts.musicTable ? createMusicTableSource({ musicTable: parts.musicTable, catalog, ...notes }) : undefined;
+  return {
+    ...(zemer ? { finder: zemer, albums: zemer.albums } : {}),
+    ...(source ? { source } : {}),
+    ...(zemer && source && order.indexOf('music-table') < order.indexOf('youtube-music') ? { musicTableFirst: true } : {}),
+  };
 }

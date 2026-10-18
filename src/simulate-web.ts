@@ -5,6 +5,7 @@ import { createSimulator } from './simulator/server.ts';
 import { Trace } from './simulator/trace.ts';
 import { musicTableFromEnv } from './sources/music-table.ts';
 import { youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { zemerSearchFromEnv } from './sources/zemer.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // A Google-Messages-style chat in your browser, wired to the real bot: the same runner, catalog, music-table.com
@@ -26,16 +27,17 @@ const trace = new Trace();
 const catalog = new Catalog(flag('real-catalog') ? (process.env.CATALOG_DB ?? 'data/catalog.db') : ':memory:');
 const musicTable = musicTableFromEnv(process.env, { onEvent: (event) => trace.site(event) });
 const youTube = youTubeMusicFromEnv();
+const zemer = youTube && zemerSearchFromEnv();
 const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
 void whitelist?.warm();
 const maxMb = Number(process.env.MAX_DOWNLOAD_MB) || 100;
 
-const simulator = createSimulator({ catalog, musicTable, youTube, whitelist, trace, full: flag('full'), maxBytes: maxMb * 1024 * 1024 });
+const simulator = createSimulator({ catalog, musicTable, youTube, zemer, whitelist, trace, full: flag('full'), maxBytes: maxMb * 1024 * 1024 });
 try {
   const { url } = await simulator.listen(port);
   console.log(`Message simulator: ${url}`);
   console.log(
-    `${catalog.count()} saved tracks (${flag('real-catalog') ? 'your catalog' : 'a fresh in-memory catalog'}), YouTube Music ${youTube ? 'on' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${flag('full') ? 'files are really downloaded' : 'files are checked but not downloaded'}.`,
+    `${catalog.count()} saved tracks (${flag('real-catalog') ? 'your catalog' : 'a fresh in-memory catalog'}), Zemer ${zemer ? 'on' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${flag('full') ? 'files are really downloaded' : 'files are checked but not downloaded'}.`,
   );
   console.log('Press Ctrl+C to stop.');
   if (flag('open')) spawn('open', [url], { stdio: 'ignore', detached: true }).unref();

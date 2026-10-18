@@ -181,7 +181,7 @@
 <main class="stage">
   <header class="top">
     <h1>Message simulator</h1>
-    <span class="tag">The real bot and the real music-table.com search, in a chat that looks like Google Messages.</span>
+    <span class="tag">The real bot, searching Zemer and music-table.com, in a chat that looks like Google Messages.</span>
     <label class="toggle" title="In the real setup you text your own number, so the bot's replies look like messages you sent yourself"><input type="checkbox" id="self"> Chat with myself</label>
     <button class="textbtn" id="digest" type="button" title="Shows the daily new-music message here, as it would go out now (covering the last three days)">Daily message</button>
     <button class="textbtn" id="reset" type="button">Clear</button>
@@ -203,7 +203,7 @@
     <div class="messages" id="messages" role="log" aria-live="polite">
       <div class="empty" id="empty">
         <strong>Text it "search" and a song name</strong>
-        This is the real bot, searching the real site. Try one of these, or type your own:
+        This is the real bot, searching Zemer first and then music-table.com. Try one of these, or type your own:
         <div class="tries" id="tries"></div>
       </div>
     </div>
@@ -239,7 +239,7 @@
   const seconds = (ms) => (ms / 1000).toFixed(2) + ' s';
   const clock = (at) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const megabytes = (bytes) => (bytes > 0 ? (bytes / 1048576).toFixed(1) + ' MB' : 'size unknown');
-  const TRIES = ['search yoely weiss shabbos', 'search benny friedman', 'search chuppah medley', 'search yoely wiess shabbos'];
+  const TRIES = ['search lipa', 'search vnusni', "search elazar lipa'le", 'album a poshiter yid', 'search yoely wiess shabbos'];
 
   const messages = $('messages');
   const phone = $('phone');

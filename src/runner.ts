@@ -10,9 +10,11 @@ import type { AlbumSong, Chip, Incoming, Reply } from './types.ts';
  * messages, so this marker is how it tells them apart and never answers itself.
  */
 export const BOT_MARK = '🎵';
+/** Or with one of these, which say what the message is: an album to pick (💿), an artist's name over a list (🎤). */
+export const KIND_MARKS = ['💿', '🎤'] as const;
 /** What an add-on passes on from elsewhere (see extensions.ts) starts with this instead; the bot never answers those either. */
 export const RELAY_MARK = '🤖';
-const isBotText = (text: string): boolean => text.startsWith(BOT_MARK) || text.startsWith(RELAY_MARK);
+const isBotText = (text: string): boolean => [BOT_MARK, ...KIND_MARKS, RELAY_MARK].some((mark) => text.startsWith(mark));
 
 const SEEN_LIMIT = 2000;
 /** Message ids kept in the resume point. */
@@ -37,7 +39,24 @@ const CHOICE_TTL_MS = 30 * 60_000;
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const ERROR_NOTICE = 'Something went wrong on my side. Please try again in a moment.';
 
-export const markBotText = (text: string): string => (isBotText(text) ? text : `${BOT_MARK} ${text}`);
+/** An invisible left-to-right mark (U+200E). */
+const LEFT_TO_RIGHT = '\u200e';
+/** Hebrew words (with the spaces between them) followed by something that isn't Hebrew. */
+const HEBREW_THEN_MORE = /[\u0590-\u05ff](?:[\u0590-\u05ff\s]*[\u0590-\u05ff])?(?=\s*[^\s\u0590-\u05ff])/gu;
+
+/**
+ * A message as the bot sends it: starting with its mark, and laid out left to right like the rest. A phone lays a
+ * message out right to left when its first letter is Hebrew ("🎵 שבת — Yoely Weiss"), and pulls what follows a Hebrew
+ * title into it ("💿 אלעזר ליפא׳לע · 2025 · 15 songs" shows as "15 · 2025 · אלעזר ליפא׳לע songs"), so an invisible
+ * left-to-right mark goes after the bot's own mark and after each stretch of Hebrew that something else follows.
+ */
+export const markBotText = (text: string): string => {
+  const marked = isBotText(text) ? text : `${BOT_MARK} ${text}`;
+  if (!/[\u0590-\u05ff]/.test(marked) || marked.includes(LEFT_TO_RIGHT)) return marked;
+  const runs = marked.replace(HEBREW_THEN_MORE, (run) => `${run}${LEFT_TO_RIGHT}`);
+  const firstLetter = /\p{L}/u.exec(runs)?.[0] ?? '';
+  return /[\u0590-\u05ff]/.test(firstLetter) ? runs.replace(/^(\S+ ?)/u, `$1${LEFT_TO_RIGHT}`) : runs;
+};
 
 /** A thumbs up, in any skin tone. */
 export const isLike = (key: string): boolean => /^👍[\u{1F3FB}-\u{1F3FF}]?\uFE0F?$/u.test(key.trim());

@@ -449,6 +449,33 @@ export async function tagSong(
   return { data: written, fileName: audio.fileName, mimeType: audio.mimeType, bytes: written.byteLength };
 }
 
+/**
+ * A downloader whose songs come with their tags and cover written in, the way a music app on the phone wants them
+ * (artists, album, number, year, cover; a YouTube song is first put back together as an ordinary M4A). A song that
+ * can't be tagged goes as it was downloaded, and so does one whose tagging fails: the song matters more than its tags.
+ */
+export function taggedFetch(
+  fetchAudio: (url: string, title?: string) => Promise<DownloadedAudio>,
+  options: {
+    tagsOf: (url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined;
+    fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
+    log?: (line: string) => void;
+  },
+): (url: string, title?: string) => Promise<DownloadedAudio> {
+  return async (url, title) => {
+    const audio = await fetchAudio(url, title);
+    try {
+      const song = await tagSong(url, audio, options);
+      if (song.data.byteLength === audio.bytes && song.mimeType === audio.mimeType && song.fileName === audio.fileName) return audio;
+      const data = new Blob([song.data as unknown as ArrayBuffer], { type: song.mimeType });
+      return { data, fileName: song.fileName, mimeType: song.mimeType, bytes: song.bytes };
+    } catch (err) {
+      options.log?.(`could not write the tags into ${audio.fileName}: ${err instanceof Error ? err.message : String(err)}`);
+      return audio;
+    }
+  };
+}
+
 /** A song called an MP3 that's really something else (an M4A, say), typed and named as what it is. */
 function asItIs<T extends { fileName: string; mimeType: string }>(audio: T, data: Uint8Array): T {
   const actual = audioTypeOf(data);

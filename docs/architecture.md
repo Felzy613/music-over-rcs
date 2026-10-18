@@ -30,7 +30,7 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
 ## Code layout
 
 ```text
-src/bot.ts              what to answer: songs, lists, choices, albums, follow / unfollow
+src/bot.ts              what to answer: Zemer first, then music-table.com; artists' pages, songs, albums, lists and their format, follow / unfollow
 src/runner.ts           watches one chat and answers it; 👍, numbers where 👍 can't reach, songs spaced out, typing, announcements, safety limits
 src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, follows, state
 src/health.ts           problem reports when something breaks (mailed by the cloud host; a notification on a Mac); the bridge's login status, and when to restart it
@@ -44,14 +44,14 @@ src/image-fetch.ts      downloads album art (with a small memory)
 src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies; on the Linux host a card falls back to the plain cover and the daily collage is skipped
 src/library/zip.ts      writes a ZIP (files stored as they are, UTF-8 names) for albums: no dependencies
 src/library/images.ts   a song's card (cover + name) and the daily collage (the new covers in a grid)
-src/sources/            music-table.com: the client, the lookup, relevance and spelling; youtube-music.ts: YouTube Music's app API (search, stream links, download); zemer-whitelist.ts: Zemer's artist list, kept current; songs.ts: which source is asked first
+src/sources/            zemer.ts: Zemer's catalog (search.zemer.io: search, artists' pages, albums) and the bot's first place to look; music-table.com: the client, the lookup; relevance.ts: what fits a request, spelling, and English spellings read against Hebrew letters; youtube-music.ts: YouTube Music's app API (stream links, download, and its own search for when Zemer can't be reached); zemer-whitelist.ts: Zemer's artist list, kept current; songs.ts: puts the sources together the same way for every entry point
 src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs, and:
   categories.ts         holiday and other category lists (by the site's own category names)
   category-list.ts      which categories, and the words that ask for them
   follows.ts            following artists, and following them for you after three of their songs
   naming.ts             each song's name and place: Artist/Album/01 Title.mp3, and "Artist - Title.mp3" when sent
   id3.ts                the tags inside an MP3 (ID3v2.3): written to match, the audio untouched, no dependencies
-  mp4.ts                the tags inside an M4A (iTunes-style ilst), moving the index's pointers into the audio
+  mp4.ts                the tags inside an M4A (iTunes-style ilst), moving the index's pointers into the audio; a fragmented M4A (YouTube's) put back together first
   seasons.ts            Chanukah, Purim, Sefirah and the Three Weeks, from the Jewish calendar
 src/matrix/             Matrix client, and joining a pasted multi-line command for the console
 src/beeper/             Beeper Desktop API client
@@ -109,10 +109,10 @@ npm test
 npm run typecheck
 ```
 
-`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search box and search page, release pages, lists by page, category and sort, feed, releases for sale, download links that redirect to storage), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
+`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search box and search page, release pages, lists by page, category and sort, feed, releases for sale, download links that redirect to storage), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's catalog (search sorted into kinds, artists' pages, albums, with the marks Hebrew titles carry), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
 
 ## Extending
 
 - **Another chat platform:** implement `ChatClient` beside `src/matrix/` and `src/beeper/`, then start a runner with it.
 - **An add-on kept elsewhere:** a folder in `extensions/` (git ignores it, so it can be a repository of its own) whose `index.ts` default-exports an `ExtensionSetup` (see `src/extensions.ts`). It can take messages that start with its own word, get the pictures sent from the phone, send into the chat and put reactions on messages. The bridge route loads it at start (the cloud image does not include `extensions/`, so it runs only where the bot runs from a checkout), and `npm test` and `npm run typecheck` include it.
-- **Another place to find music:** implement `TrackSource` (`name`, `lookup(query, limit)`) beside `src/sources/music-table.ts` and `youtube-music.ts`, and add its name to `src/sources/songs.ts`. Its tracks go into the catalog like any others; if their addresses need turning into a download link, wrap the audio check and download the way `resolvingYouTubeAudio` does.
+- **Another place to find music:** implement `TrackSource` (`name`, `lookup(query, limit)`) beside `src/sources/music-table.ts`, or `Finder` (songs, albums and artists at once, like `src/sources/zemer.ts`), and put it together in `songSources` (`src/sources/songs.ts`). Its tracks go into the catalog like any others; if their addresses need turning into a download link, wrap the audio check and download the way `resolvingYouTubeAudio` does.

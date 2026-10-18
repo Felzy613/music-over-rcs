@@ -4,7 +4,7 @@ import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { Catalog } from '../catalog.ts';
 import type { MusicTable } from '../sources/music-table.ts';
 import type { Reply, Track } from '../types.ts';
-import { AudioCache, cachedCheck, cachedFetch } from './audio-cache.ts';
+import { AudioCache, cachedCheck, cachedFetch, taggedFetch } from './audio-cache.ts';
 import { catalogBrowse, type Browse } from './browse.ts';
 import { Categories } from './categories.ts';
 import { catalogFollows, type Follows } from './follows.ts';
@@ -103,7 +103,12 @@ export function setUpLibrary(options: LibraryOptions): Library {
         log,
       })
     : undefined;
-  const named = namedFetch(cache ? cachedFetch(cache, audio.fetchAudio, log) : audio.fetchAudio, naming.fileNameOf);
+  // Every song sent has its tags and cover written in, so it files itself properly in a music app on the phone.
+  const named = taggedFetch(namedFetch(cache ? cachedFetch(cache, audio.fetchAudio, log) : audio.fetchAudio, naming.fileNameOf), {
+    tagsOf: naming.tagsOf,
+    fetchCover: coverFetcher(),
+    log,
+  });
   let jobs: LibraryJobs | undefined;
   const at = options.digestAt;
   const parts = [

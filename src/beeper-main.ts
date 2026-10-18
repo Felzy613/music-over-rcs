@@ -9,9 +9,10 @@ import { Health } from './health.ts';
 import { loadBeeperConfig } from './config.ts';
 import { setUpLibrary } from './library/setup.ts';
 import { createRunner } from './runner.ts';
-import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
-import { arrangeSources, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
+import { songSources } from './sources/songs.ts';
+import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { zemerSearchFromEnv } from './sources/zemer.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat (your "message yourself" chat), through Beeper Desktop.
@@ -28,13 +29,15 @@ try {
 
   // This machine downloads the file, so private addresses (a NAS, say) are fine and any audio format will do.
   const catalog = new Catalog(config.dbPath);
-  // A search asks YouTube Music first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
-  // SONG_SOURCES sets which is asked first).
+  // A search asks Zemer's catalog first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
+  // SONG_SOURCES sets which is asked first). Zemer's songs are YouTube Music's, so their audio comes from there.
   const musicTable = musicTableFromEnv();
   // YouTube turns the cloud host away at its player, so there songs come through the Cloudflare Worker (YOUTUBE_RELAY=r2).
   const youTube = youTubeMusicFromEnv(process.env, { log, relay: youTubeRelayFromEnv(process.env, { log }) });
   // Whether songs can be had (from this host, or through the relay), learned and logged at start.
   void youTube?.checkStreams();
+  const zemer = youTube && zemerSearchFromEnv(process.env, { log });
+  void zemer?.check();
   const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
   const audio = resolvingYouTubeAudio(
     youTube,
@@ -73,12 +76,7 @@ try {
     onSite: (ok, problem) => (ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.problem('site', problem ?? "music-table.com isn't answering.")),
     log,
   });
-  const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
-  const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
-  const { first, source } = arrangeSources(songSourceOrder(), {
-    'youtube-music': youTubeSongs,
-    'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
-  });
+  const sources = songSources({ catalog, musicTable, youTube, whitelist, zemer });
   // A YouTube Music song is checked against the list as it stands when it is sent, not only when it was found.
   const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
   const bot = createBot({
@@ -87,10 +85,7 @@ try {
     onPlay: library.onPlay,
     browse: library.browse,
     follows: library.follows,
-    ...(first ? { first } : {}),
-    ...(source ? { source } : {}),
-    ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
-    ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
+    ...sources,
   });
   const runner = createRunner({
     chat: beeper,

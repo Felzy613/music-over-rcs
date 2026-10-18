@@ -287,9 +287,10 @@ describe('message simulator', () => {
       await say('search weiss');
       const first = await live.waitFor((f) => f.event === 'trace-end');
       const said = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data);
-      assert.ok(said.some((message) => /^🎵 .+:$/.test(message.text ?? '')), 'the artist heads the list');
-      const options = said.filter((message) => /^🎵 (?:Song|Album): /.test(message.text ?? ''));
-      assert.ok(options.length >= 2, 'one message per option');
+      // One artist's songs: their name over the list ("🎤 Yoely Weiss"), then one message per song.
+      assert.ok(said.some((message) => /^🎤 .+/.test(message.text ?? '')), 'the artist heads the list');
+      const options = said.filter((message) => /^(?:🎵|💿) /.test(message.text ?? ''));
+      assert.ok(options.length >= 2, `one message per option: ${JSON.stringify(said.map((message) => message.text))}`);
       assert.ok(options.every((message) => !/^🎵 \d/.test(message.text ?? '')), 'no numbers');
 
       assert.equal((await post('/api/react', { id: options[1].id }, {})).status, 403, 'only from the page');
@@ -298,7 +299,7 @@ describe('message simulator', () => {
       const second = await live.waitFor((f) => f.event === 'trace-end' && f.data.id !== first.data.id);
       assert.equal(second.data.choice, true);
       // The trace names the song the 👍 picked, artist first.
-      assert.ok(second.data.text.endsWith(` — ${options[1].text.replace(/^🎵 Song: /, '').replace(/ \(with .*\)$/, '')}`), second.data.text);
+      assert.ok(second.data.text.endsWith(` — ${options[1].text.replace(/^🎵 /, '').replace(/ — .*$/, '')}`), second.data.text);
       assert.ok(live.frames.some((f) => f.event === 'reaction' && f.data.id === options[1].id && f.data.key === '👍'), 'the page sees the 👍');
       const audio = live.frames.map((f) => f.data).filter((d) => d?.audio);
       assert.equal(audio.length, 1, 'a 👍 on an option sends that one song');
@@ -309,7 +310,7 @@ describe('message simulator', () => {
       assert.ok(live.frames.some((f) => f.event === 'message' && f.data.text === '🎵 To get a song from the list, tap 👍 on it.'));
 
       await react(options[0].id); // the list is still on screen, so the other option can be picked too
-      const firstTitle = options[0].text.replace(/^🎵 Song: /, '').replace(/ \(with .*\)$/, '');
+      const firstTitle = options[0].text.replace(/^🎵 /, '').replace(/ — .*$/, '');
       await live.waitFor((f) => f.event === 'trace-end' && typeof f.data.text === 'string' && f.data.text.startsWith('👍 ') && f.data.text.endsWith(` — ${firstTitle}`));
       assert.equal(live.frames.map((f) => f.data).filter((d) => d?.audio).length, 2);
     } finally {
@@ -338,7 +339,7 @@ describe('message simulator', () => {
       await say('search zzzz qqqq');
       await live.waitFor((f) => f.event === 'trace-end');
       const reply = live.frames.map((f) => f.data).find((d) => d?.from === 'bot');
-      assert.match(reply.text, /^🎵 No match for "zzzz qqqq" \(I looked on music-table\.com too\)/);
+      assert.match(reply.text, /^🎵 No match for "zzzz qqqq" on music-table\.com\./);
     } finally {
       await finish();
     }
@@ -403,7 +404,7 @@ describe('message simulator', () => {
       const shown = live.frames.filter((f) => f.event === 'message').map((f) => f.data);
       assert.match(shown[0].text, /^🎵 New music · /);
       assert.equal(shown[1].image.url, 'collage:1', 'one picture of the covers');
-      assert.equal(shown[2].text, '🎵 Oizer Oberlander — Ana Elech · single');
+      assert.equal(shown[2].text, '🎵 Ana Elech — Oizer Oberlander · single');
       assert.match(shown[3].text, /Also new, video only:\n• Band - Clip/);
       const steps = labels(live.frames, ended.data.id).join('\n');
       assert.match(steps, /newest posts/);

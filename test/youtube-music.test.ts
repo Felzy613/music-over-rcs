@@ -6,7 +6,8 @@ import { createBot, SourceError, type TrackSource } from '../src/bot.ts';
 import { Catalog } from '../src/catalog.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
 import { createRunner } from '../src/runner.ts';
-import { combineSources, songSourceOrder, sourcesInOrder } from '../src/sources/songs.ts';
+import { MusicTable } from '../src/sources/music-table.ts';
+import { combineSources, songSourceOrder, songSources } from '../src/sources/songs.ts';
 import {
   createYouTubeMusicSource,
   gatedAudioCheck,
@@ -436,9 +437,9 @@ describe('looking things up on YouTube Music from the bot', () => {
   test('a vague request lists the songs to choose from, and a 👍 on one plays it', async () => {
     const { ask, tap } = setup();
     const replies = await ask('night owls');
-    assert.equal(textOf(replies[0]).text, 'The Night Owls:');
+    assert.equal(textOf(replies[0]).text, '🎤 The Night Owls');
     const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined);
-    assert.deepEqual(choices.map((reply) => reply.text), ['Song: Blue Horizon', 'Song: Blue Horizon (Live)', 'Song: Hidden Song']);
+    assert.deepEqual(choices.map((reply) => reply.text), ['Blue Horizon', 'Blue Horizon (Live)', 'Hidden Song']);
     const played = await tap(choices[1]!.postback!);
     assert.deepEqual(played[1], { kind: 'audio', url: `${youtube.url}/watch?v=aaaaaaaaaa2`, title: 'The Night Owls — Blue Horizon (Live)' });
   });
@@ -455,7 +456,7 @@ describe('looking things up on YouTube Music from the bot', () => {
   test('when YouTube Music is down the bot says so instead of failing', async () => {
     youtube.failSearch = true;
     const { ask } = setup();
-    assert.equal(textOf((await ask('blue horizon'))[0]).text, "I couldn't search YouTube Music: YouTube Music answered HTTP 500.");
+    assert.equal(textOf((await ask('blue horizon'))[0]).text, "I couldn't search YouTube Music right now: YouTube Music answered HTTP 500.");
   });
 
   test('only songs by artists on Zemer’s list are offered, and never one with a woman’s name among its credits', async () => {
@@ -495,7 +496,7 @@ describe('looking things up on YouTube Music from the bot', () => {
     const { source, ask } = setup();
     await assert.rejects(source.lookup('blue horizon', 5), (err) => err instanceof ZemerWhitelistError && err instanceof SourceError);
     assert.deepEqual(youtube.searches, [], 'YouTube Music was not even asked');
-    assert.equal(textOf((await ask('blue horizon'))[0]).text, "I couldn't search YouTube Music: Zemer's artist list answered HTTP 503.");
+    assert.equal(textOf((await ask('blue horizon'))[0]).text, "I couldn't search YouTube Music right now: Zemer's artist list answered HTTP 503.");
   });
 
   test('a song stored earlier is checked against the list again when it is sent, so a change reaches it', async () => {
@@ -544,7 +545,7 @@ describe('looking things up on YouTube Music from the bot', () => {
     const { ask } = setup(catalog);
     const replies = await ask('night owls');
     const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined).map((reply) => reply.text);
-    assert.deepEqual(choices, ['Song: Blue Horizon', 'Song: Blue Horizon (Live)', 'Song: Hidden Song', 'Song: Blue Horizon Remix']);
+    assert.deepEqual(choices, ['Blue Horizon', 'Blue Horizon (Live)', 'Hidden Song', 'Blue Horizon Remix']);
   });
 });
 
@@ -783,8 +784,9 @@ describe('asking several sources', () => {
     return made;
   };
 
-  test('SONG_SOURCES sets the order, defaulting to YouTube Music first, and refuses names it does not know', () => {
+  test('SONG_SOURCES sets the order, defaulting to Zemer (and YouTube Music) first, and refuses names it does not know', () => {
     assert.deepEqual(songSourceOrder({}), ['youtube-music', 'music-table']);
+    assert.deepEqual(songSourceOrder({ SONG_SOURCES: 'music-table, zemer' }), ['music-table', 'youtube-music'], '"zemer" is another name for it');
     assert.deepEqual(songSourceOrder({ SONG_SOURCES: ' Music-Table , youtube-music ' }), ['music-table', 'youtube-music']);
     assert.deepEqual(songSourceOrder({ SONG_SOURCES: 'music-table' }), ['music-table']);
     assert.throws(() => songSourceOrder({ SONG_SOURCES: 'youtube-music,spotify' }), /spotify/);
@@ -830,12 +832,15 @@ describe('asking several sources', () => {
     assert.equal(combineSources([]), undefined);
   });
 
-  test('sourcesInOrder leaves out the ones that are off', () => {
-    const a = source('A', async () => []);
-    const b = source('B', async () => []);
-    assert.equal(sourcesInOrder(['youtube-music', 'music-table'], { 'youtube-music': undefined, 'music-table': b }), b);
-    assert.equal(sourcesInOrder(['music-table', 'youtube-music'], { 'youtube-music': a, 'music-table': b })!.name, 'B and A');
-    assert.equal(sourcesInOrder(['youtube-music'], {}), undefined);
+  test('songSources puts Zemer first unless SONG_SOURCES puts music-table.com first, and leaves out the ones that are off', () => {
+    const nowhere = 'http://127.0.0.1:9';
+    const parts = { catalog: new Catalog(':memory:'), youTube: new YouTubeMusic({ baseUrl: nowhere }), whitelist: new ZemerWhitelist({ baseUrl: nowhere }), musicTable: new MusicTable({ baseUrl: nowhere }) };
+    const both = songSources({ ...parts, order: ['youtube-music', 'music-table'] });
+    assert.deepEqual([both.finder?.name, both.albums?.name, both.source?.name, both.musicTableFirst], ['Zemer', 'Zemer', 'music-table.com', undefined]);
+    assert.equal(songSources({ ...parts, order: ['music-table', 'youtube-music'] }).musicTableFirst, true);
+    assert.deepEqual(Object.keys(songSources({ ...parts, order: ['music-table'] })), ['source']);
+    assert.deepEqual(Object.keys(songSources({ ...parts, order: ['youtube-music'] })).sort(), ['albums', 'finder']);
+    assert.deepEqual(Object.keys(songSources({ ...parts, youTube: undefined })), ['source'], 'no Zemer without YouTube Music to get its songs from');
   });
 });
 

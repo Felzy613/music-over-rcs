@@ -282,8 +282,8 @@ describe('library: the daily message', () => {
       [
         'New music · Monday, Oct 5\n2 new songs on music-table.com',
         '[collage] Oizer Oberlander — Ana Elech https://img.test/1.jpg - | Hershey Eisenbach — Makdim Shalom https://img.test/3.jpg -',
-        'Oizer Oberlander — Ana Elech · single',
-        'Hershey Eisenbach — Makdim Shalom · music video',
+        'Ana Elech — Oizer Oberlander · single',
+        'Makdim Shalom — Hershey Eisenbach · music video',
         'Also new, video only:\n• Some Band - The Clip\n\nTap 👍 on a song to get it, or "search" for anything else.',
       ],
     );
@@ -304,7 +304,7 @@ describe('library: the daily message', () => {
     const collage = replies.find((reply) => reply.kind === 'collage');
     assert.ok(collage && collage.kind === 'collage');
     assert.deepEqual(collage.images.map((tile) => tile.postback), ['play:1', 'play:2']);
-    assert.deepEqual(texts(replies).filter((line) => line.startsWith('Band')), ['Band — Song 1 · single', 'Band — Song 2 · single', 'Band — Song 3 · single']);
+    assert.deepEqual(texts(replies).filter((line) => line.startsWith('Song')), ['Song 1 — Band · single', 'Song 2 — Band · single', 'Song 3 — Band · single']);
   });
 
   test('where a 👍 can\'t reach the bot, the lines and the covers are numbered and a number picks', () => {
@@ -313,7 +313,7 @@ describe('library: the daily message', () => {
     const collage = replies.find((reply) => reply.kind === 'collage');
     assert.ok(collage && collage.kind === 'collage');
     assert.deepEqual(collage.images.map((tile) => tile.number), [1, 3], 'a song without a cover keeps its number free');
-    assert.deepEqual(texts(replies).slice(1), ['1. Band — Song 1 · single\n2. Band — Song 2 · single\n3. Band — Song 3 · single\n\nReply with a number to get it, or "search" for anything else.']);
+    assert.deepEqual(texts(replies).slice(1), ['1. Song 1 — Band · single\n2. Song 2 — Band · single\n3. Song 3 — Band · single\n\nReply with a number to get it, or "search" for anything else.']);
   });
 
   test('a day with nothing new sends nothing', () => {
@@ -930,11 +930,11 @@ describe('library: artists, trending and new', () => {
       const split = await ask('trending');
       // As a 👍 chat gets it: a message per song, no numbers.
       assert.equal(split.length, 12);
-      assert.ok(split.slice(1, 11).every((reply) => reply.kind === 'text' && reply.postback && reply.text.startsWith('Band — Song ')));
+      assert.ok(split.slice(1, 11).every((reply) => reply.kind === 'text' && reply.postback && /^Song \d+ — Band · /.test(reply.text)));
       const closing = split.at(-1);
       assert.equal(closing?.kind === 'text' && closing.text, 'Tap 👍 on one to get it, or text "more" for the next ones.');
       const first = text(split);
-      assert.match(first.text, /^🔥 Trending on music-table\.com\n1\. Band — Song /);
+      assert.match(first.text, /^🔥 Trending on music-table\.com\n1\. Song \d+ — Band · /);
       assert.match(first.text, /\n\nReply with a number to get it, or text "more" for the next ones\.$/);
       assert.equal(first.chips?.length, 10);
       const more = text(await ask('more'));
@@ -944,14 +944,14 @@ describe('library: artists, trending and new', () => {
       assert.equal(more.chips?.length, 12, 'every number shown so far still works');
       assert.equal(more.chipsValidMs, 2 * 60 * 60_000);
       assert.match(text(await ask('more')).text, /^Text "trending", "new" or "search" and an artist first/);
-      assert.match(text(await ask('new')).text, /^🆕 New on music-table\.com\n1\. Band — Song (6|7|8|9|10|11|12) · Oct 6/);
+      assert.match(text(await ask('new')).text, /^🆕 New on music-table\.com\n1\. Song (6|7|8|9|10|11|12) — Band · Oct 6/);
     });
 
     test("an artist's name lists their songs, newest first, with dates", async () => {
       song('a', 'Shabbos', 'Yoely Weiss', 1, 10);
       song('b', 'Purim', 'Yoely Weiss', 4, 10);
       const list = text(await ask('search yoely weiss'));
-      assert.equal(list.text, '🎤 Yoely Weiss · 2 releases, newest first\n1. Purim · Oct 4\n2. Shabbos · Oct 1\n\nReply with a number to get it.');
+      assert.equal(list.text, '🎤 Yoely Weiss · 2 releases on music-table.com, newest first\n1. Purim · Oct 4\n2. Shabbos · Oct 1\n\nReply with a number to get it.');
       assert.deepEqual(list.chips?.map((chip) => chip.postback), [`play:${catalog.findArtist(['yoely', 'weiss'])!.id && catalog.search('purim')[0]!.id}`, `play:${catalog.search('shabbos')[0]!.id}`]);
     });
 
@@ -962,11 +962,11 @@ describe('library: artists, trending and new', () => {
       }
       song('single', 'Elul', 'Yaakov Shwekey', 4, 100);
       const list = text(await ask('trending'));
-      assert.match(list.text, /\n1\. TYH Nation — Bardichevers \(Full Album\) · album, 3 songs · Oct 5\n2\. Yaakov Shwekey — Elul · Oct 4/);
+      assert.match(list.text, /\n1\. 💿 Bardichevers \(Full Album\) — TYH Nation · 3 songs · Oct 5\n2\. Elul — Yaakov Shwekey · Oct 4/);
       assert.equal(list.chips?.[0]?.postback, 'post:tyh');
       const album = await bot().handle({ from: 'me', messageId: 'm', postback: 'post:tyh' });
       assert.equal(text(album).text, 'TYH Nation · 3 songs\n1. 01 Intro\n2. 02 Yiddishkeit\n3. 10 Finale\n\nReply with a number to get it.', 'track 10 after track 1, not before 2');
-      assert.match(text(await ask('search tyh nation')).text, /\n1\. Bardichevers \(Full Album\) · album, 3 songs · Oct 5$/m);
+      assert.match(text(await ask('search tyh nation')).text, /\n1\. 💿 Bardichevers \(Full Album\) · 3 songs · Oct 5$/m);
     });
 
     test('"all" on a list with an album sends the album\'s songs too, at most twenty, and says what it could not send', async () => {

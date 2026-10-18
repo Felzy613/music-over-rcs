@@ -1,4 +1,4 @@
-import { describe } from '../bot.ts';
+import { describe, shortCredit, songLine } from '../bot.ts';
 import { splitTitle } from '../sources/titles.ts';
 import type { SitePost } from '../catalog.ts';
 import type { Chip, Reply, Track } from '../types.ts';
@@ -53,14 +53,15 @@ export function buildDigest(items: DigestItem[], options: DigestOptions): Reply[
 
   const maxPictures = options.maxPictures ?? 9;
   const isAlbum = (item: DigestItem): boolean => item.post.audioFiles > 1;
+  // The same lines as a search's list: "Title — Artist · single", "💿 Album — Artist · 12 songs".
   const line = (item: DigestItem & { song: Track }): string => {
     if (isAlbum(item)) {
       const parts = splitTitle(item.post.title);
-      const name = parts.artist ? `${parts.artist} — ${parts.title}` : item.post.title;
-      return `${name} · album, ${item.post.audioFiles} songs`;
+      const name = parts.artist ? `${parts.title} — ${shortCredit(parts.artist)}` : item.post.title;
+      return `💿 ${name} · ${item.post.audioFiles} songs`;
     }
     const kind = vocal?.(item) ? ' · vocal' : item.post.category ? ` · ${categoryLabel(item.post.category)}` : '';
-    return `${describe(item.song)}${kind}`;
+    return `${songLine(item.song, true)}${kind}`;
   };
   // Picking an album lists its songs; picking a song sends it.
   const pick = (item: DigestItem & { song: Track }): string => (isAlbum(item) ? `post:${item.post.slug}` : `play:${item.song.id}`);

@@ -101,7 +101,7 @@ describe('holiday and category lists', () => {
     const ask = async (text: string) => joinLists(await bot.handle({ from: 'me', messageId: 'm', text }))[0];
     const list = await ask('hanukkah');
     assert.ok(list?.kind === 'text');
-    assert.match(list.text, /^🕎 Chanukah · most popular first\n1\. Yisroel Adler — Haneiros Hallolu · Dec 20, 2024\n2\. Leiby Moskowitz — Maoz Tzur 2\.0 · Dec 10, 2025/);
+    assert.match(list.text, /^🕎 Chanukah · most popular first\n1\. Haneiros Hallolu — Yisroel Adler · Dec 20, 2024\n2\. Maoz Tzur 2\.0 — Leiby Moskowitz · Dec 10, 2025/);
     await syncSite({ musicTable: new MusicTable({ baseUrl: site.url, minIntervalMs: 0 }), catalog, now: () => day(2026, 12, 5) });
     const trending = await ask('new');
     assert.ok(trending?.kind === 'text');
@@ -129,8 +129,8 @@ describe('holiday and category lists', () => {
     );
     assert.deepEqual(texts(replies).slice(0, 3), [
       'New music · Monday, May 24\n2 new songs on music-table.com\n🎤 It\'s Sefirah: text "vocal" for a cappella songs.',
-      'Band — A Cappella One · vocal',
-      'Band — Loud One · single',
+      'A Cappella One — Band · vocal',
+      'Loud One — Band · single',
     ]);
   });
 });

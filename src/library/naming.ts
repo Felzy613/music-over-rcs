@@ -1,5 +1,7 @@
 import { posix } from 'node:path';
+import { artistKey, splitArtists } from '../artists.ts';
 import type { DownloadedAudio } from '../audio-fetch.ts';
+import type { TrackAlbum } from '../catalog.ts';
 import { splitTitle } from '../sources/titles.ts';
 import type { SongTags } from './id3.ts';
 
@@ -14,6 +16,8 @@ export interface SongFacts {
   /** When it came out (ISO), and its cover's address. */
   releasedAt?: string | undefined;
   cover?: string | undefined;
+  /** The album a song found on Zemer is on (a music-table.com song's is its post). */
+  album?: TrackAlbum | undefined;
 }
 
 /** How a song's file is named and where it's sorted: Artist / Album / "01 Title". */
@@ -30,6 +34,8 @@ export interface SongName {
   digits: number;
   /** The song's own name, guests included for a single: "Derech (feat. Zusha)". */
   title: string;
+  /** The name without the guests added to it ("Derech"), for the tags, which list the guests as artists instead. */
+  ownTitle?: string | undefined;
   /** How many songs its album has; 1 for a single. */
   songs: number;
 }
@@ -106,12 +112,18 @@ function position(url: string): number | undefined {
  */
 export function nameSong(facts: SongFacts): SongName {
   const post = facts.post;
-  const onAlbum = !!post && post.songs > 1;
+  // A Zemer song is on an album when the album has several songs and its place on it is known.
+  const zemerAlbum = !post && facts.album && (facts.album.songs ?? 0) > 1 && facts.album.number ? facts.album : undefined;
+  const onAlbum = (!!post && post.songs > 1) || !!zemerAlbum;
   let credit = facts.artist.trim();
   let title = facts.title.trim();
   let album = SINGLES;
 
-  if (onAlbum) {
+  if (zemerAlbum) {
+    album = zemerAlbum.title;
+    // The album's artist names its folder; a guest on one of its songs is still in the song's credit.
+    if (zemerAlbum.artist) credit = zemerAlbum.artist;
+  } else if (onAlbum && post) {
     const fromPost = credit ? undefined : looseSplit(post.title);
     if (fromPost && !DATED.test(post.title)) credit = fromPost.artist;
     album = post.title ? albumName(post.title) : post.slug.replace(/-+/g, ' ');
@@ -124,8 +136,12 @@ export function nameSong(facts: SongFacts): SongName {
   const { main, guests } = splitGuests(credit);
   // "First_Dance_2" is "First Dance 2"; the upload's notes aren't part of the name.
   title = title.replace(/_+/g, ' ').replace(UPLOAD_NOTES, '').trim();
+  let ownTitle: string | undefined;
   let number: number | undefined;
-  if (onAlbum) {
+  if (zemerAlbum) {
+    // Zemer says the number; a title that starts with one ("3") is the title.
+    number = zemerAlbum.number;
+  } else if (onAlbum) {
     const numbered = NUMBERED.exec(title);
     if (numbered) {
       number = Number(numbered[1]);
@@ -136,6 +152,7 @@ export function nameSong(facts: SongFacts): SongName {
     // A file named only by its number takes the album's name.
     if (!title) title = album;
   } else if (guests && !HAS_GUESTS.test(title) && Array.from(`${title} (feat. ${guests})`).length <= MAX_NAME) {
+    ownTitle = title;
     title = `${title} (feat. ${guests})`;
   }
 
@@ -145,23 +162,36 @@ export function nameSong(facts: SongFacts): SongName {
     credited: !!main,
     album: cleanName(album) || SINGLES,
     number,
-    digits: post && post.songs >= 100 ? 3 : 2,
-    songs: onAlbum ? post.songs : 1,
+    digits: (post?.songs ?? zemerAlbum?.songs ?? 0) >= 100 ? 3 : 2,
+    songs: zemerAlbum?.songs ?? (onAlbum && post ? post.songs : 1),
     title: cleanName(title) || cleanName(album) || 'Untitled',
+    ...(ownTitle && cleanName(ownTitle) ? { ownTitle: cleanName(ownTitle) } : {}),
   };
 }
 
+/** Between the artists in a song's artist tag: what music apps (Musicolet among them) split several artists on. */
+export const ARTIST_SEPARATOR = '; ';
+
 /**
- * The tags inside the file, matching its folders, the way music apps expect them: the main artist as artist and album
- * artist, the album with the song's number on it ("3/12"), and a single as its own album, "Derech (feat. Zusha) - Single".
+ * The tags inside the file, matching its folders, the way music apps expect them: every artist on the song as its
+ * artists ("Ishay Ribo; Zusha", so the song is under each of them), the main one as the album artist (so an album stays
+ * one album), the album with the song's number on it ("3/12"), and a single as its own album, "Derech - Single".
  */
-export function songTags(name: SongName, facts?: Pick<SongFacts, 'releasedAt' | 'cover'>): SongTags {
-  const year = /^(\d{4})-/.exec(facts?.releasedAt ?? '')?.[1];
+export function songTags(name: SongName, facts?: Partial<Pick<SongFacts, 'releasedAt' | 'cover' | 'artist' | 'album'>>): SongTags {
+  const year = facts?.album?.year ? String(facts.album.year) : /^(\d{4})-/.exec(facts?.releasedAt ?? '')?.[1];
+  // Everyone the song credits, in order (on someone else's album, that's the song's singer, not the album's), and the
+  // guests its title names ("Kumzitz (feat. Beri Weber & Yoely Weiss)"), each once; then the title without them.
+  const own = name.ownTitle ?? name.title;
+  const inTitle = splitGuests(own);
+  const credited = splitArtists(facts?.artist ?? '');
+  const everyone = [...(credited.length > 0 ? credited : [name.artist]), ...(inTitle.guests ? splitArtists(inTitle.guests) : [])];
+  const artists = [...new Map(everyone.map((artist) => [artistKey(artist), artist])).values()];
+  const title = artists.length > 1 ? (inTitle.guests ? inTitle.main : own) : name.title;
   return {
-    title: name.title,
-    artist: name.artist,
+    title,
+    artist: artists.join(ARTIST_SEPARATOR),
     albumArtist: name.artist,
-    album: name.number !== undefined ? name.album : `${name.title} - Single`,
+    album: name.number !== undefined ? name.album : `${title} - Single`,
     track: name.number !== undefined ? `${name.number}/${Math.max(name.songs, name.number)}` : '1/1',
     ...(year ? { year } : {}),
     ...(facts?.cover ? { cover: facts.cover } : {}),

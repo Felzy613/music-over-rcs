@@ -2,7 +2,7 @@
 
 Text "search" and a song name in Google Messages and get the audio file back, with its album art.
 
-A personal bot that lives in your own "message yourself" chat. You text it a song or an artist; it finds the music in its catalog, on YouTube Music (through the same app API as the [Zemer](https://github.com/ZemerTeam/zemer-app) app, and only artists on Zemer's list, with no female singers) or on [music-table.com](https://www.music-table.com) (a Jewish music blog that offers MP3 downloads on its release posts) and sends the file back over RCS. Every morning it can also send you what's new.
+A personal bot that lives in your own "message yourself" chat. You text it a song, an album or an artist; it looks first in [Zemer](https://github.com/ZemerTeam/zemer-app)'s catalog (the albums and singles of the artists on Zemer's list, with no female singers; the audio comes from YouTube Music), and only when Zemer doesn't have it on [music-table.com](https://www.music-table.com) (a Jewish music blog that offers MP3 downloads of new singles on its release posts), and sends the file back over RCS. Every morning it can also send you what's new.
 
 ```text
 you:  search yoely weiss shabbos
@@ -16,15 +16,17 @@ Every message starts with a command, so a song's name is never taken for one.
 
 | Text | What you get |
 | --- | --- |
-| `search` and a song, like `search yoely weiss shabbos` | The song: its cover with its name drawn on, then the audio file. Typos and missing apostrophes are fine (`search yoely wiess shabos`, `search lipa vnusni` for "V’Nusni"). |
-| `search` and an artist, like `search shwekey` or `search avraham fried` | Their releases, newest first, ten at a time (an album is one entry) |
-| `youtube` and a song, like `youtube lipa vnusni` (also `yt`) | The same, but on YouTube Music alone: no falling back to music-table.com, and YouTube Music's own ranking (`search` only takes songs that have all your words) |
-| `album` and a name, like `album yu di kenst` or `album michoel schnitzler` (a plain `search` also says when your words match an album) | The album: one match is sent at once, several are listed to pick from with 👍. You get **all of it as one zip** (`01 Title.m4a`, `02 …`), with the cover first. |
+| `search` and a song, like `search yoely weiss shabbos` | The song: its cover, then the audio file. Typos and missing apostrophes are fine (`search yoely wiess shabos`), and Hebrew and Yiddish titles are found by how you'd spell them in English (`search vnusni` for "ונתנו", `search elazar lipa'le` for "אלעזר ליפא׳לע"). |
+| `search` and an artist, like `search lipa` or `search yoely weiss` | Their page: their five most played songs and their five newest albums, `more` for the next ones |
+| `search` and anything else, like `search shabbos` | The songs (🎵) and albums (💿) that have all your words, one message each to 👍 |
+| `album` and a name, like `album a poshiter yid` | That album, **all of it as one zip** (`01 Title.m4a`, `02 …`), with the cover first. Several that fit are listed to pick from. |
+| `album` and an artist, like `album lipa` | All their albums, newest first, eight at a time |
+| `zemer` and a song, like `zemer lipa vnusni` | The same as `search`, on Zemer alone: no falling back to music-table.com (`youtube` and `yt` still work too) |
 | `trending` | What's popular on music-table.com right now |
 | `new` | The newest releases |
 | `chanukah`, `purim`, `wedding` or `vocal` | That list, most popular first |
 | `more` | The next ten of the last list |
-| 👍 on a song in a list or the daily message | That song. Lists have no numbers; 👍 several and their audio files come 5 seconds apart, so the phone keeps up. |
+| 👍 on a song (🎵) or an album (💿) in a list or the daily message | That song, or that album as a zip. Lists have no numbers; 👍 several and their audio files come 5 seconds apart, so the phone keeps up. |
 | `all` | Every song on the last list (up to 20), with 5 seconds between audio files |
 | `follow shwekey` | New songs by that artist as soon as they're out (`following` lists them, `unfollow shwekey` stops) |
 | `help` | A reminder of all this |
@@ -37,16 +39,17 @@ Each morning (09:00 unless you change it) it sends a **daily new-music message**
 
 ## What it does behind the scenes
 
-- **Knows the whole site.** On its first run it reads all of music-table.com (about 3,600 posts: 5,000+ songs by 1,000+ artists) into a local catalog, in the background, and then keeps it current every three hours. Most requests are answered from the catalog without searching the site.
+- **Zemer first, music-table.com behind it.** Zemer's catalog has whole albums as well as singles, so a search asks it first and takes what it finds there whenever it has the song; music-table.com, which mostly has new singles, answers only what Zemer doesn't have. Everything from Zemer is checked against Zemer's artist list again, on the bot's side, when it is found and again when it is sent.
+- **Knows the whole site.** On its first run it reads all of music-table.com (about 3,600 posts: 5,000+ songs by 1,000+ artists) into a local catalog, in the background, and then keeps it current every three hours, for its lists and the daily message.
 - **Saves what it sends.** With a OneDrive app set up ([How it runs](docs/cloud.md), step 5), every song it sends is also uploaded in the background to your OneDrive, sorted like a music library, `Artist/Album/01 Title.mp3` (a single goes in `Artist/Singles/`), with tags to match (artist, album, track number, title, cover); the file you get is named `Artist - Title.mp3`. The host has no disk to keep songs on, so without OneDrive nothing is saved. (A copy run on a computer with a disk can instead keep popular songs ready ahead of time and move them to an external drive: see [The library](docs/library.md).)
-- **Forgiving search.** Apostrophes are optional ("vnusni" finds "V’Nusni"), a longer word may be a letter or two off, and part of the artist's name is enough. When a request doesn't match exactly, it tries the request with each word left out and learns how the site spells your words from the titles around them.
+- **Forgiving search.** Apostrophes are optional ("vnusni" finds "V’Nusni"), a longer word may be a letter or two off, part of the artist's name is enough, and a word typed in English letters matches a Hebrew or Yiddish title it can be read as. When a request doesn't match exactly on music-table.com, it tries the request with each word left out and learns how the site spells your words from the titles around them.
 - **Polite to the site.** It identifies itself, paces its requests, and remembers what it learned so it doesn't ask twice.
 - **Tells you when something breaks.** The chat can't carry news of its own breakdown, so an email says when Google Messages is logged out of the bridge, your phone can't be reached, RCS is off, or the bridge, the homeserver or the site stops answering, or the host itself stops, and again when it's fixed.
 
 ## How it reaches your phone
 
 ```text
-your phone ── Google Messages (RCS) ── mautrix-gmessages bridge ── Matrix (Synapse) ── this bot ── catalog / YouTube Music / music-table.com
+your phone ── Google Messages (RCS) ── mautrix-gmessages bridge ── Matrix (Synapse) ── this bot ── Zemer (audio from YouTube Music) / catalog / music-table.com
                                          └─────── one Docker container on Render's free plan, backed up to Cloudflare R2 ───────┘
                                            a Cloudflare Worker keeps it awake, watches it and emails problems
 ```
@@ -74,7 +77,7 @@ There are three ways to run it:
 | --- | --- |
 | [Using the bot](docs/using-the-bot.md) | Everything you can text, what the answers look like, the daily message, 👍, following artists, holiday lists |
 | [The library](docs/library.md) | The catalog, the site sync and full scan, songs kept ready, the daily message, alerts, `npm run library` |
-| [YouTube Music](docs/youtube-music.md) | What it asks YouTube Music for, Zemer's artist list and how it stays current, what you get, the order of the sources, and what breaks it |
+| [Zemer and YouTube Music](docs/youtube-music.md) | Zemer's catalog and how a search reads it, Zemer's artist list and how it stays current, where the audio comes from, the order of the sources, and what breaks it |
 | [music-table.com](docs/music-table.md) | How the site is used, how matching and spelling fixes work, how it behaves toward the site |
 | [The simulator](docs/simulator.md) | Trying the bot in a browser or a terminal |
 | [Configuration](docs/configuration.md) | Every setting in `.env` |
@@ -87,7 +90,7 @@ There are three ways to run it:
 ## Good to know
 
 - **It's for personal use.** The songs are the files music-table.com offers for download and the audio YouTube Music streams to its app. Whether you may keep or share them is between you and the rights holders; this project only fetches what you ask for, into your own chat. YouTube's terms don't allow fetching its streams outside its own apps. The YouTube videos in music-table.com's posts are still ignored; YouTube Music is a separate source.
-- **Three unofficial pieces.** The bridge reverse-engineers Google Messages for web, the site lookups use music-table.com's own page API, and the YouTube Music lookups use its app API. A change on any side can break things; the rest keeps working.
+- **Four unofficial pieces.** The bridge reverse-engineers Google Messages for web, the site lookups use music-table.com's own page API, the searches use the service the Zemer app searches with (search.zemer.io), and the audio comes from YouTube Music's app API. A change on any side can break things; the rest keeps working.
 - **Your phone must be on and online.** The bridge works through your phone's Google Messages. The bot itself runs on Render and doesn't need your computer; on the free plan it can be slow after a restart (about a minute and a half).
 
 ## License

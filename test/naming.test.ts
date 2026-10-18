@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { Catalog } from '../src/catalog.ts';
-import { catalogNaming, cleanName, namedFetch, nameSong, sentFileName, songPath, splitGuests, type SongFacts } from '../src/library/naming.ts';
+import { catalogNaming, cleanName, namedFetch, nameSong, sentFileName, songPath, songTags, splitGuests, type SongFacts } from '../src/library/naming.ts';
 
 const site = 'https://www.music-table.com/post/';
 const single = (artist: string, title: string, category = ''): SongFacts => ({
@@ -94,6 +94,61 @@ describe('naming: from the catalog', () => {
 
       const fetchNamed = namedFetch(async () => ({ data: new Blob(['x']), fileName: 'Mordechai Shapiro — Chaneinu.mp3', mimeType: 'audio/mpeg', bytes: 1 }), naming.fileNameOf);
       assert.equal((await fetchNamed(`${site}two#0`, 'Mordechai Shapiro — Chaneinu')).fileName, 'Mordechai Shapiro - 01 Chaneinu.mp3', 'the file that is sent');
+    } finally {
+      catalog.close();
+    }
+  });
+});
+
+describe('naming: songs found on Zemer, and the tags', () => {
+  const zemer = (title: string, artist: string, album?: SongFacts['album']): SongFacts => ({ title, artist, url: 'https://music.youtube.com/watch?v=aaaaaaaaaaa', ...(album ? { album } : {}) });
+  const tagsOf = (facts: SongFacts) => songTags(nameSong(facts), facts);
+
+  test('a song on an album goes in its album’s folder by its number on it, with the album’s artist, number, count and year in its tags', () => {
+    const facts = zemer('3', 'Cheskie Weisz', { id: 'MPREb_x', title: 'אז ישיר משה', artist: 'Cheskie Weisz', number: 4, songs: 11, year: 2023 });
+    assert.equal(place(facts), 'Cheskie Weisz/אז ישיר משה/04 3.mp3', 'a title that is a number is the title, not the song’s number');
+    assert.deepEqual(tagsOf(facts), { title: '3', artist: 'Cheskie Weisz', albumArtist: 'Cheskie Weisz', album: 'אז ישיר משה', track: '4/11', year: '2023' });
+  });
+
+  test('a guest on someone else’s album is the song’s artist, and the album stays its artist’s', () => {
+    const tags = tagsOf(zemer('With A Guest', 'Yoely Weiss', { title: 'A Poshiter Yid', artist: 'Lipa Schmeltzer', number: 3, songs: 14 }));
+    assert.deepEqual([tags.artist, tags.albumArtist, tags.album, tags.track], ['Yoely Weiss', 'Lipa Schmeltzer', 'A Poshiter Yid', '3/14']);
+  });
+
+  test('every artist on a song is in its artist tag, "A; B", so a music app lists it under each; the album artist is its folder’s', () => {
+    const duet = tagsOf(zemer('הנחת תפילין', 'Lipa Schmeltzer, Shmueli Ungar & Michoel Schnitzler'));
+    assert.deepEqual(
+      [duet.artist, duet.albumArtist],
+      ['Lipa Schmeltzer; Shmueli Ungar; Michoel Schnitzler', 'Lipa Schmeltzer, Shmueli Ungar & Michoel Schnitzler'],
+      'a duet keeps its one folder and album artist, as before',
+    );
+    const guest = tagsOf(single('Ishay Ribo ft. Zusha', 'Derech'));
+    assert.deepEqual([guest.title, guest.artist, guest.album], ['Derech', 'Ishay Ribo; Zusha', 'Derech - Single'], 'the guest is an artist, not added to the title');
+    const named = tagsOf(zemer('הנחת תפילין (feat. אהרלה שארף, שוכי גולדשטיין & Mendy Weiss)', 'יואלי דוידוביץ'));
+    assert.deepEqual([named.title, named.artist], ['הנחת תפילין', 'יואלי דוידוביץ; אהרלה שארף; שוכי גולדשטיין; Mendy Weiss'], 'guests the title names are artists too');
+    assert.deepEqual(
+      [tagsOf(single('Band Ft. Guest', 'Song (Ft. Guest)')).title, tagsOf(single('Band Ft. Guest', 'Song (Ft. Guest)')).artist],
+      ['Song', 'Band; Guest'],
+      'a guest in both the credit and the title, once',
+    );
+    assert.equal(tagsOf(onAlbum('Ishay Ribo - Sheyibane', 'Ishay Ribo ft. Zusha', '01 Derech', 0)).title, 'Derech', 'an album song’s number stays out of its title');
+  });
+
+  test('a single, or a song whose place on its album isn’t known yet, is its own album', () => {
+    assert.equal(tagsOf(zemer('ונתנו', 'Lipa Schmeltzer', { title: 'ונתנו', number: 1, songs: 1, year: 2026 })).album, 'ונתנו - Single');
+    assert.equal(place(zemer('Kevodo', 'Lipa Schmeltzer', { title: 'Leap Of Faith', songs: 12 })), 'Lipa Schmeltzer/Singles/Kevodo.mp3');
+  });
+
+  test('the catalog keeps a song’s album: a later search that knows less doesn’t forget its number', () => {
+    const catalog = new Catalog(':memory:');
+    try {
+      const url = 'https://music.youtube.com/watch?v=lipakevodo0';
+      catalog.add({ title: 'Kevodo', artist: 'Lipa Schmeltzer', url, album: { id: 'MPREb_leap', title: 'Leap Of Faith', artist: 'Lipa Schmeltzer', number: 3, songs: 12, year: 2012 } });
+      catalog.add({ title: 'Kevodo', artist: 'Lipa Schmeltzer', url, album: { id: 'MPREb_leap', title: 'Leap Of Faith' } });
+      assert.deepEqual(catalog.albumOf(url), { id: 'MPREb_leap', title: 'Leap Of Faith', artist: 'Lipa Schmeltzer', number: 3, songs: 12, year: 2012 });
+      catalog.add({ title: 'Kevodo', artist: 'Lipa Schmeltzer', url });
+      assert.equal(catalog.albumOf(url)?.number, 3, 'kept when not given');
+      assert.equal(catalogNaming(catalog).placeOf(url, { fileName: 'x.m4a', mimeType: 'audio/mp4' }), 'Lipa Schmeltzer/Leap Of Faith/03 Kevodo.m4a');
     } finally {
       catalog.close();
     }

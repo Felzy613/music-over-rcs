@@ -489,7 +489,7 @@ describe('looking things up on the site from the bot', () => {
     site.looseSearch = true;
     const { ask } = setup();
     assert.deepEqual(await ask('zzzz shabbos'), [
-      { kind: 'text', text: 'No match for "zzzz shabbos" (I looked on music-table.com too). Try the artist and title, or fewer words.' },
+      { kind: 'text', text: 'No match for "zzzz shabbos" on music-table.com. Try the artist and title, or fewer words.' },
     ]);
   });
 
@@ -515,10 +515,9 @@ describe('looking things up on the site from the bot', () => {
     const replies = await ask('weiss');
     assert.deepEqual(
       replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : [])),
-      ['Song: Shabbos', "Song: Purim '26 & More", 'Song: One', 'Song: Two'],
+      ['Shabbos — Yoely Weiss', "Purim '26 & More — Yoely Weiss", 'One — Mendy Weiss', 'Two — Mendy Weiss'],
+      'songs by two artists: one list, each with its artist',
     );
-    const headings = replies.flatMap((reply) => (reply.kind === 'text' && !reply.postback ? [reply.text] : []));
-    assert.ok(headings.some((text) => /Yoely Weiss:/.test(text)) && headings.some((text) => /Mendy Weiss:/.test(text)), JSON.stringify(headings));
     const asked = textOf(replies.at(-1));
     assert.deepEqual(asked.chips?.map((chip) => chip.postback), ['play:1', 'play:2', 'play:3', 'play:4']);
     assert.deepEqual(await tap('play:4'), [
@@ -530,10 +529,10 @@ describe('looking things up on the site from the bot', () => {
   test('a site problem is reported in plain words, and "no match" says the site was tried', async () => {
     const { ask } = setup();
     site.failSearch = true;
-    assert.deepEqual(await ask('yoely'), [{ kind: 'text', text: "I couldn't search music-table.com: music-table.com's search answered HTTP 500." }]);
+    assert.deepEqual(await ask('yoely'), [{ kind: 'text', text: "I couldn't search music-table.com right now: music-table.com's search answered HTTP 500." }]);
     site.failSearch = false;
     assert.deepEqual(await ask('zzzz'), [
-      { kind: 'text', text: 'No match for "zzzz" (I looked on music-table.com too). Try the artist and title, or fewer words.' },
+      { kind: 'text', text: 'No match for "zzzz" on music-table.com. Try the artist and title, or fewer words.' },
     ]);
   });
 

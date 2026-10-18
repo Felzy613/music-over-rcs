@@ -16,9 +16,10 @@ import { memoryCheck } from './cloud/memory.ts';
 import { youTubeRelayFromEnv } from './cloud/youtube-relay.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
-import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
-import { arrangeSources, songSourceOrder } from './sources/songs.ts';
-import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
+import { songSources } from './sources/songs.ts';
+import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
+import { zemerSearchFromEnv } from './sources/zemer.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat, through the mautrix-gmessages bridge and a Matrix room.
@@ -38,13 +39,16 @@ try {
   await matrix.joinRoom(config.roomID);
 
   // This machine downloads the file, so private addresses (a NAS, say) are fine and any audio format will do.
-  // A search asks YouTube Music first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
-  // SONG_SOURCES sets which is asked first).
+  // A search asks Zemer's catalog first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
+  // SONG_SOURCES sets which is asked first). Zemer's songs are YouTube Music's, so their audio comes from there.
   const musicTable = musicTableFromEnv();
   // YouTube turns the cloud host away at its player, so there songs come through the Cloudflare Worker (YOUTUBE_RELAY=r2).
   const youTube = youTubeMusicFromEnv(process.env, { log, relay: youTubeRelayFromEnv(process.env, { log }) });
   // Whether songs can be had (from this host, or through the relay), learned and logged at start.
   void youTube?.checkStreams();
+  const zemer = youTube && zemerSearchFromEnv(process.env, { log });
+  // Whether Zemer's search answers this host, logged at start (without it, searches use YouTube Music's own search).
+  void zemer?.check();
   const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
   const audio = resolvingYouTubeAudio(
     youTube,
@@ -107,12 +111,7 @@ try {
   const assistant = extensions.find((extension) => extension.assistant)?.assistant;
   const pictureTakers = extensions.filter((extension) => extension.onPicture);
   const prepareImage = extensions.reduce((prepare, extension) => extension.pictures?.(prepare) ?? prepare, library.prepareImage);
-  const youTubeSongs = youTube && whitelist ? createYouTubeMusicSource({ youTube, catalog, whitelist }) : undefined;
-  const youTubeAlbums = youTube && whitelist ? createYouTubeAlbumSource({ youTube, catalog, whitelist }) : undefined;
-  const { first, source } = arrangeSources(songSourceOrder(), {
-    'youtube-music': youTubeSongs,
-    'music-table': musicTable && createMusicTableSource({ musicTable, catalog }),
-  });
+  const sources = songSources({ catalog, musicTable, youTube, whitelist, zemer });
   // A YouTube Music song is checked against the list as it stands when it is sent, not only when it was found.
   const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
   const bot = createBot({
@@ -122,10 +121,7 @@ try {
     browse: library.browse,
     follows: library.follows,
     ...(assistant ? { assistant } : {}),
-    ...(first ? { first } : {}),
-    ...(source ? { source } : {}),
-    ...(youTubeSongs ? { youtube: youTubeSongs } : {}),
-    ...(youTubeAlbums ? { albums: youTubeAlbums } : {}),
+    ...sources,
   });
   const bridge = new BridgeWatch({
     health,
@@ -191,7 +187,7 @@ try {
     log,
   });
   log(
-    `signed in as ${userId}, watching room ${config.roomID}, ${catalog.count()} tracks in ${config.dbPath}, YouTube Music ${youTube ? 'on' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}${extensions.map((extension) => `, ${extension.summary ?? extension.name}`).join('')}. Text "search" and a song name in that chat.`,
+    `signed in as ${userId}, watching room ${config.roomID}, ${catalog.count()} tracks in ${config.dbPath}, Zemer ${zemer ? 'on' : youTube ? 'off (YouTube Music search instead)' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}${extensions.map((extension) => `, ${extension.summary ?? extension.name}`).join('')}. Text "search" and a song name in that chat.`,
   );
 
   const shutdown = async () => {

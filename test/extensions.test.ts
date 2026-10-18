@@ -125,6 +125,13 @@ describe('the runner and relayed replies', () => {
   test("a 🤖 text isn't marked again, and the bot never answers one (the phone's echo of a relayed reply)", async () => {
     assert.equal(markBotText('🤖 9:30 tomorrow.'), '🤖 9:30 tomorrow.');
     assert.equal(markBotText('Sent to Jarvis'), '🎵 Sent to Jarvis');
+    // Hebrew first would make a phone turn the message round, and a Hebrew title would pull what follows it into it: a
+    // left-to-right mark after the bot's own, and after each stretch of Hebrew, keeps it the right way round.
+    assert.equal(markBotText('שבת — Yoely Weiss'), '🎵 \u200eשבת\u200e — Yoely Weiss');
+    assert.equal(markBotText('💿 אלעזר ליפא׳לע · 2025 · 15 songs'), '💿 \u200eאלעזר ליפא׳לע\u200e · 2025 · 15 songs');
+    assert.equal(markBotText('💿 Leap Of Faith · 2012'), '💿 Leap Of Faith · 2012');
+    assert.equal(markBotText('Abaye Ve\'rava - אביי ורבא'), '🎵 Abaye Ve\'rava - אביי ורבא', 'Hebrew at the end needs nothing');
+    assert.equal(markBotText(markBotText('שבת — Yoely Weiss')), markBotText('שבת — Yoely Weiss'), 'marked once');
     const incoming: ChatMessage[] = [];
     const sentTexts: string[] = [];
     const chat: ChatClient = {

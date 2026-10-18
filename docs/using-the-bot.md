@@ -1,8 +1,8 @@
 # Using the bot
 
-Everything happens in your chat with your own number in Google Messages. Every text the bot writes starts with 🎵, and because it writes as you, its messages look like ones you sent yourself.
+Everything happens in your chat with your own number in Google Messages. Every text the bot writes starts with 🎵 (or 💿 for an album, 🎤 for an artist's name over a list), and because it writes as you, its messages look like ones you sent yourself.
 
-**Every message starts with a command**: `search`, `trending`, `new`, `more`, `all`, a holiday list, `follow`, `unfollow`, `following` or `help`. To pick a song from a list, tap 👍 on it: lists have no numbers. Anything else isn't searched for: the bot answers with the line to send instead (`search lipa vnusni`), so a song's name is never taken for a command, or the other way round.
+**Every message starts with a command**: `search`, `album`, `zemer`, `trending`, `new`, `more`, `all`, a holiday list, `follow`, `unfollow`, `following` or `help`. To pick a song from a list, tap 👍 on it: lists have no numbers. Anything else isn't searched for: the bot answers with the line to send instead (`search lipa vnusni`), so a song's name is never taken for a command, or the other way round.
 
 ## Asking for a song
 
@@ -14,79 +14,97 @@ search yoely weiss shabbos
 
 You get two messages:
 
-1. the song's **card**: its cover, with the title and artist drawn underneath
-2. the MP3 itself, which plays in the chat
+1. the song's **card**: its cover (with the title and artist under it)
+2. the audio file itself, which plays in the chat
 
 (The bridge can't put a caption on a picture, so the name is drawn on it. If a picture can't be made, you get the plain cover and the name as a line of text; a song without a cover comes with its name as text.)
 
 - **Apostrophes are optional.** `search lipa vnusni` finds "V’Nusni", `search uvtuvcha` finds "U’v’tuvcha HaGadol", and `search v'nusni` works too.
 - **Typos are fine.** `search yoely wiess shabos`, `search lipa shmeltzer vnusni` (the site writes "Schmeltzer"), `search avrohom fried` ("Avraham"), `search shlomo daskal` ("Shloime") and `search mordechai ben dovid` all work. The bot learns the site's spelling from the titles around your other words.
 - **Extra words are fine.** `... by Yoely Weiss` is understood, and in a longer request one stray word (an `mp3` at the end, say) is forgiven.
-- **Where songs come from.** `search` asks **YouTube Music first**. If it has a song that fits every word you typed (and its artist is on Zemer's list), that is the answer. If not, the bot looks on music-table.com: your catalog first, then the site ([YouTube Music](youtube-music.md), `SONG_SOURCES`). A YouTube Music song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
-- **A song it already knows by name comes back at once** (when YouTube Music has nothing for it). The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
+- **Hebrew and Yiddish titles** are found by how you'd write them in English: `search vnusni` finds "ונתנו", `search elazar lipa'le` the album "אלעזר ליפא׳לע", `search shabbos` also "שבת".
+- **Where songs come from.** `search` asks **Zemer first**: its catalog has the albums and singles of every artist on Zemer's list. If it has something that fits every word you typed, that is the answer. If not, the bot looks on music-table.com: your catalog first, then the site ([Zemer and YouTube Music](youtube-music.md), `SONG_SOURCES`). A Zemer song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
+- **A song it already knows by name comes back at once** (when Zemer has nothing for it). The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
 - **A letter off in `search` itself is fine** (`serach`, `seach`).
-
-## YouTube Music, and albums
-
-`search` asks YouTube Music first and music-table.com second. To look on YouTube Music **only**, with no falling back and in YouTube Music's own order, start with `youtube` (or `yt`):
-
-```text
-youtube lipa vnusni
-```
-
-To get a whole album, start with `album`:
-
-```text
-album yu di kenst
-```
-
-An album that the words name outright is sent at once; otherwise you get the albums that fit, listed under their artist (`Album: Yu Di Kenst (2020)`, one message each), and a 👍 on one sends it (`all` doesn't send every album). You get its cover and one line (`11 songs, coming as a zip.`), then **one zip file** with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds about 100 MB (`MAX_DOWNLOAD_MB`); a bigger album arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
-
-**A `search` lists albums too.** Albums sit in the same list as songs, under their artist, as `Album: …` lines whose 👍 sends the whole album as a zip. `search lipa schmeltzer` lists his songs, then his albums. If you type an album's name and no song has it, the album is the answer (`search yu di kenst` lists `Album: Yu Di Kenst (2020)` rather than guessing at a song). If a song does have that name, the song comes, with an `Album: …` line under it. Albums follow the same rules as everything from YouTube Music: only artists on Zemer's list, no women.
-
-Everything from YouTube Music is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out of the zip ("1 left out").
 
 ## Lists
 
-When several songs (or albums) fit, you get a plain list: each artist's name, then one short message per song or album under it, so you can tap 👍 on the one you want. A song with more than one artist sits under the first and says who else is on it:
+When several songs or albums fit, you get a list, one short message each, so you can tap 👍 on the one you want: a song is its title, an album starts with 💿 and gives its year and how many songs it has. When everything on the list is by one artist, their name comes first, once:
 
 ```text
-🎵 Lipa Schmeltzer:
-🎵 Song: Chatzoitzrois
-🎵 Song: Tzitzis (with Shimmy Schmeltzer)
-🎵 Album: A Poshiter Yid (2008)
-🎵 Michoel Schnitzler:
-🎵 Song: Baalei Teshuva
+🎤 Lipa Schmeltzer
+💿 אלעזר ליפא׳לע · 2025 · 15 songs
+💿 אלעזר ליפא׳לע (Yinglish Version) · 2025 · 15 songs
+💿 אלעזר ליפא׳לע - גרסה עברית · 2025 · 15 songs
+```
+
+Otherwise each line says whose it is:
+
+```text
+🎵 Shabbos — Shua Rose
+🎵 Shabbos — Shlomo Katz
+🎵 Shabbos — Suki & Ding
+💿 Shabbos Tish — Belz · 2000 · 14 songs
+💿 Shabbos Classics — Efraim Mendelson · 2018 · 13 songs
 ```
 
 Then any of:
 
 | Reply | What happens |
 | --- | --- |
-| 👍 on an option | That song. The list stays open, so you can 👍 another next. |
-| `all` (or `send all`, `everything`) | Every song on the list, with 5 seconds between files: files only, no cards, up to 20 |
-| `more` | The next ten, when there are more |
+| 👍 on a song (🎵) | That song. The list stays open, so you can 👍 another next. |
+| 👍 on an album (💿) | The whole album, as a zip (below) |
+| `all` (or `send all`, `everything`) | Every song on the list, with 5 seconds between files: files only, no cards, up to 20 (not the albums) |
+| `more` | The next ones, when there are more |
 | `search` and a new name | A new search; the old list closes |
 
-A number picks nothing; with a list open it gets "To get a song from the list, tap 👍 on it." A search's list stays open (for `all`, which sends its songs, not its albums) for half an hour, the other lists for two hours, and the daily message's for the day; a 👍 on a song works for a month. (On Beeper and RCS for Business, where a 👍 can't reach the bot, a list comes as one numbered message instead, and you reply with a number.)
+A number picks nothing; with a list open it gets "To get a song from the list, tap 👍 on it." A search's list stays open (for `all`) for half an hour, the other lists for two hours, and the daily message's for the day; a 👍 on a song works for a month. (On Beeper and RCS for Business, where a 👍 can't reach the bot, a list comes as one numbered message instead, and you reply with a number.)
 
 ## Artists
 
-Search for just an artist's name (`search shwekey`) to see their releases, newest first:
+Search for an artist's name, or part of it (`search lipa`, `search yoely weiss`), to get their page on Zemer: their five most played songs, then their five newest albums, and `more` for the next ones.
 
 ```text
-🎵 🎤 Yaakov Shwekey · 37 releases, newest first
-🎵 Elul · Aug 15
-🎵 Happiness (EP) · album, 4 songs · May 24
-🎵 From Galus To Geula · Sep 26, 2025
-…
-🎵 Tap 👍 on one to get it, or text "more" for the next ones.
+🎤 Lipa Schmeltzer
+24 albums · 25 singles · 412 songs
+🎵 Mizrach
+🎵 Hang Up The Phone
+🎵 Abaye Ve'rava - אביי ורבא
+🎵 Believe In A Miracle
+🎵 Shualim - שועלים
+💿 ליפא פאַר א גוּט יאָר - Lipa's Tekiyos · 2026 · 12 songs
+💿 אלעזר ליפא׳לע · 2025 · 15 songs
+💿 יום טוב ליפא · 2023 · 17 songs
+💿 The Event 5769 (Live) · 2023 · 26 songs
+💿 BavLipa - בבליפא · 2022 · 20 songs
+🎵 Text "more" for more of Lipa Schmeltzer.
 ```
 
-- Whole names work with typos (`search avrohom fried`), and the name an artist goes by works on its own: a last name (`search shwekey`) or a first name (`search lipa` for Lipa Schmeltzer).
-- Songs by several artists ("Mendy Weiss, Yoely Davidowitz & Yoely Samuel") count for each of them.
-- An album is one entry ("album, 4 songs"). Picking it lists its songs; `all` on a list with an album sends the album's songs too.
-- When a name fits several artists and none clearly has the most songs (`weiss`), it searches songs instead.
+- Typos are fine (`search lipa shmeltzer`).
+- An album shows once here, in its original edition; `album lipa` lists all of them, every edition, newest first, eight at a time.
+- An artist Zemer doesn't have gets their releases from music-table.com instead, newest first, ten at a time (an album there is one entry; picking it lists its songs).
+
+## Albums
+
+To get a whole album, start with `album`:
+
+```text
+album a poshiter yid
+```
+
+An album the words name is sent at once; otherwise you get the albums that fit (`album lipa` lists all of an artist's), and a 👍 on one sends it (`all` doesn't send every album). A `search` lists albums too, after the songs, and when a song comes whose album your words also name, a 💿 line for the album comes under it.
+
+You get its cover and one line (`11 songs, coming as a zip.`), then **one zip file** with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds about 100 MB (`MAX_DOWNLOAD_MB`); a bigger album arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
+
+Everything from Zemer is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out of the zip ("1 left out").
+
+## Zemer alone
+
+`search` asks Zemer first and music-table.com second. To look on Zemer **only**, with no falling back, start with `zemer` (`youtube` and `yt` work too):
+
+```text
+zemer lipa vnusni
+```
 
 ## Trending, new, more
 
@@ -98,9 +116,9 @@ Search for just an artist's name (`search shwekey`) to see their releases, newes
 
 ```text
 🎵 🔥 Trending on music-table.com
-🎵 Yehuda Langer Ft. Shmaya Fischer & Hershy Weinberger — 2GETHER · album, 12 songs · Sep 29
-🎵 TYH Nation — Little Bardichevers Upmix (Full Album) · album, 8 songs · Sep 30
-🎵 Miami Boys Choir — Atoh Kail · Sep 22
+💿 2GETHER — Yehuda Langer & 2 more · 12 songs · Sep 29
+💿 Little Bardichevers Upmix (Full Album) — TYH Nation · 8 songs · Sep 30
+🎵 Atoh Kail — Miami Boys Choir · Sep 22
 …
 ```
 
@@ -119,9 +137,9 @@ They're music-table.com's own categories, most popular first (by views), with th
 
 ```text
 🎵 🕎 Chanukah · most popular first
-🎵 Miami Boys Choir — Chanukah Nights! · Dec 7, 2025
-🎵 Meilech Braunstein — Miracles · Dec 24, 2024
-🎵 Mordechai Shapiro — Fire · Dec 14, 2025
+🎵 Chanukah Nights! — Miami Boys Choir · Dec 7, 2025
+🎵 Miracles — Meilech Braunstein · Dec 24, 2024
+🎵 Fire — Mordechai Shapiro · Dec 14, 2025
 …
 ```
 
@@ -160,10 +178,10 @@ At 09:00 each day (see `DIGEST_TIME` in [Configuration](configuration.md)) the b
 🎵 New music · Monday, Oct 5
 4 new songs on music-table.com
 [one picture: the four covers in a grid, each with its name]
-🎵 Oizer Oberlander — Ana Elech · single
-🎵 Yumi Lowy — Mi Adir · single
-🎵 Hershey Eisenbach — Makdim Shalom · music video
-🎵 Yoely Weiss — R' Chaim Zanvil Ben R' Moshe · single
+🎵 Ana Elech — Oizer Oberlander · single
+🎵 Mi Adir — Yumi Lowy · single
+🎵 Makdim Shalom — Hershey Eisenbach · music video
+🎵 R' Chaim Zanvil Ben R' Moshe — Yoely Weiss · single
 🎵 Tap 👍 on a song to get it, or "search" for anything else.
 ```
 

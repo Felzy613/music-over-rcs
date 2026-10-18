@@ -116,7 +116,7 @@ describe('bot', () => {
     assert.deepEqual((await ask('search blue horizon live'))[1], audio(byTitle('Blue Horizon (Live)')));
   });
 
-  test('an ambiguous request lists the options under the artist: "Song: …", one message each (a 👍 on it picks it), and the list as chips', async () => {
+  test('an ambiguous request lists the options under the artist\'s name, one message each (a 👍 on it picks it), and the list as chips', async () => {
     const { ask, byTitle } = setup();
     const replies = await ask('search night owls');
     const blue = `play:${byTitle('Blue Horizon').id}`;
@@ -124,9 +124,9 @@ describe('bot', () => {
     assert.deepEqual(
       replies.map((reply) => (reply.kind === 'text' ? [reply.text, reply.postback ?? ''] : [reply.kind, ''])),
       [
-        ['The Night Owls:', ''],
-        ['Song: Blue Horizon', blue],
-        ['Song: Blue Horizon (Live)', live],
+        ['🎤 The Night Owls', ''],
+        ['Blue Horizon', blue],
+        ['Blue Horizon (Live)', live],
         // No words: it only carries the list's chips, and the runner doesn't send it where a 👍 picks.
         ['', ''],
       ],
@@ -139,26 +139,36 @@ describe('bot', () => {
     // how to pick).
     assert.deepEqual(
       joinLists(replies).map((reply) => (reply.kind === 'text' ? reply.text : reply.kind)),
-      ['The Night Owls:\n1. Song: Blue Horizon\n2. Song: Blue Horizon (Live)'],
+      ['🎤 The Night Owls\n1. Blue Horizon\n2. Blue Horizon (Live)'],
     );
   });
 
-  test('songs by different artists are listed under each artist, and a song with several artists says who else is on it', async () => {
+  test('songs by different artists are one list, each line "Title — Artist", with no headings', async () => {
     const { catalog, ask } = setup();
     const duet = catalog.add({ title: 'Night Duet', artist: 'The Night Owls & Mira Vale', url: 'https://cdn.example.test/duet.mp3' });
     const solo = catalog.add({ title: 'Night Solo', artist: 'Mira Vale', url: 'https://cdn.example.test/solo.mp3' });
+    catalog.add({ title: 'Night Crowd', artist: 'Ann, Ben, Cal, Dov & Eli', url: 'https://cdn.example.test/crowd.mp3' });
     const replies = await ask('search night');
     const lines = replies.flatMap((reply) => (reply.kind === 'text' && reply.text ? [reply.text] : []));
-    assert.ok(lines.includes('Song: Night Duet (with Mira Vale)'), lines.join(' | '));
-    assert.ok(lines.indexOf('Mira Vale:') < lines.indexOf('Song: Night Solo'), 'a solo song sits under its own artist');
-    assert.ok(lines.indexOf('The Night Owls:') < lines.indexOf('Song: Night Duet (with Mira Vale)'), 'a duet sits under its first artist');
+    assert.ok(lines.includes('Night Duet — The Night Owls & Mira Vale'), lines.join(' | '));
+    assert.ok(lines.includes('Night Solo — Mira Vale'), lines.join(' | '));
+    assert.ok(lines.includes('Night Crowd — Ann & 4 more'), 'a long credit is cut short');
+    assert.ok(!lines.some((line) => line.startsWith('🎤')), 'no artist heading over a list of several artists');
     const chips = textOf(replies.at(-1)).chips ?? [];
     assert.deepEqual(chips.map((chip) => chip.postback).filter((postback) => [`play:${duet.id}`, `play:${solo.id}`].includes(postback)).length, 2);
-    // The numbers in a chat without 👍 follow the order on screen, across the artists.
+    // The numbers in a chat without 👍 follow the order on screen.
     const joined = textOf(joinLists(replies)[0]).text.split('\n');
     const numbered = joined.filter((line) => /^\d+\. /.test(line)).map((line) => Number(line.split('.')[0]));
     assert.deepEqual(numbered, numbered.map((_, i) => i + 1));
-    assert.ok(joined.includes('Mira Vale:') && joined.includes('The Night Owls:'), joined.join(' | '));
+    assert.equal(numbered.length, lines.length);
+  });
+
+  test('a track number in front of a title is left out of the list', async () => {
+    const { catalog, ask } = setup();
+    catalog.add({ title: '01 Mendy Hershkowitz Band', artist: 'Kalmen Band', url: 'https://cdn.example.test/k1.mp3' });
+    catalog.add({ title: '02 Yoel Hersh Fuchs', artist: 'Kalmen Band', url: 'https://cdn.example.test/k2.mp3' });
+    const lines = (await ask('search kalmen band')).flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : []));
+    assert.deepEqual(lines, ['Mendy Hershkowitz Band', 'Yoel Hersh Fuchs']);
   });
 
   test('chip labels are cut to 25 characters', async () => {
@@ -254,7 +264,7 @@ describe('bot', () => {
       assert.deepEqual(asked, ['yoely weiss']);
       assert.deepEqual(
         replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : [])),
-        ['Song: Purim', 'Song: Shabbos'],
+        ['Purim', 'Shabbos'],
         'its results first, no repeats',
       );
     });
@@ -263,8 +273,8 @@ describe('bot', () => {
       const { catalog, ask } = withSource(() => new SourceError('the site is down'));
       catalog.add({ title: 'Shabbos', artist: 'Yoely Weiss', url: 'https://cdn.example.test/s.mp3' });
       catalog.add({ title: 'Purim', artist: 'Yoely Weiss', url: 'https://cdn.example.test/p.mp3' });
-      assert.equal(textOf((await ask('search yoely weiss'))[0]).text, 'Yoely Weiss:');
-      assert.match(textOf((await ask('search nothing like it'))[0]).text, /I couldn't search music-table\.com: the site is down/);
+      assert.equal(textOf((await ask('search yoely weiss'))[0]).text, '🎤 Yoely Weiss');
+      assert.equal(textOf((await ask('search nothing like it'))[0]).text, "I couldn't search music-table.com right now: the site is down.");
     });
   });
 

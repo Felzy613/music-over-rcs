@@ -256,7 +256,7 @@ describe('runner over Matrix (the bridge case)', () => {
     await runner.prime();
     typedOnPhone('search night owls');
     await runner.tick();
-    assert.deepEqual(mock.sent.map((s) => s.content.body), ['🎵 The Night Owls:', '🎵 Song: Blue Horizon', '🎵 Song: Blue Horizon (Live)']);
+    assert.deepEqual(mock.sent.map((s) => s.content.body), ['🎤 The Night Owls', '🎵 Blue Horizon', '🎵 Blue Horizon (Live)']);
 
     mock.addReaction(mock.ghost, mock.sent[2]!.eventId!, '👍');
     await runner.tick();
