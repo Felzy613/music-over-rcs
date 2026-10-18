@@ -17,6 +17,8 @@ import {
   YouTubeMusicError,
   youTubeGate,
   youTubeMusicFromEnv,
+  type RelayedSong,
+  type SongRelay,
 } from '../src/sources/youtube-music.ts';
 import { ZemerWhitelist, ZemerWhitelistError, zemerWhitelistFromEnv } from '../src/sources/zemer-whitelist.ts';
 import type { Reply, Track } from '../src/types.ts';
@@ -616,12 +618,154 @@ describe('resolvingYouTubeAudio', () => {
   });
 });
 
+describe('songs through a relay (for a host YouTube turns away at its player)', () => {
+  let youtube: MockYouTubeMusic;
+  before(async () => {
+    youtube = await startMockYouTubeMusic(SONGS);
+  });
+  after(() => youtube.close());
+  beforeEach(() => {
+    youtube.reset();
+    // Asked from here, the player always meets the bot check, as it does on the cloud host.
+    youtube.firstAcceptedVisitor = 99;
+  });
+
+  /** A relay that answers with the mock's own audio for each song, or as `answer` says, and keeps what it was asked. */
+  const make = (answer?: (videoId: string) => Promise<RelayedSong>, options: { now?: () => number } = {}) => {
+    const asks: Array<{ videoId: string; maxBytes?: number }> = [];
+    const lines: string[] = [];
+    const relay: SongRelay = async (videoId, opts = {}) => {
+      asks.push({ videoId, ...opts });
+      if (answer) return answer(videoId);
+      const data = new Uint8Array(youtube.bytes(videoId));
+      return { data, type: 'audio/mp4', bytes: data.byteLength };
+    };
+    const youTube = new YouTubeMusic({ baseUrl: youtube.url, relay, log: (line) => lines.push(line), ...options });
+    return { asks, lines, youTube };
+  };
+
+  test('a song comes through the relay, and neither the player nor the media server is asked from here', async () => {
+    const { asks, lines, youTube } = make();
+    assert.equal(youTube.relayed, true);
+    const file = await youTube.download(youTube.trackUrl('aaaaaaaaaa1'), 'The Night Owls — Blue Horizon', { maxBytes: 5_000_000 });
+    assert.deepEqual(asks, [{ videoId: 'aaaaaaaaaa1', maxBytes: 5_000_000 }]);
+    assert.equal(file.fileName, 'The Night Owls — Blue Horizon.m4a');
+    assert.equal(file.mimeType, 'audio/mp4');
+    assert.equal(file.bytes, youtube.bytes('aaaaaaaaaa1').length);
+    assert.equal(file.data.type, 'audio/mp4');
+    assert.deepEqual(new Uint8Array(await file.data.arrayBuffer()), new Uint8Array(youtube.bytes('aaaaaaaaaa1')));
+    assert.deepEqual(youtube.playerCalls, []);
+    assert.deepEqual(youtube.mediaCalls, []);
+    assert.equal(youtube.visitorIds, 0);
+    assert.ok(lines.some((line) => /aaaaaaaaaa1 came through the relay \(\d+\.\d MB in [\d.]+ s\)/.test(line)), lines.join('\n'));
+  });
+
+  test('searches are still asked from here, since YouTube answers those', async () => {
+    const { asks, youTube } = make();
+    assert.ok((await youTube.search('blue horizon')).length > 0);
+    assert.equal(youtube.searches.length, 1);
+    assert.deepEqual(asks, []);
+  });
+
+  test('a relay that answers with a Blob is taken as it is, with the type cleaned up', async () => {
+    const audio = new Uint8Array(youtube.bytes('aaaaaaaaaa2'));
+    const { youTube } = make(async () => ({ data: new Blob([audio]), type: 'audio/mp4; codecs="mp4a.40.2"', bytes: audio.byteLength }));
+    const file = await youTube.download(youTube.trackUrl('aaaaaaaaaa2'), 'Live');
+    assert.equal(file.mimeType, 'audio/mp4');
+    assert.equal(file.data.type, 'audio/mp4');
+    assert.equal(file.fileName, 'Live.m4a');
+    assert.deepEqual(new Uint8Array(await file.data.arrayBuffer()), audio);
+  });
+
+  test('the check gives the type without asking anyone, so the size is known only when the song arrives', async () => {
+    const { asks, youTube } = make();
+    const io = {
+      checkAudio: async () => assert.fail('not a YouTube address'),
+      fetchAudio: async () => assert.fail('not a YouTube address'),
+    };
+    const wrapped = resolvingYouTubeAudio(youTube, io, { maxBytes: 10 });
+    assert.deepEqual(await wrapped.checkAudio(youTube.trackUrl('aaaaaaaaaa1')), { ok: true, type: 'audio/mp4' });
+    assert.deepEqual(asks, []);
+    assert.deepEqual(youtube.playerCalls, []);
+    // The limit is held when the song comes instead.
+    await assert.rejects(wrapped.fetchAudio(youTube.trackUrl('aaaaaaaaaa1')), (err) => err instanceof AudioFetchError && /limit/.test(err.message));
+    assert.deepEqual(asks, [{ videoId: 'aaaaaaaaaa1', maxBytes: 10 }], 'the relay is told the limit too');
+  });
+
+  test('what the relay sends is held to the same rules as a download: audio, and not empty', async () => {
+    const page = make(async () => ({ data: new TextEncoder().encode('<html>'), type: 'text/html', bytes: 6 }));
+    await assert.rejects(page.youTube.download(page.youTube.trackUrl('aaaaaaaaaa1')), (err) => err instanceof YouTubeMusicError && /isn't audio/.test(err.message));
+    assert.ok(page.lines.some((line) => /refused what the relay sent for aaaaaaaaaa1/.test(line)), page.lines.join('\n'));
+    const empty = make(async () => ({ data: new Uint8Array(), type: 'audio/mp4', bytes: 0 }));
+    await assert.rejects(empty.youTube.download(empty.youTube.trackUrl('aaaaaaaaaa1')), /the file is empty/);
+  });
+
+  test('the relay’s reason reaches the chat, and is logged', async () => {
+    const { lines, youTube } = make(async () => {
+      throw new Error('the relay gave no answer within 90 seconds');
+    });
+    const wrapped = resolvingYouTubeAudio(youTube, { checkAudio: async () => assert.fail(), fetchAudio: async () => assert.fail() });
+    await assert.rejects(wrapped.fetchAudio(youTube.trackUrl('aaaaaaaaaa1')), (err) => err instanceof AudioFetchError && err.message === 'the relay gave no answer within 90 seconds');
+    assert.equal(youTube.turnsThisHostAway, false, 'one failure is not YouTube turning songs aside');
+    assert.ok(lines.some((line) => line === "YouTube Music: the relay couldn't get aaaaaaaaaa1: the relay gave no answer within 90 seconds"), lines.join('\n'));
+  });
+
+  test('a bug or a bare network failure in the relay is logged, and the chat hears it plainly', async () => {
+    const { lines, youTube } = make(async () => {
+      throw new TypeError('fetch failed');
+    });
+    await assert.rejects(youTube.download(youTube.trackUrl('aaaaaaaaaa1')), (err) => err instanceof YouTubeMusicError && err.message === "the relay couldn't get that song");
+    assert.ok(lines.includes("YouTube Music: the relay couldn't get aaaaaaaaaa1: fetch failed"), lines.join('\n'));
+    // At start it is only logged: the check never stops the bot.
+    assert.deepEqual(await youTube.checkStreams(), { ok: false, problem: "the relay couldn't get that song" });
+  });
+
+  test('when YouTube turns the relay away too, YouTube songs are left aside for a while, as on a host it turns away', async () => {
+    let clock = 1_000_000;
+    let turnedAway = true;
+    const { asks, youTube } = make(
+      async (videoId) => {
+        if (turnedAway) throw Object.assign(new Error("Sign in to confirm you're not a bot"), { turnedAway: true });
+        const data = new Uint8Array(youtube.bytes(videoId));
+        return { data, type: 'audio/mp4', bytes: data.byteLength };
+      },
+      { now: () => clock },
+    );
+    await assert.rejects(youTube.download(youTube.trackUrl('aaaaaaaaaa1')), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
+    assert.equal(youTube.turnsThisHostAway, true);
+    await assert.rejects(youTube.download(youTube.trackUrl('aaaaaaaaaa2')), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
+    await assert.rejects(youTube.inspect(youTube.trackUrl('aaaaaaaaaa2')), (err) => err instanceof YouTubeMusicError && err.message === TURNED_AWAY);
+    assert.equal(asks.length, 1, 'the relay is not asked again meanwhile');
+
+    turnedAway = false;
+    clock += 16 * 60_000;
+    assert.equal((await youTube.download(youTube.trackUrl('aaaaaaaaaa1'))).bytes, youtube.bytes('aaaaaaaaaa1').length);
+  });
+
+  test('the start-up check asks the relay for its short video, and says in the log how it went', async () => {
+    const good = make(async () => ({ data: new Uint8Array([1, 2, 3]), type: 'audio/mp4', bytes: 3 }));
+    assert.deepEqual(await good.youTube.checkStreams(), { ok: true });
+    assert.deepEqual(good.asks, [{ videoId: 'jNQXAC9IVRw' }]);
+    assert.deepEqual(youtube.playerCalls, []);
+    assert.ok(good.lines.includes('YouTube Music: songs can be had through the relay'), good.lines.join('\n'));
+
+    const bad = make(async () => {
+      throw new Error('the relay gave no answer within 90 seconds');
+    });
+    assert.deepEqual(await bad.youTube.checkStreams(), { ok: false, problem: 'the relay gave no answer within 90 seconds' });
+    assert.ok(bad.lines.includes("YouTube Music: songs can't be had through the relay right now: the relay gave no answer within 90 seconds"), bad.lines.join('\n'));
+  });
+});
+
 describe('youTubeMusicFromEnv', () => {
   test('is on unless YOUTUBE_MUSIC says off, and can be pointed elsewhere', () => {
     for (const off of ['off', 'OFF', 'false', 'no', '0']) assert.equal(youTubeMusicFromEnv({ YOUTUBE_MUSIC: off }), undefined, off);
     assert.ok(youTubeMusicFromEnv({}) instanceof YouTubeMusic);
     assert.equal(youTubeMusicFromEnv({}) ?.baseUrl, 'https://music.youtube.com');
     assert.equal(youTubeMusicFromEnv({ YOUTUBE_MUSIC: 'on', YOUTUBE_MUSIC_URL: 'http://localhost:9/' })?.baseUrl, 'http://localhost:9');
+    assert.equal(youTubeMusicFromEnv({})?.relayed, false);
+    const relay: SongRelay = async () => ({ data: new Uint8Array([1]), type: 'audio/mp4', bytes: 1 });
+    assert.equal(youTubeMusicFromEnv({}, { relay })?.relayed, true);
   });
 });
 
@@ -741,6 +885,36 @@ describe('YouTube Music over Matrix, end to end', () => {
     assert.equal(sent?.filename, 'The Night Owls — Blue Horizon.m4a');
     assert.equal(sent?.info.mimetype, 'audio/mp4');
     assert.deepEqual(matrix.uploads[0]?.bytes, youtube.bytes('aaaaaaaaaa1'));
+  });
+  test('on a host YouTube turns away at its player, the song comes through the relay and arrives the same', async () => {
+    youtube.firstAcceptedVisitor = 99;
+    const catalog = new Catalog(':memory:');
+    const relay: SongRelay = async (videoId) => {
+      const data = new Uint8Array(youtube.bytes(videoId));
+      return { data, type: 'audio/mp4', bytes: data.byteLength };
+    };
+    const youTube = new YouTubeMusic({ baseUrl: youtube.url, relay });
+    const audio = resolvingYouTubeAudio(youTube, {
+      checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true }),
+      fetchAudio: (url, title) => fetchAudio(url, title),
+    });
+    const whitelist = new ZemerWhitelist({ baseUrl: zemer.url, state: catalog });
+    const bot = createBot({
+      catalog,
+      checkAudio: gatedAudioCheck(youTubeGate({ youTube, whitelist, catalog }), audio.checkAudio),
+      source: createYouTubeMusicSource({ youTube, catalog, whitelist }),
+    });
+    const chat = new MatrixClient({ token: matrix.token, homeserver: matrix.url });
+    const runner = createRunner({ chat, bot, chatID: matrix.roomId, fetchAudio: audio.fetchAudio, pollMs: 20, log: () => {} });
+    await runner.prime();
+    matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'search blue horizon night owls' });
+    await runner.tick();
+
+    assert.equal(matrix.sent.length, 2);
+    assert.equal(matrix.sent[1]?.content.msgtype, 'm.audio');
+    assert.equal(matrix.sent[1]?.content.filename, 'The Night Owls — Blue Horizon.m4a');
+    assert.deepEqual(matrix.uploads[0]?.bytes, youtube.bytes('aaaaaaaaaa1'));
+    assert.deepEqual(youtube.playerCalls, [], 'the player was never asked from this host');
   });
 });
 

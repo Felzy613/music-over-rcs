@@ -13,6 +13,7 @@ import { setUpLibrary } from './library/setup.ts';
 import { addSent } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { memoryCheck } from './cloud/memory.ts';
+import { youTubeRelayFromEnv } from './cloud/youtube-relay.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
 import { createMusicTableSource, musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
@@ -40,8 +41,9 @@ try {
   // A search asks YouTube Music first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
   // SONG_SOURCES sets which is asked first).
   const musicTable = musicTableFromEnv();
-  const youTube = youTubeMusicFromEnv(process.env, { log });
-  // Whether YouTube serves this host at all (it turns many datacenter addresses away), learned and logged at start.
+  // YouTube turns the cloud host away at its player, so there songs come through the Cloudflare Worker (YOUTUBE_RELAY=r2).
+  const youTube = youTubeMusicFromEnv(process.env, { log, relay: youTubeRelayFromEnv(process.env, { log }) });
+  // Whether songs can be had (from this host, or through the relay), learned and logged at start.
   void youTube?.checkStreams();
   const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
   const audio = resolvingYouTubeAudio(

@@ -72,7 +72,8 @@ function lastSegment(url: URL): string {
   }
 }
 
-function fileNameFor(title: string | undefined, url: URL, mimeType: string): string {
+/** A name for a downloaded file: the title (or the link's last part), with the extension its type has. */
+export function fileNameFor(title: string | undefined, url: URL, mimeType: string): string {
   const urlName = lastSegment(url);
   const urlExtension = /\.([a-z0-9]{2,5})$/i.exec(urlName)?.[1]?.toLowerCase();
   const extension =

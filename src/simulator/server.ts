@@ -102,7 +102,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
   /** Type and size of a file without downloading it. */
   async function describeFile(url: string): Promise<{ type: string; bytes: number }> {
     const site = (await musicTable?.inspect(url)) ?? (await youTube?.inspect(url));
-    if (site) return { type: site.type, bytes: site.bytes };
+    if (site) return { type: site.type, bytes: site.bytes ?? 0 };
     const check = await real.checkAudio(url);
     if (!check.ok) throw new AudioFetchError(check.reason);
     return { type: check.type, bytes: check.bytes ?? 0 };

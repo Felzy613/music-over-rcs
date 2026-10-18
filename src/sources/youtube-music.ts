@@ -1,5 +1,5 @@
-import { tooBig, type AudioCheck } from '../audio-check.ts';
-import { AudioFetchError, fetchAudio, type DownloadedAudio } from '../audio-fetch.ts';
+import { megabytes, tooBig, type AudioCheck } from '../audio-check.ts';
+import { AudioFetchError, fetchAudio, fileNameFor, type DownloadedAudio } from '../audio-fetch.ts';
 import { SourceError, type Album, type AlbumSource, type LookupOptions, type TrackSource } from '../bot.ts';
 import type { NewTrack } from '../catalog.ts';
 import { parseQuery } from '../query.ts';
@@ -19,6 +19,11 @@ import type { Verdict, ZemerWhitelist } from './zemer-whitelist.ts';
 //
 // A song is stored in the catalog as `https://music.youtube.com/watch?v=<id>`, never as a stream link: those expire
 // and are tied to this connection, so a fresh one is asked for each time a song is checked or sent.
+//
+// YouTube turns many datacenter addresses away at the player ("Sign in to confirm you're not a bot"), the cloud host's
+// among them. There a song comes through a relay (`YouTubeMusicOptions.relay`: the Cloudflare Worker beside the host,
+// `src/cloud/youtube-relay.ts`), which asks the player and downloads the audio from an address YouTube does serve.
+// Searches and album pages are still asked from here, since YouTube answers those.
 
 export const YOUTUBE_MUSIC_URL = 'https://music.youtube.com';
 
@@ -103,6 +108,21 @@ export interface YouTubeHit {
   cover?: string;
 }
 
+/** A song's audio, fetched by a relay. */
+export interface RelayedSong {
+  data: Uint8Array | Blob;
+  /** "audio/mp4" */
+  type: string;
+  bytes: number;
+}
+
+/**
+ * Fetches a song's audio (the best AAC stream, as `stream` picks it) from somewhere YouTube serves, refusing one over
+ * `maxBytes`. It rejects with an error fit for the user; one with `turnedAway: true` means YouTube turned the relay
+ * away with its bot check too.
+ */
+export type SongRelay = (videoId: string, options?: { maxBytes?: number }) => Promise<RelayedSong>;
+
 /** Where a song's audio can be downloaded from right now. */
 export interface YouTubeStream {
   url: string;
@@ -125,6 +145,11 @@ export interface YouTubeMusicOptions {
   turnedAwayMs?: number;
   /** Hears what went wrong (a search, an album page, a song's link), so the host's log shows it. */
   log?: (line: string) => void;
+  /**
+   * Fetches every song's audio somewhere else, for a host YouTube turns away (the cloud host). The player and the media
+   * server are then never asked from here; searches and album pages still are.
+   */
+  relay?: SongRelay | undefined;
   now?: () => number;
 }
 
@@ -364,6 +389,7 @@ export class YouTubeMusic {
   #turnedAwayFor: number;
   #turnedAwayUntil = 0;
   #log: (line: string) => void;
+  #relay: SongRelay | undefined;
 
   constructor(options: YouTubeMusicOptions = {}) {
     this.baseUrl = (options.baseUrl ?? YOUTUBE_MUSIC_URL).replace(/\/+$/, '');
@@ -374,6 +400,7 @@ export class YouTubeMusic {
     this.#now = options.now ?? Date.now;
     this.#turnedAwayFor = options.turnedAwayMs ?? TURNED_AWAY_MS;
     this.#log = options.log ?? (() => {});
+    this.#relay = options.relay;
     // Pointed somewhere else (the tests), the media comes from there too.
     this.#mediaHosts = this.#origin === YOUTUBE_MUSIC_URL ? MEDIA_HOSTS : [...MEDIA_HOSTS, new URL(this.#origin).hostname];
   }
@@ -411,15 +438,22 @@ export class YouTubeMusic {
    * host it turns away, YouTube songs are then left aside from the start instead of after someone's request fails.
    */
   async checkStreams(): Promise<{ ok: true } | { ok: false; problem: string }> {
+    const how = this.#relay ? 'through the relay' : 'from this host';
     try {
-      await this.stream(PROBE_VIDEO);
-      this.#log('YouTube Music: songs can be had from this host');
+      if (this.#relay) await this.#fromRelay(this.#relay, PROBE_VIDEO);
+      else await this.stream(PROBE_VIDEO);
+      this.#log(`YouTube Music: songs can be had ${how}`);
       return { ok: true };
     } catch (err) {
       if (!(err instanceof YouTubeMusicError)) throw err;
-      this.#log(`YouTube Music: songs can't be had from this host right now: ${err.message}`);
+      this.#log(`YouTube Music: songs can't be had ${how} right now: ${err.message}`);
       return { ok: false, problem: err.message };
     }
+  }
+
+  /** Whether songs come through a relay (see `YouTubeMusicOptions.relay`). */
+  get relayed(): boolean {
+    return this.#relay !== undefined;
   }
 
   /** Runs a request to YouTube Music, logging why it failed before passing the failure on. */
@@ -470,10 +504,18 @@ export class YouTubeMusic {
     return flight;
   }
 
-  /** Type and size of a song's audio, without downloading it. Undefined for an address that isn't a YouTube Music song. */
-  async inspect(url: string): Promise<{ type: string; bytes: number } | undefined> {
+  /**
+   * Type and size of a song's audio, without downloading it. Undefined for an address that isn't a YouTube Music song.
+   * Through a relay nobody is asked (the relay's only answer is the song itself), so the size is left out: it is known
+   * once the song arrives, and the download holds it to the limit.
+   */
+  async inspect(url: string): Promise<{ type: string; bytes?: number } | undefined> {
     const id = this.parseTrackUrl(url);
     if (!id) return undefined;
+    if (this.#relay) {
+      if (this.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);
+      return { type: 'audio/mp4' };
+    }
     const { type, bytes } = await this.stream(id);
     return { type, bytes };
   }
@@ -482,6 +524,7 @@ export class YouTubeMusic {
   async download(url: string, title?: string, options: { maxBytes?: number } = {}): Promise<DownloadedAudio> {
     const id = this.parseTrackUrl(url);
     if (!id) throw new YouTubeMusicError("that isn't a YouTube Music song");
+    if (this.#relay) return this.#fromRelay(this.#relay, id, title, options.maxBytes);
     for (let attempt = 0; ; attempt += 1) {
       const stream = await this.stream(id);
       const withHeaders: typeof fetch = (input, init) => this.#fetch(input, { ...init, headers: { 'User-Agent': stream.userAgent, Range: 'bytes=0-' } });
@@ -493,6 +536,42 @@ export class YouTubeMusic {
         this.#streams.delete(id);
       }
     }
+  }
+
+  /** A song through the relay, held to the same rules as a download from here: audio, not empty, within the limit. */
+  async #fromRelay(relay: SongRelay, videoId: string, title?: string, maxBytes?: number): Promise<DownloadedAudio> {
+    if (this.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);
+    const started = this.#now();
+    let song: RelayedSong;
+    try {
+      song = await relay(videoId, maxBytes !== undefined ? { maxBytes } : {});
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.#log(`YouTube Music: the relay couldn't get ${videoId}: ${message}`);
+      if (err !== null && typeof err === 'object' && (err as { turnedAway?: unknown }).turnedAway === true) {
+        this.#turnedAwayUntil = this.#now() + this.#turnedAwayFor;
+        this.#log(`YouTube Music turns the relay away too; YouTube songs are left aside for ${Math.round(this.#turnedAwayFor / 60_000)} minutes`);
+        throw new YouTubeMusicError(TURNED_AWAY);
+      }
+      // A bug, or a network failure nobody put into words, is in the log; the chat hears it plainly.
+      const plain = err instanceof TypeError || err instanceof ReferenceError || !message;
+      throw new YouTubeMusicError(plain ? "the relay couldn't get that song" : message);
+    }
+    const type = song.type.split(';')[0]!.trim().toLowerCase();
+    const bytes = song.data instanceof Blob ? song.data.size : song.data.byteLength;
+    const refuse = (reason: string): never => {
+      this.#log(`YouTube Music: refused what the relay sent for ${videoId}: ${reason}`);
+      throw new YouTubeMusicError(reason);
+    };
+    if (!type.startsWith('audio/')) refuse("what came back isn't audio");
+    if (bytes === 0) refuse('the file is empty');
+    if (maxBytes !== undefined && bytes > maxBytes) refuse(tooBig(bytes, maxBytes));
+    const data =
+      song.data instanceof Blob
+        ? song.data.slice(0, bytes, type)
+        : new Blob([song.data] as unknown as ConstructorParameters<typeof Blob>[0], { type });
+    this.#log(`YouTube Music: ${videoId} came through the relay (${megabytes(bytes)} MB in ${Math.round((this.#now() - started) / 100) / 10} s)`);
+    return { data, fileName: fileNameFor(title, new URL(this.trackUrl(videoId)), type), mimeType: type, bytes };
   }
 
   async #post(endpoint: string, client: InnerTubeClient, body: Record<string, unknown>, visitor?: string, query: Record<string, string> = {}): Promise<unknown> {
@@ -726,7 +805,8 @@ export function createYouTubeMusicSource(deps: YouTubeLookupDeps): TrackSource {
 
 /**
  * Makes the audio check and download understand catalog addresses that point at YouTube Music songs. A song is checked
- * from what the player says about it (type and size), so no separate request is made just to check it.
+ * from what the player says about it (type and size), so no separate request is made just to check it. Through a relay
+ * the check gives no size (see `YouTubeMusic.inspect`), and an album's zips are then split as its songs arrive.
  */
 export function resolvingYouTubeAudio(
   youTube: YouTubeMusic | undefined,
@@ -742,6 +822,7 @@ export function resolvingYouTubeAudio(
       try {
         const info = await youTube.inspect(url);
         if (!info) return await io.checkAudio(url);
+        if (info.bytes === undefined) return { ok: true, type: info.type };
         if (options.maxBytes !== undefined && info.bytes > options.maxBytes) return { ok: false, reason: tooBig(info.bytes, options.maxBytes) };
         return { ok: true, type: info.type, bytes: info.bytes };
       } catch (err) {
@@ -857,7 +938,7 @@ export function gatedAudioCheck(
   };
 }
 
-/** YOUTUBE_MUSIC=off turns the source off; YOUTUBE_MUSIC_URL points it somewhere else (tests). */
+/** YOUTUBE_MUSIC=off turns the source off; YOUTUBE_MUSIC_URL points it somewhere else (tests). A relay comes in `options`. */
 export function youTubeMusicFromEnv(env: NodeJS.ProcessEnv = process.env, options: YouTubeMusicOptions = {}): YouTubeMusic | undefined {
   if (/^(off|false|no|0)$/i.test(env.YOUTUBE_MUSIC?.trim() ?? '')) return undefined;
   const baseUrl = env.YOUTUBE_MUSIC_URL?.trim();
