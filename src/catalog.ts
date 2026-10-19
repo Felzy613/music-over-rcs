@@ -839,7 +839,7 @@ export function choicesIn(catalog: Pick<Catalog, 'getState' | 'setState'>, key =
       try {
         const value = JSON.parse(raw) as Partial<PendingChoices>;
         return Array.isArray(value.chips) && typeof value.at === 'number' && typeof value.validMs === 'number'
-          ? { chips: value.chips, at: value.at, validMs: value.validMs }
+          ? { chips: value.chips, ...(Array.isArray(value.numbers) ? { numbers: value.numbers } : {}), at: value.at, validMs: value.validMs }
           : undefined;
       } catch {
         return undefined;

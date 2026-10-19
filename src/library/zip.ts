@@ -1,3 +1,4 @@
+import { open } from 'node:fs/promises';
 import { crc32 } from 'node:zlib';
 
 // A ZIP writer for albums: a few audio files in one archive. Audio is already compressed, so files are stored as they
@@ -122,17 +123,25 @@ export function createZip(entries: readonly ZipEntry[]): Uint8Array {
   return out;
 }
 
-/** The CRC-32 a ZIP keeps for a file, read a chunk at a time, so the file is never copied whole. */
-export async function blobCrc32(blob: Blob): Promise<number> {
+/** Writes a file to disk a chunk at a time, and gives back the CRC-32 a ZIP keeps for it (worked out on the way). */
+export async function writeWithCrc32(blob: Blob, path: string): Promise<number> {
+  const out = await open(path, 'w');
   let crc = 0;
-  for await (const chunk of blob.stream() as unknown as AsyncIterable<Uint8Array>) crc = crc32(chunk, crc);
+  try {
+    for await (const chunk of blob.stream() as unknown as AsyncIterable<Uint8Array>) {
+      crc = crc32(chunk, crc);
+      await out.write(chunk);
+    }
+  } finally {
+    await out.close();
+  }
   return crc;
 }
 
 /**
  * The same archive as `createZip`, made of the files as they are: the Blob it returns refers to them rather than copying
- * them into one buffer, which matters on a small host where a part of an album is tens of megabytes. Each entry brings
- * its checksum (`blobCrc32`), worked out when the file arrived.
+ * them into one buffer, which matters on a small host where an album is up to 100 MB (its songs are Blobs of files on
+ * disk there). Each entry brings its checksum (`writeWithCrc32`), worked out when the file was written.
  */
 export function zipBlob(entries: ReadonlyArray<{ name: string; data: Blob; crc: number }>): Blob {
   const { headers, directory: end } = layout(entries.map((entry) => ({ name: entry.name, crc: entry.crc, size: entry.data.size })));

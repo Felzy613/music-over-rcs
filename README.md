@@ -17,16 +17,17 @@ Every message starts with a command, so a song's name is never taken for one.
 | Text | What you get |
 | --- | --- |
 | `search` and a song, like `search yoely weiss shabbos` | The song: its cover, then the audio file. Typos and missing apostrophes are fine (`search yoely wiess shabos`), and Hebrew and Yiddish titles are found by how you'd spell them in English (`search vnusni` for "ונתנו", `search elazar lipa'le` for "אלעזר ליפא׳לע"). |
-| `search` and an artist, like `search lipa` or `search yoely weiss` | Their page: their five most played songs and their five newest albums, `more` for the next ones |
-| `search` and anything else, like `search shabbos` | The songs (🎵) and albums (💿) that have all your words, one message each to 👍 |
-| `album` and a name, like `album a poshiter yid` | That album, **all of it as one zip** (`01 Title.m4a`, `02 …`), with the cover first. Several that fit are listed to pick from. |
+| `search` and an artist, like `search lipa` or `search yoely weiss` | Their page: their five most played singles and their five newest albums, numbered, `more` for the next ones. A song on one of their albums is under that album, not listed on its own. |
+| `search` and anything else, like `search shabbos` | The songs (🎵) and albums (💿) that have all your words, one message each to 👍, the albums numbered |
+| `album` and a name, like `album a poshiter yid` | That album, **all of it as one zip** (`Artist - Album.zip`, with `01 Title.m4a`, `02 …` inside; up to 100 MB, which is nearly every album), with the cover first. Several that fit are listed to pick from. |
 | `album` and an artist, like `album lipa` | All their albums, newest first, eight at a time |
 | `zemer` and a song, like `zemer lipa vnusni` | The same as `search`, on Zemer alone: no falling back to music-table.com (`youtube` and `yt` still work too) |
 | `trending` | What's popular on music-table.com right now |
 | `new` | The newest releases |
 | `chanukah`, `purim`, `wedding` or `vocal` | That list, most popular first |
 | `more` | The next ten of the last list |
-| 👍 on a song (🎵) or an album (💿) in a list or the daily message | That song, or that album as a zip. Lists have no numbers; 👍 several and their audio files come 5 seconds apart, so the phone keeps up. |
+| 👍 on a song (🎵) or an album (💿) in a list or the daily message | That song, or that album as one zip. 👍 several and their audio files come 5 seconds apart, so the phone keeps up. |
+| An album's number, like `2` | That album's songs, numbered as on the album: 👍 the ones you want (or text a song's number), or 👍 the album line at the top for all of it as a zip |
 | `all` | Every song on the last list (up to 20), with 5 seconds between audio files |
 | `follow shwekey` | New songs by that artist as soon as they're out (`following` lists them, `unfollow shwekey` stops) |
 | `help` | A reminder of all this |

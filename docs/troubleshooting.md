@@ -41,7 +41,7 @@ A problem that lasts is repeated every six hours. **No emails at all?** `cloud:c
 - **Replies show up in Matrix but not on the phone:** check the phone is online and `cloud:check` says the bridge is connected. The host configures the bridge so that only the bot's account may use it.
 - **The bridge was logged out:** link it again on `/pair`.
 - **Two answers to every message:** two bots are running: the cloud host and something else (a bot started with `npm run matrix` on a computer, or an old install). Stop the other one.
-- **The audio doesn't arrive:** check the file is under `MAX_DOWNLOAD_MB` (30 on Render, and the homeserver's 100 MB upload limit), and that RCS chats are on: SMS/MMS can't carry files this size.
+- **The audio doesn't arrive:** check the file is under `MAX_DOWNLOAD_MB` (30 on Render; an album's zip under `MAX_ZIP_MB`, 100, the homeserver's and the bridge's limit), and that RCS chats are on: SMS/MMS can't carry files this size.
 
 ## Songs and lists
 
@@ -54,7 +54,7 @@ A problem that lasts is repeated every six hours. **No emails at all?** `cloud:c
 - **A song you know is there isn't found:** try the artist and title as the site writes them, or fewer words. `npm run simulate:web` and **Behind the scenes** show what was searched and what the site listed.
 - **An artist's name gives songs instead of their list:** the name fits several artists and none clearly has the most songs (like `weiss`). Use the full name.
 - **`trending` or `new` say the catalog is still being filled:** the first run reads the whole site in the background (about 20 minutes on a fast computer, longer on the free plan's slow CPU). A catalog carried over from an earlier install already has it (see [How it runs](cloud.md), step 6).
-- **A number gets "tap 👍 on it":** lists have no numbers; tap 👍 on the song's own message. (With no list open, a number gets the help text.) Lists last, for `all`, half an hour ("Which one?"), two hours (`trending`, `new`, artists) or a day (the daily message), and a new search ends them.
+- **A number gets "tap 👍 on it":** only albums have numbers (and the songs of an album you opened by its number); tap 👍 on a song's own message. A number that isn't on the list gets the ones that are. (With no list open, a number gets the help text.) Lists last, for `all`, half an hour ("Which one?"), two hours (`trending`, `new`, artists) or a day (the daily message), and a new search ends them.
 - **A song name gets "To look for a song, start with "search"":** every message starts with a command now; send the line it suggests (`search` and the name).
 - **A 👍 does nothing:** it works on messages that stand for one song: a list's options, the songs in the daily message (the picture or a song's line), and a new-song alert. On anything else a 👍 is just a reaction.
 - **`chanukah`, `purim`, `wedding` or `vocal` is slow the first time:** it reads the whole category from the site once (a few seconds); after that it's instant.

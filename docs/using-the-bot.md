@@ -1,8 +1,8 @@
 # Using the bot
 
-Everything happens in your chat with your own number in Google Messages. Every text the bot writes starts with 🎵 (or 💿 for an album, 🎤 for an artist's name over a list), and because it writes as you, its messages look like ones you sent yourself.
+Everything happens in your chat with your own number in Google Messages. Every text the bot writes starts with 🎵 (or 💿 for an album, 🎤 for an artist's name over a list), except the line that closes a list and says how to pick from it ('Text "more" for more of …'), which isn't a song and has no mark. Because it writes as you, its messages look like ones you sent yourself.
 
-**Every message starts with a command**: `search`, `album`, `zemer`, `trending`, `new`, `more`, `all`, a holiday list, `follow`, `unfollow`, `following` or `help`. To pick a song from a list, tap 👍 on it: lists have no numbers. Anything else isn't searched for: the bot answers with the line to send instead (`search lipa vnusni`), so a song's name is never taken for a command, or the other way round.
+**Every message starts with a command**: `search`, `album`, `zemer`, `trending`, `new`, `more`, `all`, a holiday list, `follow`, `unfollow`, `following` or `help`. To pick a song from a list, tap 👍 on it; the albums in a list have numbers, and texting one lists that album's songs. Anything else isn't searched for: the bot answers with the line to send instead (`search lipa vnusni`), so a song's name is never taken for a command, or the other way round.
 
 ## Asking for a song
 
@@ -29,13 +29,14 @@ You get two messages:
 
 ## Lists
 
-When several songs or albums fit, you get a list, one short message each, so you can tap 👍 on the one you want: a song is its title, an album starts with 💿 and gives its year and how many songs it has. When everything on the list is by one artist, their name comes first, once:
+When several songs or albums fit, you get a list, one short message each, so you can tap 👍 on the one you want: a song is its title, an album starts with 💿, has a number, and gives its year and how many songs it has. When everything on the list is by one artist, their name comes first, once:
 
 ```text
 🎤 Lipa Schmeltzer
-💿 אלעזר ליפא׳לע · 2025 · 15 songs
-💿 אלעזר ליפא׳לע (Yinglish Version) · 2025 · 15 songs
-💿 אלעזר ליפא׳לע - גרסה עברית · 2025 · 15 songs
+💿 1. אלעזר ליפא׳לע · 2025 · 15 songs
+💿 2. אלעזר ליפא׳לע (Yinglish Version) · 2025 · 15 songs
+💿 3. אלעזר ליפא׳לע - גרסה עברית · 2025 · 15 songs
+Text an album's number to choose from its songs.
 ```
 
 Otherwise each line says whose it is:
@@ -44,21 +45,25 @@ Otherwise each line says whose it is:
 🎵 Shabbos — Shua Rose
 🎵 Shabbos — Shlomo Katz
 🎵 Shabbos — Suki & Ding
-💿 Shabbos Tish — Belz · 2000 · 14 songs
-💿 Shabbos Classics — Efraim Mendelson · 2018 · 13 songs
+💿 1. Shabbos Tish — Belz · 2000 · 14 songs
+💿 2. Shabbos Classics — Efraim Mendelson · 2018 · 13 songs
+Text an album's number to choose from its songs.
 ```
+
+A song that is on one of the albums listed (or, on an artist's page, on any of their albums) isn't listed on its own as if it were a single: it is under its album's number.
 
 Then any of:
 
 | Reply | What happens |
 | --- | --- |
 | 👍 on a song (🎵) | That song. The list stays open, so you can 👍 another next. |
-| 👍 on an album (💿) | The whole album, as a zip (below) |
+| 👍 on an album (💿) | The whole album, as one zip (below) |
+| An album's number (`2`) | Its songs, numbered as on the album, under the album's 💿 line: 👍 the songs you want (or text a song's number), or 👍 the 💿 line for all of it as a zip |
 | `all` (or `send all`, `everything`) | Every song on the list, with 5 seconds between files: files only, no cards, up to 20 (not the albums) |
 | `more` | The next ones, when there are more |
 | `search` and a new name | A new search; the old list closes |
 
-A number picks nothing; with a list open it gets "To get a song from the list, tap 👍 on it." A search's list stays open (for `all`) for half an hour, the other lists for two hours, and the daily message's for the day; a 👍 on a song works for a month. (On Beeper and RCS for Business, where a 👍 can't reach the bot, a list comes as one numbered message instead, and you reply with a number.)
+A number that isn't on the list gets the numbers that are ("Text a number from the list (1 to 5), or tap 👍 on a song."), and in a list with no numbers, "To get a song from the list, tap 👍 on it." Numbers on an artist's page go on across `more` (the second page's first album is 6), and the earlier ones still work. A search's list stays open (for `all`) for half an hour, the other lists for two hours, and the daily message's for the day; a 👍 on a song works for a month. (On Beeper and RCS for Business, where a 👍 can't reach the bot, a list comes as one numbered message instead, and you reply with a number.)
 
 ## Artists
 
@@ -92,9 +97,9 @@ To get a whole album, start with `album`:
 album a poshiter yid
 ```
 
-An album the words name is sent at once; otherwise you get the albums that fit (`album lipa` lists all of an artist's), and a 👍 on one sends it (`all` doesn't send every album). A `search` lists albums too, after the songs, and when a song comes whose album your words also name, a 💿 line for the album comes under it.
+An album the words name is sent at once; otherwise you get the albums that fit (`album lipa` lists all of an artist's), numbered: a 👍 on one sends it, its number lists its songs to choose from (`all` doesn't send every album). A `search` lists albums too, after the songs, and when a song comes whose album your words also name, a 💿 line for the album comes under it.
 
-You get its cover and one line (`11 songs, coming as a zip.`), then **one zip file** with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds about 100 MB (`MAX_DOWNLOAD_MB`); a bigger album arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
+You get its cover and one line (`11 songs, coming as a zip.`), then **one zip file**, `Artist - Album.zip`, with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds up to 100 MB (`MAX_ZIP_MB`, what the bridge and Google Messages take), which nearly every album fits; a bigger one arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
 
 Everything from Zemer is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out of the zip ("1 left out").
 
@@ -208,7 +213,7 @@ A thumbs up (any skin tone) on a message that stands for one song gets you that 
   "search" and a song or an artist, like "search lipa vnusni".
   "trending", "new", "chanukah", "purim", "wedding" or "vocal" for lists, "more" for the next ones, and "all" for every song on a list.
   "follow" and an artist to get their new songs as soon as they're out ("unfollow", "following").
-  Tap 👍 on a song in a list to get it.
+  Tap 👍 on a song (🎵) to get it, or on an album (💿) for all of it as a zip; text an album's number to choose from its songs.
   ```
 
 - A message that isn't a command gets the line to send instead:

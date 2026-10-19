@@ -7,7 +7,7 @@ import { Catalog, resumeIn } from '../src/catalog.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
 import type { Picture, PreparedPicture } from '../src/library/images.ts';
 import { createRunner, type PendingChoices, type ResumeStore } from '../src/runner.ts';
-import type { Reply } from '../src/types.ts';
+import type { Incoming, Reply } from '../src/types.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
 import { startMusicHost, type MusicHost } from './helpers/music-host.ts';
 
@@ -357,6 +357,66 @@ describe('runner over Matrix (the bridge case)', () => {
     assert.equal(mock.sent.filter((s) => s.content.msgtype === 'm.audio').length, 2, '"all" still has the list');
   });
 
+  test('an album in a list shows its number, and texting the number opens it; a number not on the list says which are', async () => {
+    const asked: string[] = [];
+    const bot = {
+      handle: async (msg: Incoming): Promise<Reply[]> => {
+        if (msg.postback) {
+          asked.push(msg.postback);
+          return [{ kind: 'text', text: `opened ${msg.postback}` }];
+        }
+        return [
+          { kind: 'text', text: '🎤 Someone' },
+          { kind: 'text', text: 'Song A', postback: 'play:1' },
+          { kind: 'text', text: '💿 Album One · 2020 · 3 songs', postback: 'album:a1', number: 1 },
+          { kind: 'text', text: '💿 אלבום · 2021', postback: 'album:a2', number: 2 },
+          {
+            kind: 'text',
+            text: "Text an album's number to choose from its songs.",
+            chips: [
+              { label: '1. Song A', postback: 'play:1' },
+              { label: '2. Album One', postback: 'album:a1' },
+              { label: '3. אלבום', postback: 'album:a2' },
+            ],
+            numbers: [
+              { number: 1, postback: 'tracks:a1' },
+              { number: 2, postback: 'tracks:a2' },
+            ],
+          },
+        ];
+      },
+    };
+    const runner = createRunner({ chat: new MatrixClient({ token: mock.token, homeserver: mock.url }), bot, chatID: mock.roomId, fetchAudio: (url, title) => fetchAudio(url, title), pollMs: 20 });
+    await runner.prime();
+    typedOnPhone('search someone');
+    await runner.tick();
+    assert.deepEqual(mock.sent.map((s) => s.content.body), [
+      '🎤 Someone',
+      '🎵 Song A',
+      '💿 1. Album One · 2020 · 3 songs',
+      '💿 \u200e2. אלבום\u200e · 2021',
+      "\u200eText an album's number to choose from its songs.",
+    ]);
+    typedOnPhone('2');
+    await runner.tick();
+    assert.deepEqual(asked, ['tracks:a2'], "the album's number, not the line's place in the list");
+    assert.equal(mock.sent.at(-1)?.content.body, '🎵 opened tracks:a2');
+    typedOnPhone('3');
+    await runner.tick();
+    assert.equal(mock.sent.at(-1)?.content.body, '🎵 Text a number from the list (1 to 2), or tap 👍 on a song.');
+    typedOnPhone('1');
+    await runner.tick();
+    assert.deepEqual(asked, ['tracks:a2', 'tracks:a1'], 'the list stays open for another number');
+  });
+
+  test("a list's closing line coming back from the phone (its copy of what the bot sent) is not taken for a request", async () => {
+    const { runner } = makeRunner();
+    await runner.prime();
+    typedOnPhone('\u200eText "more" for more of The Night Owls.');
+    await runner.tick();
+    assert.deepEqual(mock.sent, []);
+  });
+
   test('a list stops answering "all" after half an hour', async () => {
     let clock = 1_000_000;
     const { runner } = makeRunner({ now: () => clock });
@@ -475,7 +535,8 @@ describe('runner over Matrix (the bridge case)', () => {
       assert.deepEqual(mock.sent.map((s) => s.content.body), [
         '🎵 New music today',
         '🎵 The Night Owls — Blue Horizon (Live)',
-        '🎵 Tap 👍 on it to get it.',
+        // A list's closing line is not a song, so it has no 🎵: only an invisible left-to-right mark, which says it's the bot's.
+        '\u200eTap 👍 on it to get it.',
       ], 'no word about numbers');
       clock += 5 * 60 * 60_000; // five hours later
       typedOnPhone('all');

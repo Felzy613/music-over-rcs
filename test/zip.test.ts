@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, openAsBlob, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { crc32 } from 'node:zlib';
-import { blobCrc32, createZip, zipBlob, zipEntryOverhead, zipName, zipSize } from '../src/library/zip.ts';
+import { createZip, writeWithCrc32, zipBlob, zipEntryOverhead, zipName, zipSize } from '../src/library/zip.ts';
 import { readZip } from './helpers/read-zip.ts';
 
 describe('zip', () => {
@@ -64,20 +64,37 @@ describe('zip', () => {
     }
   });
 
-  test('the Blob version, made from the files as they are, is the same archive byte for byte', async () => {
-    const blobs = files.map((file) => ({ name: file.name, data: new Blob([file.data]) }));
-    const entries = await Promise.all(blobs.map(async (entry) => ({ ...entry, crc: await blobCrc32(entry.data) })));
-    entries.forEach((entry, i) => assert.equal(entry.crc, crc32(files[i]!.data)));
-    const blob = zipBlob(entries);
-    assert.equal(blob.type, 'application/zip');
-    assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), createZip(files));
-    assert.equal(blob.size, zipSize(files.map((file) => ({ name: file.name, size: file.data.length }))));
+  test('the Blob version, made from the files as they are on disk, is the same archive byte for byte', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zip-test-'));
+    try {
+      const entries = await Promise.all(
+        files.map(async (file, i) => {
+          const path = join(dir, String(i));
+          const crc = await writeWithCrc32(new Blob([file.data]), path);
+          return { name: file.name, data: await openAsBlob(path), crc };
+        }),
+      );
+      entries.forEach((entry, i) => assert.equal(entry.crc, crc32(files[i]!.data)));
+      const blob = zipBlob(entries);
+      assert.equal(blob.type, 'application/zip');
+      assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), createZip(files));
+      assert.equal(blob.size, zipSize(files.map((file) => ({ name: file.name, size: file.data.length }))));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  test('a checksum is read a chunk at a time, and matches the one-go checksum for a big file', async () => {
-    const big = Uint8Array.from({ length: 3 * 1024 * 1024 + 17 }, (_, i) => (i * 31) % 256);
-    assert.equal(await blobCrc32(new Blob([big])), crc32(big));
-    assert.equal(await blobCrc32(new Blob([])), 0);
+  test('a file is written and checksummed a chunk at a time, and the checksum matches the one-go checksum', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zip-test-'));
+    try {
+      const big = Uint8Array.from({ length: 3 * 1024 * 1024 + 17 }, (_, i) => (i * 31) % 256);
+      assert.equal(await writeWithCrc32(new Blob([big]), join(dir, 'big')), crc32(big));
+      assert.deepEqual(new Uint8Array(readFileSync(join(dir, 'big'))), big);
+      assert.equal(await writeWithCrc32(new Blob([]), join(dir, 'empty')), 0);
+      assert.equal(readFileSync(join(dir, 'empty')).length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('zipName keeps a title usable as a file name', () => {

@@ -46,6 +46,7 @@ services:
       # Small-host settings: nothing is kept on a disk that is wiped, and one file at a time is held in memory.
       - key: PREFETCH_MB
         value: "0"
+      # A song is held in memory while it is fetched and tagged; an album's zip is on disk (MAX_ZIP_MB, default 100).
       - key: MAX_DOWNLOAD_MB
         value: "30"
       - key: DOWNLOADS_AHEAD

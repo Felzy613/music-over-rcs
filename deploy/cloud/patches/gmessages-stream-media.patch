@@ -1,0 +1,413 @@
+diff --git a/pkg/connector/handlematrix.go b/pkg/connector/handlematrix.go
+index e33fe9a..b61f327 100644
+--- a/pkg/connector/handlematrix.go
++++ b/pkg/connector/handlematrix.go
+@@ -20,7 +20,9 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"io"
+ 	"net/http"
++	"os"
+ 	"time"
+ 
+ 	"github.com/rs/zerolog"
+@@ -239,6 +241,42 @@ func (gc *GMClient) ConvertMatrixMessage(ctx context.Context, msg *bridgev2.Matr
+ }
+ 
+ func (gc *GMClient) reuploadMedia(ctx context.Context, content *event.MessageEventContent) (*gmproto.MediaContent, error) {
++	// A voice message may be converted, which needs it in memory; anything else goes through a file on disk and is
++	// encrypted as it is sent, so a big file is never held in memory, whole or encrypted.
++	if content.MsgType == event.MsgAudio && content.MSC3245Voice != nil {
++		return gc.reuploadMediaInMemory(ctx, content)
++	}
++	fileName := content.Body
++	if content.FileName != "" {
++		fileName = content.FileName
++	}
++	var resp *gmproto.MediaContent
++	var uploadErr error
++	err := gc.Main.br.Bot.DownloadMediaToFile(ctx, content.URL, content.File, false, func(file *os.File) error {
++		info, err := file.Stat()
++		if err != nil {
++			return err
++		}
++		if content.Info.MimeType == "" {
++			head := make([]byte, 512)
++			n, _ := io.ReadFull(file, head)
++			content.Info.MimeType = http.DetectContentType(head[:n])
++			if _, err = file.Seek(0, io.SeekStart); err != nil {
++				return err
++			}
++		}
++		resp, uploadErr = gc.Client.UploadMediaStream(file, info.Size(), fileName, content.Info.MimeType)
++		return uploadErr
++	})
++	if uploadErr != nil {
++		return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaReuploadFailed, uploadErr)
++	} else if err != nil {
++		return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaDownloadFailed, err)
++	}
++	return resp, nil
++}
++
++func (gc *GMClient) reuploadMediaInMemory(ctx context.Context, content *event.MessageEventContent) (*gmproto.MediaContent, error) {
+ 	data, err := gc.Main.br.Bot.DownloadMedia(ctx, content.URL, content.File)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaDownloadFailed, err)
+diff --git a/pkg/libgm/crypto/aesgcmencryptstream.go b/pkg/libgm/crypto/aesgcmencryptstream.go
+new file mode 100644
+index 0000000..e7c9488
+--- /dev/null
++++ b/pkg/libgm/crypto/aesgcmencryptstream.go
+@@ -0,0 +1,68 @@
++package crypto
++
++import (
++	"errors"
++	"fmt"
++	"io"
++	"math"
++)
++
++// EncryptedSize is how long EncryptData's output is for size bytes of data, known before anything is encrypted.
++func (c *AESGCMHelper) EncryptedSize(size int64) int64 {
++	chunkOverhead := int64(c.gcm.NonceSize() + c.gcm.Overhead())
++	chunkSize := int64(outgoingRawChunkSize) - chunkOverhead
++	chunkCount := (size + chunkSize - 1) / chunkSize
++	return 2 + size + chunkOverhead*chunkCount
++}
++
++// EncryptStream is EncryptData for size bytes read from source: the same format, made one chunk at a time as it is read,
++// so the data is never held whole (a file of 100 MB is encrypted with a buffer of one chunk). It reads exactly size
++// bytes, and fails if source has fewer.
++func (c *AESGCMHelper) EncryptStream(source io.Reader, size int64) io.Reader {
++	return &AESGCMEncryptStream{
++		crypto:  c,
++		source:  source,
++		size:    size,
++		pending: []byte{0, byte(math.Log2(float64(outgoingRawChunkSize)))},
++	}
++}
++
++type AESGCMEncryptStream struct {
++	crypto     *AESGCMHelper
++	source     io.Reader
++	size       int64
++	read       int64
++	chunkIndex uint32
++	buf        []byte
++	pending    []byte
++}
++
++var _ io.Reader = (*AESGCMEncryptStream)(nil)
++
++func (s *AESGCMEncryptStream) Read(p []byte) (int, error) {
++	for len(s.pending) == 0 {
++		if s.read >= s.size {
++			return 0, io.EOF
++		}
++		chunkSize := int64(outgoingRawChunkSize - s.crypto.gcm.NonceSize() - s.crypto.gcm.Overhead())
++		if s.buf == nil {
++			s.buf = make([]byte, chunkSize)
++		}
++		chunk := s.buf[:min(chunkSize, s.size-s.read)]
++		_, err := io.ReadFull(s.source, chunk)
++		if errors.Is(err, io.EOF) {
++			err = io.ErrUnexpectedEOF
++		}
++		if err != nil {
++			return 0, fmt.Errorf("failed to read chunk #%d: %w", s.chunkIndex+1, err)
++		}
++		// The same rule as EncryptData: the chunk that reaches the end (a full one, when the size is a multiple) is the last.
++		isLastChunk := s.read+chunkSize >= s.size
++		s.pending = s.crypto.encryptChunk(chunk, s.crypto.calculateAAD(s.chunkIndex, isLastChunk))
++		s.read += int64(len(chunk))
++		s.chunkIndex++
++	}
++	n := copy(p, s.pending)
++	s.pending = s.pending[n:]
++	return n, nil
++}
+diff --git a/pkg/libgm/crypto/aesgcmencryptstream_test.go b/pkg/libgm/crypto/aesgcmencryptstream_test.go
+new file mode 100644
+index 0000000..fea6ca6
+--- /dev/null
++++ b/pkg/libgm/crypto/aesgcmencryptstream_test.go
+@@ -0,0 +1,59 @@
++package crypto
++
++import (
++	"bytes"
++	"crypto/rand"
++	"io"
++	"testing"
++)
++
++func TestEncryptStreamMatchesEncryptData(t *testing.T) {
++	helper, err := NewAESGCMHelper(GenerateKey(32))
++	if err != nil {
++		t.Fatal(err)
++	}
++	chunk := outgoingRawChunkSize - 28
++	for _, size := range []int{0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk, 3*chunk + 7, 1_000_003} {
++		data := make([]byte, size)
++		_, _ = rand.Read(data)
++		whole, err := helper.EncryptData(data)
++		if err != nil {
++			t.Fatal(err)
++		}
++		streamed, err := io.ReadAll(helper.EncryptStream(bytes.NewReader(data), int64(size)))
++		if err != nil {
++			t.Fatalf("size %d: %v", size, err)
++		}
++		if len(streamed) != len(whole) || int64(len(streamed)) != helper.EncryptedSize(int64(size)) {
++			t.Fatalf("size %d: streamed %d bytes, EncryptData %d, EncryptedSize %d", size, len(streamed), len(whole), helper.EncryptedSize(int64(size)))
++		}
++		if !bytes.Equal(streamed[:2], whole[:2]) {
++			t.Fatalf("size %d: header %v, want %v", size, streamed[:2], whole[:2])
++		}
++		// The nonces are random, so the bytes differ; what each decrypts to may not.
++		decrypted, err := helper.DecryptData(streamed)
++		if err != nil {
++			t.Fatalf("size %d: DecryptData: %v", size, err)
++		}
++		if !bytes.Equal(decrypted, data) {
++			t.Fatalf("size %d: DecryptData gave different data", size)
++		}
++		if size > 0 {
++			viaStream, err := io.ReadAll(helper.DecryptStream(io.NopCloser(bytes.NewReader(streamed))))
++			if err != nil {
++				t.Fatalf("size %d: DecryptStream: %v", size, err)
++			}
++			if !bytes.Equal(viaStream, data) {
++				t.Fatalf("size %d: DecryptStream gave different data", size)
++			}
++		}
++	}
++}
++
++func TestEncryptStreamFailsOnShortSource(t *testing.T) {
++	helper, _ := NewAESGCMHelper(GenerateKey(32))
++	_, err := io.ReadAll(helper.EncryptStream(bytes.NewReader(make([]byte, 10)), 11))
++	if err == nil {
++		t.Fatal("expected an error for a source shorter than its size")
++	}
++}
+diff --git a/pkg/libgm/media.go b/pkg/libgm/media.go
+index 8fe2775..de01908 100644
+--- a/pkg/libgm/media.go
++++ b/pkg/libgm/media.go
+@@ -120,6 +120,37 @@ func (c *Client) UploadMedia(data []byte, fileName, mime string) (*gmproto.Media
+ 	}, nil
+ }
+ 
++// UploadMediaStream is UploadMedia for size bytes read from source (a file on disk): the data is encrypted as it is sent,
++// so a big file is never held in memory, whole or encrypted. The request is the same as UploadMedia's.
++func (c *Client) UploadMediaStream(source io.Reader, size int64, fileName, mime string) (*gmproto.MediaContent, error) {
++	mediaType := MimeToMediaType[mime]
++	if mediaType.Type == 0 {
++		mediaType = MimeToMediaType[strings.Split(mime, "/")[0]]
++	}
++	decryptionKey := crypto.GenerateKey(32)
++	cryptor, err := crypto.NewAESGCMHelper(decryptionKey)
++	if err != nil {
++		return nil, err
++	}
++	encryptedSize := cryptor.EncryptedSize(size)
++	startUpload, err := c.startUploadMedia(encryptedSize, mime)
++	if err != nil {
++		return nil, fmt.Errorf("failed to start upload: %w", err)
++	}
++	upload, err := c.finalizeUploadMedia(startUpload, cryptor.EncryptStream(source, size), encryptedSize)
++	if err != nil {
++		return nil, fmt.Errorf("failed to finalize upload: %w", err)
++	}
++	return &gmproto.MediaContent{
++		Format:        mediaType.Type,
++		MediaID:       upload.MediaID,
++		MediaName:     fileName,
++		Size:          size,
++		DecryptionKey: decryptionKey,
++		MimeType:      mime,
++	}, nil
++}
++
+ type StartGoogleUpload struct {
+ 	UploadID         string
+ 	UploadURL        string
+@@ -153,14 +184,21 @@ func isStandardBase64(data []byte) bool {
+ }
+ 
+ func (c *Client) FinalizeUploadMedia(upload *StartGoogleUpload) (*MediaUpload, error) {
+-	encryptedImageSize := strconv.Itoa(len(upload.EncryptedMediaBytes))
++	return c.finalizeUploadMedia(upload, bytes.NewReader(upload.EncryptedMediaBytes), int64(len(upload.EncryptedMediaBytes)))
++}
++
++// finalizeUploadMedia sends the encrypted media, size bytes read from body.
++func (c *Client) finalizeUploadMedia(upload *StartGoogleUpload, body io.Reader, size int64) (*MediaUpload, error) {
++	encryptedImageSize := strconv.FormatInt(size, 10)
+ 
+ 	finalizeUploadHeaders := util.NewMediaUploadHeaders(encryptedImageSize, "upload, finalize", "0", upload.MimeType, "")
+-	req, err := http.NewRequest(http.MethodPost, upload.UploadURL, bytes.NewBuffer(upload.EncryptedMediaBytes))
++	req, err := http.NewRequest(http.MethodPost, upload.UploadURL, body)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to prepare request: %w", err)
+ 	}
+ 	req.Header = *finalizeUploadHeaders
++	// Known in advance, so a streamed body goes with a Content-Length like a whole one, not chunked.
++	req.ContentLength = size
+ 
+ 	res, err := c.http.Do(req)
+ 	if err != nil {
+@@ -199,7 +237,17 @@ func (c *Client) FinalizeUploadMedia(upload *StartGoogleUpload) (*MediaUpload, e
+ }
+ 
+ func (c *Client) StartUploadMedia(encryptedImageBytes []byte, mime string) (*StartGoogleUpload, error) {
+-	encryptedImageSize := strconv.Itoa(len(encryptedImageBytes))
++	uploadResponse, err := c.startUploadMedia(int64(len(encryptedImageBytes)), mime)
++	if err != nil {
++		return nil, err
++	}
++	uploadResponse.EncryptedMediaBytes = encryptedImageBytes
++	return uploadResponse, nil
++}
++
++// startUploadMedia starts an upload of size bytes of encrypted media.
++func (c *Client) startUploadMedia(size int64, mime string) (*StartGoogleUpload, error) {
++	encryptedImageSize := strconv.FormatInt(size, 10)
+ 
+ 	startUploadHeaders := util.NewMediaUploadHeaders(encryptedImageSize, "start", "", mime, "resumable")
+ 	startUploadPayload, err := c.buildStartUploadPayload()
+@@ -235,8 +283,6 @@ func (c *Client) StartUploadMedia(encryptedImageBytes []byte, mime string) (*Sta
+ 		ChunkGranularity: int64(chunkGranularity),
+ 		ControlURL:       res.Header.Get("x-goog-upload-control-url"),
+ 		MimeType:         mime,
+-
+-		EncryptedMediaBytes: encryptedImageBytes,
+ 	}
+ 	return uploadResponse, nil
+ }
+diff --git a/pkg/libgm/media_stream_test.go b/pkg/libgm/media_stream_test.go
+new file mode 100644
+index 0000000..a223b09
+--- /dev/null
++++ b/pkg/libgm/media_stream_test.go
+@@ -0,0 +1,117 @@
++package libgm
++
++import (
++	"bytes"
++	"crypto/rand"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/rs/zerolog"
++	"google.golang.org/protobuf/proto"
++
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/crypto"
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
++)
++
++type seenUpload struct {
++	command          string
++	headers          http.Header
++	contentLength    int64
++	transferEncoding []string
++	body             []byte
++}
++
++// A stand-in for Google's upload server, reached by rewriting every request's address to it.
++func fakeUploadServer(t *testing.T) (*Client, func() []seenUpload) {
++	var mu sync.Mutex
++	var seen []seenUpload
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, err := io.ReadAll(r.Body)
++		if err != nil {
++			t.Error(err)
++		}
++		mu.Lock()
++		seen = append(seen, seenUpload{r.Header.Get("x-goog-upload-command"), r.Header.Clone(), r.ContentLength, r.TransferEncoding, body})
++		mu.Unlock()
++		if r.Header.Get("x-goog-upload-command") == "start" {
++			w.Header().Set("x-goog-upload-chunk-granularity", "262144")
++			w.Header().Set("x-goog-upload-url", "https://instantmessaging-pa.googleapis.com/upload?upload_id=test")
++			return
++		}
++		out, _ := proto.Marshal(&gmproto.UploadMediaResponse{Media: &gmproto.UploadedMedia{MediaID: "media-1", MediaNumber: 1}})
++		_, _ = w.Write(out)
++	}))
++	t.Cleanup(server.Close)
++	target, _ := url.Parse(server.URL)
++	client := &Client{AuthData: NewAuthData(), Logger: zerolog.Nop(), http: &http.Client{Transport: rewrite{target}}}
++	return client, func() []seenUpload {
++		mu.Lock()
++		defer mu.Unlock()
++		out := seen
++		seen = nil
++		return out
++	}
++}
++
++type rewrite struct{ target *url.URL }
++
++func (r rewrite) RoundTrip(req *http.Request) (*http.Response, error) {
++	req = req.Clone(req.Context())
++	req.URL.Scheme = r.target.Scheme
++	req.URL.Host = r.target.Host
++	return http.DefaultTransport.RoundTrip(req)
++}
++
++func TestUploadMediaStreamSendsWhatUploadMediaSends(t *testing.T) {
++	client, seen := fakeUploadServer(t)
++	data := make([]byte, 3*(1<<15)+12345)
++	_, _ = rand.Read(data)
++
++	whole, err := client.UploadMedia(data, "Album.zip", "application/zip")
++	if err != nil {
++		t.Fatal(err)
++	}
++	wholeRequests := seen()
++	streamed, err := client.UploadMediaStream(bytes.NewReader(data), int64(len(data)), "Album.zip", "application/zip")
++	if err != nil {
++		t.Fatal(err)
++	}
++	streamedRequests := seen()
++
++	if len(wholeRequests) != 2 || len(streamedRequests) != 2 {
++		t.Fatalf("got %d and %d requests, want 2 each", len(wholeRequests), len(streamedRequests))
++	}
++	for i := range wholeRequests {
++		a, b := wholeRequests[i], streamedRequests[i]
++		if a.command != b.command || a.contentLength != b.contentLength || len(a.body) != len(b.body) || strings.Join(b.transferEncoding, ",") != "" {
++			t.Fatalf("request %d differs: %q %d %d %v, streamed %q %d %d %v", i, a.command, a.contentLength, len(a.body), a.transferEncoding, b.command, b.contentLength, len(b.body), b.transferEncoding)
++		}
++		for name := range a.headers {
++			if name == "X-Goog-Upload-Header-Content-Length" || name == "Content-Length" || name == "Content-Type" || strings.HasPrefix(name, "X-Goog-Upload") {
++				if a.headers.Get(name) != b.headers.Get(name) {
++					t.Fatalf("request %d header %s: %q, streamed %q", i, name, a.headers.Get(name), b.headers.Get(name))
++				}
++			}
++		}
++	}
++	if whole.Size != streamed.Size || whole.MediaName != streamed.MediaName || whole.Format != streamed.Format || whole.MediaID != streamed.MediaID || whole.MimeType != streamed.MimeType {
++		t.Fatalf("media content differs: %v, streamed %v", whole, streamed)
++	}
++	// What was uploaded decrypts, with the key the message carries, to the file.
++	helper, err := crypto.NewAESGCMHelper(streamed.DecryptionKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	decrypted, err := helper.DecryptData(streamedRequests[1].body)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !bytes.Equal(decrypted, data) {
++		t.Fatal("the streamed upload does not decrypt to the file")
++	}
++}

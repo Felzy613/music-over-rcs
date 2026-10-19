@@ -143,7 +143,8 @@ try {
     pollMs: config.pollMs,
     songGapMs: config.songGapMs,
     ...(config.downloadsAhead ? { downloadsAhead: config.downloadsAhead } : {}),
-    maxFileBytes: maxBytes,
+    // An album's zip is written to disk and streamed from there, so it can be bigger than a song held in memory.
+    maxFileBytes: config.maxZipMb * 1024 * 1024,
     onBridgeSendFailure: () => bridge.sendFailed(),
     ...(pictureTakers.length > 0 ? { onPicture: (picture: IncomingPicture) => pictureTakers.forEach((extension) => extension.onPicture!(picture)) } : {}),
     log,

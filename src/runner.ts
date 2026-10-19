@@ -1,9 +1,13 @@
+import { openAsBlob } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AudioFetchError, type DownloadedAudio } from './audio-fetch.ts';
 import { ALL_WORDS, joinLists, type Bot } from './bot.ts';
 import type { DownloadedImage } from './image-fetch.ts';
 import type { Picture, PreparedPicture } from './library/images.ts';
-import { blobCrc32, zipBlob, zipEntryOverhead, zipName, zipSize } from './library/zip.ts';
-import type { AlbumSong, Chip, Incoming, Reply } from './types.ts';
+import { writeWithCrc32, zipBlob, zipEntryOverhead, zipName, zipSize } from './library/zip.ts';
+import type { AlbumSong, Chip, Incoming, NumberedChoice, Reply } from './types.ts';
 
 /**
  * Every message the bot writes starts with this. In a chat with yourself the bot's replies look like your own
@@ -14,7 +18,15 @@ export const BOT_MARK = '🎵';
 export const KIND_MARKS = ['💿', '🎤'] as const;
 /** What an add-on passes on from elsewhere (see extensions.ts) starts with this instead; the bot never answers those either. */
 export const RELAY_MARK = '🤖';
-const isBotText = (text: string): boolean => [BOT_MARK, ...KIND_MARKS, RELAY_MARK].some((mark) => text.startsWith(mark));
+/** An invisible left-to-right mark (U+200E). */
+const LEFT_TO_RIGHT = '\u200e';
+/**
+ * A list's closing line (how to pick from it: 'Text "more" for more of …') is neither a song nor an album, so where a 👍
+ * picks it shows no mark (the owner asked for no 🎵 there, 2026-10-18): it starts with this invisible left-to-right
+ * mark instead, which is what tells the bot it wrote it.
+ */
+export const HINT_MARK = LEFT_TO_RIGHT;
+const isBotText = (text: string): boolean => [BOT_MARK, ...KIND_MARKS, RELAY_MARK, HINT_MARK].some((mark) => text.startsWith(mark));
 
 const SEEN_LIMIT = 2000;
 /** Message ids kept in the resume point. */
@@ -31,7 +43,7 @@ const DOWNLOADS_AHEAD = 3;
 /** Covers being drawn at once, ahead of their turn. Each is a separate drawing process, so only a couple. */
 const PICTURES_AHEAD = 2;
 const CHOICE_HINT = 'Reply with a number to choose.';
-/** What a number gets where a 👍 picks: lists there have no numbers. */
+/** What a number gets where a 👍 picks and the list has no numbers. */
 const LIKE_HINT = 'To get a song from the list, tap 👍 on it.';
 /** How long a list of options stays pickable. The list is still on screen, so a 👍 or a number is still an answer to it. */
 const CHOICE_TTL_MS = 30 * 60_000;
@@ -39,8 +51,6 @@ const CHOICE_TTL_MS = 30 * 60_000;
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const ERROR_NOTICE = 'Something went wrong on my side. Please try again in a moment.';
 
-/** An invisible left-to-right mark (U+200E). */
-const LEFT_TO_RIGHT = '\u200e';
 /** Hebrew words (with the spaces between them) followed by something that isn't Hebrew. */
 const HEBREW_THEN_MORE = /[\u0590-\u05ff](?:[\u0590-\u05ff\s]*[\u0590-\u05ff])?(?=\s*[^\s\u0590-\u05ff])/gu;
 
@@ -53,9 +63,26 @@ const HEBREW_THEN_MORE = /[\u0590-\u05ff](?:[\u0590-\u05ff\s]*[\u0590-\u05ff])?(
 export const markBotText = (text: string): string => {
   const marked = isBotText(text) ? text : `${BOT_MARK} ${text}`;
   if (!/[\u0590-\u05ff]/.test(marked) || marked.includes(LEFT_TO_RIGHT)) return marked;
-  const runs = marked.replace(HEBREW_THEN_MORE, (run) => `${run}${LEFT_TO_RIGHT}`);
+  return leftToRight(marked);
+};
+
+/** A list's closing line as the bot sends it where a 👍 picks: starting with HINT_MARK, and laid out left to right. */
+export const markHint = (text: string): string => {
+  if (text.startsWith(HINT_MARK)) return text;
+  return `${HINT_MARK}${/[\u0590-\u05ff]/.test(text) ? leftToRight(text) : text}`;
+};
+
+/** A left-to-right mark after each stretch of Hebrew that something else follows, and after the first word when it is Hebrew. */
+function leftToRight(text: string): string {
+  const runs = text.replace(HEBREW_THEN_MORE, (run) => `${run}${LEFT_TO_RIGHT}`);
   const firstLetter = /\p{L}/u.exec(runs)?.[0] ?? '';
   return /[\u0590-\u05ff]/.test(firstLetter) ? runs.replace(/^(\S+ ?)/u, `$1${LEFT_TO_RIGHT}`) : runs;
+}
+
+/** A line with its number shown after its mark: "💿 2. Shuki · 2024 · 12 songs", "3. Escape" (and then "🎵 3. Escape"). */
+export const withNumber = (text: string, n: number): string => {
+  const mark = [...KIND_MARKS, BOT_MARK].find((one) => text.startsWith(one));
+  return mark ? `${mark} ${n}. ${text.slice(mark.length).trimStart()}` : `${n}. ${text}`;
 };
 
 /** A thumbs up, in any skin tone. */
@@ -117,9 +144,13 @@ export interface ChatClient {
   messageText?(chatID: string, messageId: string): Promise<string | undefined>;
 }
 
-/** The numbered options on offer: what "2" means right now, since when, and for how long. */
+/**
+ * The options on offer: the list's chips (what "all" sends, and what "2" means where every line is numbered), the
+ * numbers shown where a 👍 picks the rest (an album's), since when, and for how long.
+ */
 export interface PendingChoices {
   chips: Chip[];
+  numbers?: NumberedChoice[];
   at: number;
   validMs: number;
 }
@@ -182,6 +213,8 @@ export interface RunnerOptions {
   songGapMs?: number;
   /** The most one file sent to the chat may weigh, in bytes; an album bigger than this goes as several ZIPs. Defaults to 100 MB. */
   maxFileBytes?: number;
+  /** Where an album's songs wait on disk while its ZIP is made and sent (the system's temporary folder unless given). */
+  spoolDir?: string;
   /** Waits; tests pass one that doesn't. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -366,12 +399,12 @@ export function createRunner(options: RunnerOptions): Runner {
   }
 
   /**
-   * An album, as ZIPs of its songs (named like the album, each song "01 Title.m4a"), each at most maxFileBytes. Only one
-   * part is ever held in memory, which is what lets it run on a small host: the parts are planned from the songs' sizes
-   * before anything is downloaded, then each part's songs are downloaded in album order (downloadsAhead at a time), zipped
-   * without being copied, sent, and let go before the next part's. A bigger album than one file goes as several ZIPs,
-   * each saying which part it is. A chat that can't take a file gets the songs one by one instead, also one at a time. A
-   * song that can't be had is left out, and the chat is told.
+   * An album, as one ZIP of its songs (named like the album, each song "01 Title.m4a"), or, when it is bigger than
+   * maxFileBytes (100 MB: what the bridge and Google Messages take), as several, each saying which part it is. The songs
+   * are downloaded in album order (downloadsAhead at a time) and each is written to a folder on disk as soon as it is in
+   * hand, so the album is never held in memory: the ZIP is made of the files as they are on disk, and the chat streams it
+   * from there. A chat that can't take a file gets the songs one by one instead. A song that can't be had is left out,
+   * and the chat is told.
    */
   async function sendAlbum(album: Extract<Reply, { kind: 'album' }>): Promise<void> {
     const missing: string[] = [];
@@ -418,71 +451,51 @@ export function createRunner(options: RunnerOptions): Runner {
       const limit = options.maxFileBytes ?? MAX_FILE_BYTES;
       const digits = Math.max(2, String(Math.max(...album.songs.map((song) => song.number))).length);
       const stem = (song: AlbumSong): string => zipName(`${String(song.number).padStart(digits, '0')} ${song.title}`);
-      // The plan, from the sizes the album came with (a name's extension is not known yet: ".audio" is room for any).
-      const breaks = new Set<number>();
-      let planned = zipSize([]);
-      album.songs.forEach((song, i) => {
-        const cost = zipEntryOverhead(`${stem(song)}.audio`) + (song.bytes ?? 0);
-        if (i > 0 && planned + cost > limit) {
-          breaks.add(i);
-          planned = zipSize([]);
+      const folder = await mkdtemp(join(options.spoolDir ?? tmpdir(), 'album-'));
+      try {
+        // Every song on disk first, with the checksum its place in the ZIP needs; then the parts are known exactly.
+        const songs: Array<{ name: string; data: Blob; crc: number }> = [];
+        for (const song of album.songs) {
+          const file = await next();
+          if (!file) continue;
+          had += 1;
+          const extension = /\.[a-z0-9]{2,5}$/i.exec(file.fileName)?.[0].toLowerCase() ?? '.audio';
+          const path = join(folder, `${String(songs.length + 1).padStart(3, '0')}${extension}`);
+          const crc = await writeWithCrc32(file.data, path);
+          songs.push({ name: `${stem(song)}${extension}`, data: await openAsBlob(path, { type: file.mimeType }), crc });
+          freeMemory(); // the song as it was downloaded, now that it is on disk
         }
-        planned += cost;
-      });
-      // With every size known the number of parts is too; a song bigger than it said starts an extra part, and then it isn't.
-      let total: number | undefined = album.songs.every((song) => song.bytes !== undefined) ? breaks.size + 1 : undefined;
-      const base = zipName(`${album.artist ? `${album.artist} - ` : ''}${album.title}`);
-      let part: Array<{ name: string; data: Blob; crc: number }> = [];
-      let used = zipSize([]);
-      let parts = 0;
-      const flush = async (last: boolean): Promise<boolean> => {
-        if (part.length === 0) return true;
-        parts += 1;
-        const label = parts === 1 && last ? '' : ` (part ${parts}${total ? ` of ${total}` : ''})`;
-        const fileName = `${base}${label}.zip`;
-        let zip: Blob | undefined = zipBlob(part);
-        const songs = part.length;
-        const bytes = zip.size;
-        part = []; // the songs are held by the zip now, and by nothing once it is sent
-        used = zipSize([]);
-        if (!allowSend()) {
-          log(`send limit reached (${maxSends} a minute); dropping the rest of this album`);
-          return false;
+        const parts: Array<typeof songs> = [];
+        let used = zipSize([]);
+        for (const song of songs) {
+          const cost = zipEntryOverhead(song.name) + song.data.size;
+          if (parts.length === 0 || (parts.at(-1)!.length > 0 && used + cost > limit)) {
+            parts.push([]);
+            used = zipSize([]);
+          }
+          parts.at(-1)!.push(song);
+          used += cost;
         }
-        await songTurn();
-        try {
-          await sendFile(chatID, { data: zip, fileName, mimeType: 'application/zip', bytes });
-        } catch (err) {
-          log(`could not send the zip: ${errorText(err)}`);
-          await said(`I couldn't send "${album.title}" as a zip.`);
-          return false;
-        } finally {
-          zip = undefined;
-          freeMemory();
+        const base = zipName(`${album.artist ? `${album.artist} - ` : ''}${album.title}`);
+        for (const [i, part] of parts.entries()) {
+          const fileName = `${base}${parts.length > 1 ? ` (part ${i + 1} of ${parts.length})` : ''}.zip`;
+          const zip = zipBlob(part);
+          if (!allowSend()) return log(`send limit reached (${maxSends} a minute); dropping the rest of this album`);
+          await songTurn();
+          try {
+            await sendFile(chatID, { data: zip, fileName, mimeType: 'application/zip', bytes: zip.size });
+          } catch (err) {
+            log(`could not send the zip: ${errorText(err)}`);
+            return said(`I couldn't send "${album.title}" as a zip.`);
+          } finally {
+            freeMemory();
+          }
+          lastSongAt = now();
+          log(`-> zip ${fileName} (${part.length} songs, ${zip.size} bytes)`);
         }
-        lastSongAt = now();
-        log(`-> zip ${fileName} (${songs} songs, ${bytes} bytes)`);
-        return true;
-      };
-      for (const [i, song] of album.songs.entries()) {
-        // A planned part is sent before the next one's first song is fetched, so two parts are never held together.
-        if (breaks.has(i) && !(await flush(false))) return;
-        const file = await next();
-        if (!file) continue;
-        had += 1;
-        const extension = /\.[a-z0-9]{2,5}$/i.exec(file.fileName)?.[0].toLowerCase() ?? '.audio';
-        const name = `${stem(song)}${extension}`;
-        const cost = zipEntryOverhead(name) + file.bytes;
-        // A song bigger than it said (or of no stated size) can still overflow the part: then it starts the next one.
-        if (part.length > 0 && used + cost > limit) {
-          total = undefined;
-          if (!(await flush(false))) return;
-        }
-        part.push({ name, data: file.data, crc: await blobCrc32(file.data) });
-        used += cost;
-        freeMemory(); // what downloading and checksumming the song left behind
+      } finally {
+        await rm(folder, { recursive: true, force: true }).catch((err: unknown) => log(`could not clear ${folder}: ${errorText(err)}`));
       }
-      if (!(await flush(true))) return;
     }
     if (had === 0) return said(`I couldn't get any of "${album.title}".`);
     if (missing.length > 0) await said(`I couldn't get ${missing.length === 1 ? 'one song' : `${missing.length} songs`} of "${album.title}": ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}.`);
@@ -583,13 +596,18 @@ export function createRunner(options: RunnerOptions): Runner {
       } else if (reply.kind === 'album') {
         await sendAlbum(reply);
       } else {
-        if (reply.chips) setChoices({ chips: reply.chips, at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
+        if (reply.chips) {
+          setChoices({ chips: reply.chips, ...(reply.numbers ? { numbers: reply.numbers } : {}), at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
+        }
         // Options need a word on how to pick one, unless the text already gives it.
         const hint = !chat.reactions && reply.chips && !/\breply with a number\b/i.test(reply.text);
-        const text = hint ? [reply.text, CHOICE_HINT].filter(Boolean).join('\n\n') : reply.text;
+        // Where a 👍 picks, a numbered line (an album, a song of an album) shows its number: texting it picks that line.
+        const shown = chat.reactions && reply.number !== undefined ? withNumber(reply.text, reply.number) : reply.text;
+        const text = hint ? [shown, CHOICE_HINT].filter(Boolean).join('\n\n') : shown;
         // A message with no words only carries its list's chips: where a 👍 picks, nothing more is said.
         if (!text.trim()) continue;
-        await sendLinkedText(markBotText(text), reply.postback);
+        // A list's closing line says how to pick from it; where a 👍 picks, it is not one of the list's 🎵 lines.
+        await sendLinkedText(chat.reactions && reply.chips ? markHint(text) : markBotText(text), reply.postback);
         // What the bot said, in the host's log too: an answer that explains a failure is otherwise invisible there.
         log(`-> ${JSON.stringify(text.length > 160 ? `${text.slice(0, 160)}…` : text)}`);
       }
@@ -629,10 +647,12 @@ export function createRunner(options: RunnerOptions): Runner {
     const text = (message.text ?? '').trim();
     lastRequest = { text: normalize(text), at: now() };
     const offered = currentChoices();
-    const listed = offered && now() - offered.at < offered.validMs ? offered.chips : [];
+    const valid = offered !== undefined && now() - offered.at < offered.validMs;
+    const listed = valid ? offered.chips : [];
+    // Where a 👍 picks, only some lines have numbers (an album's, which lists its songs); elsewhere every line has one.
+    const numbered = valid && chat.reactions ? (offered.numbers ?? []) : [];
     const isNumber = /^\d{1,2}$/.test(text);
-    // Where a 👍 picks, lists have no numbers, so a number picks nothing; it gets how to pick instead.
-    const choice = isNumber && !chat.reactions ? listed[Number(text) - 1] : undefined;
+    const choice = !isNumber ? undefined : chat.reactions ? numbered.find((entry) => entry.number === Number(text)) : listed[Number(text) - 1];
     // "all": every song on the list. Like a number, it keeps the list.
     const all = listed.length > 0 && ALL_WORDS.has(normalize(text).replace(/[^\p{L}\p{N} ]/gu, '')) ? listed : undefined;
     // A number meant for the list stays within it; anything else moves on from it.
@@ -650,7 +670,17 @@ export function createRunner(options: RunnerOptions): Runner {
           : { ...base, text };
       let replies: Reply[];
       if (outOfRange) {
-        replies = [{ kind: 'text', text: chat.reactions ? LIKE_HINT : `Pick a number from 1 to ${listed.length}, or "search" for another song.` }];
+        const range = numbered.length > 0 ? `${numbered[0]!.number} to ${numbered.at(-1)!.number}` : '';
+        replies = [
+          {
+            kind: 'text',
+            text: !chat.reactions
+              ? `Pick a number from 1 to ${listed.length}, or "search" for another song.`
+              : numbered.length > 0
+                ? `Text a number from the list (${range}), or tap 👍 on a song.`
+                : LIKE_HINT,
+          },
+        ];
       } else {
         try {
           replies = await bot.handle(incoming);

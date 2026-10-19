@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { checkAudio } from '../src/audio-check.ts';
 import { fetchAudio } from '../src/audio-fetch.ts';
@@ -236,11 +239,10 @@ describe('albums on YouTube Music', () => {
         kind: 'album',
         title: 'Shabbuson',
         artist: MICHOEL,
-        // Each song's size comes along, so the runner can plan the zip parts before downloading anything.
         songs: [
-          { number: 1, title: 'Opening', url: youTube.trackUrl('albumsong01'), bytes: 4000 },
-          { number: 2, title: 'הנחת תפילין', url: youTube.trackUrl('albumsong02'), bytes: 4000 },
-          { number: 5, title: 'Closing', url: youTube.trackUrl('albumsong04'), bytes: 4000 },
+          { number: 1, title: 'Opening', url: youTube.trackUrl('albumsong01') },
+          { number: 2, title: 'הנחת תפילין', url: youTube.trackUrl('albumsong02') },
+          { number: 5, title: 'Closing', url: youTube.trackUrl('albumsong04') },
         ],
       });
     });
@@ -252,9 +254,13 @@ describe('albums on YouTube Music', () => {
       assert.deepEqual(lines(replies), ['💿 Shabbuson · 2022', '💿 Shabbuson Live · 2023']);
       const postbacks = replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.postback] : []));
       assert.deepEqual(postbacks, ['album:MPREb_shabbuson01', 'album:MPREb_shabbuson02']);
-      // The list's chips ride on a last message with no words, which the chat never shows.
-      assert.equal(textOf(replies.at(-1)).text, '');
+      // The list's chips ride on its last message, which says what an album's number does.
+      assert.equal(textOf(replies.at(-1)).text, "Text an album's number to choose from its songs.");
       assert.equal(textOf(replies.at(-1)).chips?.length, 2);
+      assert.deepEqual(textOf(replies.at(-1)).numbers, [
+        { number: 1, postback: 'tracks:MPREb_shabbuson01' },
+        { number: 2, postback: 'tracks:MPREb_shabbuson02' },
+      ]);
 
       assert.equal(albumOf(await tap('album:MPREb_shabbuson02')).title, 'Shabbuson Live');
       const all = await tap(`all:${postbacks.join('|')}`);
@@ -321,7 +327,7 @@ describe('albums on YouTube Music', () => {
       assert.equal(shown.filter((text) => text.startsWith('🎤')).length, 1, 'one artist, one heading');
       const firstAlbum = shown.findIndex((text) => text.startsWith('💿'));
       assert.ok(firstAlbum > 1, 'songs first, then albums');
-      assert.deepEqual(shown.slice(firstAlbum), ['💿 Shabbuson · 2022', '💿 Shabbuson Live · 2023']);
+      assert.deepEqual(shown.slice(firstAlbum), ['💿 Shabbuson · 2022', '💿 Shabbuson Live · 2023', "Text an album's number to choose from its songs."]);
       assert.ok(!shown.some((text) => text.includes('Guest')), 'nothing a woman is credited on');
     });
 
@@ -419,7 +425,7 @@ describe('sending an album as a zip', () => {
   let inFlight = 0;
   let mostInFlight = 0;
 
-  function makeRunner(options: { maxFileBytes?: number; noFiles?: boolean; failSong?: string; downloadsAhead?: number } = {}) {
+  function makeRunner(options: { maxFileBytes?: number; noFiles?: boolean; failSong?: string; downloadsAhead?: number; spoolDir?: string } = {}) {
     events = [];
     inFlight = 0;
     mostInFlight = 0;
@@ -475,6 +481,7 @@ describe('sending an album as a zip', () => {
       log: () => {},
       ...(options.maxFileBytes !== undefined ? { maxFileBytes: options.maxFileBytes } : {}),
       ...(options.downloadsAhead !== undefined ? { downloadsAhead: options.downloadsAhead } : {}),
+      ...(options.spoolDir !== undefined ? { spoolDir: options.spoolDir } : {}),
     });
   }
 
@@ -514,21 +521,27 @@ describe('sending an album as a zip', () => {
     for (const upload of matrix.uploads) assert.ok(upload.bytes.length <= 8_700);
   });
 
-  test('on a small host only one part is held at a time: its songs one by one, then it goes, then the next part’s', async () => {
+  test('on a small host the songs wait on disk, one download at a time, and the zips go once they are all in; nothing is left behind', async () => {
     // Render's settings, scaled down: one download at a time, and two of these songs to a zip.
-    const runner = makeRunner({ maxFileBytes: 8_700, downloadsAhead: 1 });
-    await ask(runner, 'album shabbuson');
-    assert.deepEqual(events, [
-      'get Opening',
-      'got Opening',
-      'get הנחת תפילין',
-      'got הנחת תפילין',
-      'zip Michoel Schnitzler - Shabbuson (part 1 of 2).zip',
-      'get Closing',
-      'got Closing',
-      'zip Michoel Schnitzler - Shabbuson (part 2 of 2).zip',
-    ]);
-    assert.equal(mostInFlight, 1);
+    const spoolDir = mkdtempSync(join(tmpdir(), 'album-spool-test-'));
+    try {
+      const runner = makeRunner({ maxFileBytes: 8_700, downloadsAhead: 1, spoolDir });
+      await ask(runner, 'album shabbuson');
+      assert.deepEqual(events, [
+        'get Opening',
+        'got Opening',
+        'get הנחת תפילין',
+        'got הנחת תפילין',
+        'get Closing',
+        'got Closing',
+        'zip Michoel Schnitzler - Shabbuson (part 1 of 2).zip',
+        'zip Michoel Schnitzler - Shabbuson (part 2 of 2).zip',
+      ]);
+      assert.equal(mostInFlight, 1);
+      assert.deepEqual(readdirSync(spoolDir), [], 'the songs on disk are gone once the album is sent');
+    } finally {
+      rmSync(spoolDir, { recursive: true, force: true });
+    }
   });
 
   test('a bigger host downloads a few ahead, but never more than it is told', async () => {
@@ -536,32 +549,6 @@ describe('sending an album as a zip', () => {
     await ask(runner, 'album shabbuson');
     assert.equal(mostInFlight, 2);
     assert.deepEqual(readZip(matrix.uploads[0]!.bytes).map((entry) => entry.name), ['01 Opening.m4a', '02 הנחת תפילין.m4a', '05 Closing.m4a']);
-  });
-
-  test('an album whose sizes are not known in advance is still split to fit, its parts numbered as they go', async () => {
-    const sizeless = createBot({
-      catalog: new Catalog(':memory:'),
-      checkAudio: async () => ({ ok: true, type: 'audio/mp4' }),
-    });
-    const youTube = new YouTubeMusic({ baseUrl: youtube.url });
-    const songs = ['albumsong01', 'albumsong02', 'albumsong04'].map((id, i) => ({ number: i + 1, title: `Song ${i + 1}`, url: youTube.trackUrl(id) }));
-    const bot = { handle: async (): Promise<Reply[]> => [{ kind: 'album', title: 'No Sizes', artist: MICHOEL, songs }] };
-    void sizeless;
-    const runner = createRunner({
-      chat: new MatrixClient({ token: matrix.token, homeserver: matrix.url }),
-      bot,
-      chatID: matrix.roomId,
-      fetchAudio: (url, title) => resolvingYouTubeAudio(youTube, { checkAudio: async () => ({ ok: true, type: 'x' }), fetchAudio: (u, t) => fetchAudio(u, t) }).fetchAudio(url, title),
-      pollMs: 20,
-      log: () => {},
-      maxFileBytes: 8_700,
-      downloadsAhead: 1,
-    });
-    await ask(runner, 'album no sizes');
-    const files = matrix.sent.filter((event) => event.content.msgtype === 'm.file').map((event) => event.content.filename);
-    assert.deepEqual(files, ['Michoel Schnitzler - No Sizes (part 1).zip', 'Michoel Schnitzler - No Sizes (part 2).zip']);
-    assert.deepEqual(readZip(matrix.uploads[1]!.bytes).map((entry) => entry.name), ['03 Song 3.m4a']);
-    for (const upload of matrix.uploads) assert.ok(upload.bytes.length <= 8_700);
   });
 
   test('a song that cannot be had is left out of the zip, and the chat is told', async () => {

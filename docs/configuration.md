@@ -27,7 +27,8 @@
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CATALOG_DB` | `data/catalog.db` | The catalog file. On Render it is `/data/catalog.db`, backed up to R2 every minute. |
-| `MAX_DOWNLOAD_MB` | `100` | Largest file to download and send, up to 500. (Google Messages and the bridge take about 100.) An album's zip is split into parts of at most this size: on Render it is 30, so a 70 MB album arrives as three zips, "(part 1 of 3)" and so on. |
+| `MAX_DOWNLOAD_MB` | `100` | Largest song to download and send, up to 500. (Google Messages and the bridge take about 100.) On Render it is 30, because a song is held in memory while it is fetched and tagged. |
+| `MAX_ZIP_MB` | `100` | Largest an album's zip may be, from 1 to 100 (what the bridge and the homeserver take). An album is written to disk song by song and its zip streamed from there, so this doesn't depend on memory; a bigger album arrives as several zips, "(part 1 of 2)" and so on. |
 | `YOUTUBE_MUSIC` | on | `off` stops all use of Zemer and YouTube Music (Zemer's songs are YouTube Music's). See [Zemer and YouTube Music](youtube-music.md). |
 | `ZEMER_SEARCH` | on | `off` stops asking Zemer's catalog (`search.zemer.io`); searches then use YouTube Music's own search, with no artist pages. |
 | `ZEMER_SEARCH_URL` | `https://search.zemer.io` | Where Zemer's catalog is asked; only the tests change it. |

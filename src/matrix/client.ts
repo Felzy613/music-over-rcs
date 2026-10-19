@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { DownloadedImage } from '../image-fetch.ts';
 import type { ChatMessage, IncomingPicture } from '../runner.ts';
@@ -6,6 +10,8 @@ import type { ChatMessage, IncomingPicture } from '../runner.ts';
 export const DEFAULT_HOMESERVER = 'http://127.0.0.1:8008';
 const REQUEST_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 180_000;
+/** More time for an upload per MB: an album's zip is up to 100 MB, on a host with a tenth of a CPU. */
+const UPLOAD_MS_PER_MB = 3_000;
 const SENT_LIMIT = 500;
 const MAX_RATE_LIMIT_WAIT_MS = 10_000;
 /** The largest file from the phone that is downloaded (a picture for an add-on, say). */
@@ -263,7 +269,6 @@ const TYPING_TIMEOUT_MS = 30_000;
 interface RequestOptions {
   query?: Record<string, string>;
   body?: unknown;
-  rawBody?: Blob;
   headers?: Record<string, string>;
   timeoutMs?: number;
 }
@@ -457,12 +462,7 @@ export class MatrixClient {
     msgtype: 'm.audio' | 'm.image' | 'm.file',
     file: { data: Blob; fileName: string; mimeType: string; bytes: number },
   ): Promise<string | undefined> {
-    const upload = await this.#request('POST', '/_matrix/media/v3/upload', {
-      query: { filename: file.fileName },
-      rawBody: file.data,
-      headers: { 'content-type': file.mimeType },
-      timeoutMs: UPLOAD_TIMEOUT_MS,
-    });
+    const upload = await this.#upload(file);
     const url = asString(upload.content_uri);
     if (!url) throw new MatrixError('The homeserver did not return a content_uri for the upload', 0, '', '');
     try {
@@ -477,6 +477,50 @@ export class MatrixClient {
       url,
       info: { mimetype: file.mimeType, size: file.bytes },
     });
+  }
+
+  /**
+   * Uploads a file to the homeserver, streamed from its Blob as the homeserver takes it. Not with fetch, which reads the
+   * whole body into memory before sending it (measured: 130 MB more for a 100 MB zip, against 5 to 25 MB streamed here),
+   * on a host with 512 MB for everything where an album's zip is up to 100 MB and its songs are files on disk.
+   */
+  async #upload(file: { data: Blob; fileName: string; mimeType: string }): Promise<Json> {
+    const url = new URL(`${this.#base}/_matrix/media/v3/upload`);
+    url.searchParams.set('filename', file.fileName);
+    const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
+    const timeoutMs = UPLOAD_TIMEOUT_MS + Math.ceil(file.data.size / 1048576) * UPLOAD_MS_PER_MB;
+    for (let attempt = 0; ; attempt++) {
+      const signal = AbortSignal.timeout(timeoutMs);
+      const { status, text } = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+        const req = request(
+          url,
+          {
+            method: 'POST',
+            headers: { authorization: `Bearer ${this.#token}`, 'content-type': file.mimeType, 'content-length': String(file.data.size) },
+            signal,
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }));
+            res.on('error', reject);
+          },
+        );
+        req.on('error', reject);
+        // The homeserver may answer (and close) before it has read everything: a refusal is in its answer, not here.
+        pipeline(Readable.fromWeb(file.data.stream() as Parameters<typeof Readable.fromWeb>[0]), req).catch(() => {});
+      }).catch((err: unknown) => {
+        throw signal.aborted ? Object.assign(new Error('The upload to the homeserver took too long'), { name: 'TimeoutError' }) : err;
+      });
+      const json = parseJson(text);
+      if (status === 429 && attempt < 2) {
+        const wait = Math.min(Number(json.retry_after_ms) || 1000, MAX_RATE_LIMIT_WAIT_MS);
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        continue;
+      }
+      if (status < 200 || status >= 300) throw errorFrom(status, json, text);
+      return json;
+    }
   }
 
   async #newEvents(roomID: string): Promise<MatrixEvent[]> {
@@ -512,7 +556,7 @@ export class MatrixClient {
           ...(options.body !== undefined ? { 'content-type': 'application/json' } : {}),
           ...options.headers,
         },
-        body: options.rawBody ?? (options.body !== undefined ? JSON.stringify(options.body) : undefined),
+        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
         signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
       });
       const text = await res.text();
@@ -554,7 +598,8 @@ export function describeMatrixError(err: unknown, homeserver = DEFAULT_HOMESERVE
     return err.message;
   }
   if (err instanceof Error && err.name === 'TimeoutError') return `The homeserver at ${homeserver} took too long to answer.`;
-  if (err instanceof TypeError && /fetch failed/i.test(err.message)) {
+  const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+  if ((err instanceof TypeError && /fetch failed/i.test(err.message)) || code === 'ECONNREFUSED' || code === 'ENOTFOUND') {
     return `Can't reach the Matrix homeserver at ${homeserver}. Is it running? (npm run homeserver)`;
   }
   return err instanceof Error ? err.message : String(err);

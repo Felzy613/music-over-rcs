@@ -73,6 +73,7 @@ describe('loadBeeperConfig', () => {
       pollMs: 1500,
       dbPath: 'data/catalog.db',
       maxDownloadMb: 100,
+      maxZipMb: 100,
       digestAt: { hour: 9, minute: 0 },
       prefetchMb: Number.POSITIVE_INFINITY,
       archiveDir: undefined,
@@ -157,6 +158,7 @@ describe('loadMatrixConfig', () => {
       pollMs: 1500,
       dbPath: 'data/catalog.db',
       maxDownloadMb: 100,
+      maxZipMb: 100,
       digestAt: { hour: 9, minute: 0 },
       prefetchMb: Number.POSITIVE_INFINITY,
       archiveDir: undefined,
@@ -177,6 +179,12 @@ describe('loadMatrixConfig', () => {
     assert.equal(config.pollMs, 2500);
     assert.equal(config.maxDownloadMb, 25);
     assert.equal(config.dbPath, 'other.db');
+  });
+
+  test('an album zip may be up to 100 MB, what the bridge and the homeserver take, and no more', () => {
+    assert.equal(loadMatrixConfig({ ...matrix, MAX_ZIP_MB: '60' }).maxZipMb, 60);
+    assert.throws(() => loadMatrixConfig({ ...matrix, MAX_ZIP_MB: '150' }), /MAX_ZIP_MB must be from 1 to 100/);
+    assert.throws(() => loadMatrixConfig({ ...matrix, MAX_ZIP_MB: '0' }), /MAX_ZIP_MB must be from 1 to 100/);
   });
 
   test('reports every problem at once, with the next step', () => {

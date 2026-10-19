@@ -23,15 +23,15 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
                                                      MatrixClient.sendImage / sendText / sendAudio ──> bridge ──> phone
 ```
 
-- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42`, `post:<slug>` or `all:…`) and returns replies: `text` (optionally closing a list, with the list as its options, or standing for one song), `image` (a cover, with the song's name to draw on it), `collage` (covers, each standing for its song), `audio`. A list is a heading, one text per entry (no numbers), and a closing text with the options.
-- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵), handles 👍, `all` and (where a 👍 can't reach the bot) numbers, shows "typing…", prepares pictures and files (songs download ahead, at most three at once) and sends replies in order. Where a 👍 can't reach the bot it numbers a list and folds it back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
+- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42`, `album:<id>`, `tracks:<id>`, `post:<slug>` or `all:…`) and returns replies: `text` (optionally closing a list, with the list as its options, or standing for one song or album), `image` (a cover, with the song's name to draw on it), `collage` (covers, each standing for its song), `audio`, `album` (songs to send as one zip). A list is a heading, one text per entry, and a closing text with the options. Songs have no numbers (a 👍 picks); albums do (`number` on the line, `numbers` on the closing text), and texting an album's number (`tracks:<id>`) lists its songs, numbered as on the album.
+- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵, 💿, 🎤, or the invisible mark a list's closing line starts with), handles 👍, `all` and numbers (an album's where a 👍 picks; every line's where a 👍 can't reach the bot), shows "typing…", prepares pictures and files (songs download ahead, at most three at once) and sends replies in order. Where a 👍 can't reach the bot it numbers a list and folds it back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
 - **Transports** implement `ChatClient` (`listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `setTyping`): `src/matrix/` (the bridge route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`) is a webhook server that uses the bot directly.
 
 ## Code layout
 
 ```text
 src/bot.ts              what to answer: Zemer first, then music-table.com; artists' pages, songs, albums, lists and their format, follow / unfollow
-src/runner.ts           watches one chat and answers it; 👍, numbers where 👍 can't reach, songs spaced out, typing, announcements, safety limits
+src/runner.ts           watches one chat and answers it; 👍, numbers (albums', or every line's where 👍 can't reach), album zips from disk, songs spaced out, typing, announcements, safety limits
 src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, follows, state
 src/health.ts           problem reports when something breaks (mailed by the cloud host; a notification on a Mac); the bridge's login status, and when to restart it
 src/bridge-restart.ts   restarts the bridge when its Google Messages session goes stale (a signal to the host's supervisor; launchd on a Mac)

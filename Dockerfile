@@ -7,11 +7,16 @@ ARG SYNAPSE_VERSION=1.143.0
 ARG BRIDGE_REF=186284e
 ARG LITESTREAM_VERSION=0.5.17
 
-# The bridge, from source with the pure-Go olm (no libolm to build), as on the Mac.
+# The bridge, from source with the pure-Go olm (no libolm to build), as on the Mac. stream-media.patch passes a file from
+# the homeserver to Google through a file on disk, encrypted as it is sent (about 4 MB of memory for a 100 MB album zip,
+# against about 4 times the file without it); its tests run here, so a new BRIDGE_REF that breaks it fails the build.
 FROM golang:1-bookworm AS bridge
 ARG BRIDGE_REF
+COPY deploy/cloud/patches/ /patches/
 RUN git clone https://github.com/mautrix/gmessages /src \
  && cd /src && git checkout "${BRIDGE_REF}" \
+ && git apply /patches/gmessages-stream-media.patch \
+ && go test ./pkg/libgm/crypto/ ./pkg/libgm/ \
  && go build -tags goolm -trimpath -ldflags "-s -w" -o /out/mautrix-gmessages ./cmd/mautrix-gmessages
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS synapse

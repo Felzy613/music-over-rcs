@@ -93,6 +93,8 @@ interface ChatSettings {
   pollMs: number;
   dbPath: string;
   maxDownloadMb: number;
+  /** The largest an album's zip may be, in MB (100: what the bridge and the homeserver take); a bigger album goes as several. */
+  maxZipMb: number;
   /** When the daily new-music message goes out (this Mac's time). Undefined when DIGEST_TIME=off. */
   digestAt: DailyTime | undefined;
   /** How much disk the songs kept ready may use, in MB: Infinity (the default) for no limit, 0 for none kept. */
@@ -116,6 +118,10 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   if (!(maxDownloadMb > 0 && maxDownloadMb <= 500)) {
     problems.push(`MAX_DOWNLOAD_MB must be more than 0 and at most 500 (got "${env.MAX_DOWNLOAD_MB}")`);
   }
+  const maxZipMb = Number(env.MAX_ZIP_MB?.trim() || 100);
+  if (!(maxZipMb >= 1 && maxZipMb <= 100)) {
+    problems.push(`MAX_ZIP_MB must be from 1 to 100, what the bridge and the homeserver take (got "${env.MAX_ZIP_MB}")`);
+  }
   const digestAt = parseDailyTime(env.DIGEST_TIME);
   if (digestAt instanceof Error) problems.push(digestAt.message);
   const prefetchMb = parsePrefetchMb(env.PREFETCH_MB);
@@ -134,6 +140,7 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   return {
     pollMs,
     maxDownloadMb,
+    maxZipMb,
     dbPath: env.CATALOG_DB?.trim() || 'data/catalog.db',
     digestAt: digestAt instanceof Error ? undefined : digestAt,
     prefetchMb: prefetchMb instanceof Error ? 0 : prefetchMb,

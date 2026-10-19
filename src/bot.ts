@@ -214,7 +214,7 @@ export const BROWSE_HELP_TEXT = [
   '"zemer" and a song looks only on Zemer (music-table.com is where the rest comes from).',
   '"trending", "new", "chanukah", "purim", "wedding" or "vocal" for music-table.com\'s lists, "more" for the next ones, and "all" for every song on a list.',
   '"follow" and an artist to get their new songs as soon as they\'re out ("unfollow", "following").',
-  'Tap 👍 on a song (🎵) or an album (💿) to get it.',
+  'Tap 👍 on a song (🎵) to get it, or on an album (💿) for all of it as a zip; text an album\'s number to choose from its songs.',
 ].join('\n');
 
 const TRENDING = new Set(['trending', 'top', 'top songs', 'top 10', 'popular', 'hot', 'whats hot', 'what s hot', 'trending songs', 'charts']);
@@ -290,36 +290,48 @@ const mainArtist = (credit: string): string => splitArtists(credit)[0] ?? credit
 export const songLine = (song: { title: string; artist: string }, credit: boolean): string =>
   credit && song.artist ? `${shownTitle(song.title)} — ${shortCredit(song.artist)}` : shownTitle(song.title);
 
+/** A release of one song (or a song and its versions), which is listed as its song rather than as an album of it. */
+const isSingle = (album: Album): boolean => Boolean(album.single) || album.songs === 1;
+
 /** An album in a list: "💿 Title · 2008 · 14 songs", with " — Artist" after the title when the list isn't all theirs. */
 function albumLine(album: Album, credit = false): string {
-  const size = album.single || album.songs === 1 ? 'single' : album.songs ? `${album.songs} songs` : undefined;
+  const size = isSingle(album) ? 'single' : album.songs ? `${album.songs} songs` : undefined;
   const details = [album.year, size].filter((detail) => detail !== undefined);
   return `💿 ${album.title}${credit && album.artist ? ` — ${shortCredit(album.artist)}` : ''}${details.map((detail) => ` · ${detail}`).join('')}`;
 }
 
+/** What a list with albums in it says about their numbers (left out where every line is numbered; see joinLists). */
+const ALBUM_NUMBER_HINT = "Text an album's number to choose from its songs";
+
 /**
- * Songs and albums to pick from, one message each so that a 👍 on one gets it: the songs ("Title — Artist"), then the
- * albums ("💿 Title — Artist · 2008 · 14 songs"). When they are all one artist's, the artist's name comes first, once
- * ("🎤 Lipa Schmeltzer"), and the lines leave it out. A closing line, when given, says what else can be done ("more").
- * The list's chips (what "all" sends, and the numbers where a 👍 can't reach the bot) ride on the last message, which
- * the runner doesn't send when it has no words.
+ * Songs and albums to pick from, one message each so that a 👍 on one gets it (a song, or an album's whole zip): the
+ * songs ("Title — Artist"), then the albums ("💿 Title — Artist · 2008 · 14 songs"), numbered, because texting an
+ * album's number lists its songs to choose from. When they are all one artist's, the artist's name comes first, once
+ * ("🎤 Lipa Schmeltzer"), and the lines leave it out. The closing line says what else can be done: an album's number,
+ * and "more" for what `more` names ("more of Lipa Schmeltzer"). A page that goes on from earlier ones numbers its
+ * albums on from the ones shown before (`earlier`), whose numbers still pick. The list's chips (what "all" sends, and
+ * the numbers where a 👍 can't reach the bot) ride on the last message, which the runner doesn't send when it has no words.
  */
-function pickList(songs: Track[], albums: Album[], options: { heading?: string; closing?: string; validMs?: number } = {}): Reply[] {
+function pickList(songs: Track[], albums: Album[], options: { heading?: string; more?: string; earlier?: Album[]; validMs?: number } = {}): Reply[] {
   const artists = new Set([...songs, ...albums].map((item) => artistKey(mainArtist(item.artist))));
   const first = songs[0] ?? albums[0];
   const oneArtist = artists.size === 1 && first !== undefined && artistKey(first.artist) !== '';
   const heading = options.heading ?? (oneArtist ? `🎤 ${mainArtist(first.artist)}` : undefined);
   // Under an artist's name, a song that is someone else's too still says so.
   const credit = (artist: string): boolean => !oneArtist || artistKey(artist) !== artistKey(mainArtist(artist));
-  const entries = [
+  const before = options.earlier ?? [];
+  const entries: Array<{ text: string; postback: string; label: string; number?: number }> = [
     ...songs.map((song) => ({ text: songLine(song, credit(song.artist)), postback: `play:${song.id}`, label: shownTitle(song.title) })),
-    ...albums.map((album) => ({ text: albumLine(album, !oneArtist), postback: `album:${album.id}`, label: album.title })),
+    ...albums.map((album, i) => ({ text: albumLine(album, !oneArtist), postback: `album:${album.id}`, label: album.title, number: before.length + i + 1 })),
   ];
   const chips = entries.map((entry, i) => ({ label: chipLabel(i + 1, entry.label), postback: entry.postback }));
+  const numbers = [...before, ...albums].map((album, i) => ({ number: i + 1, postback: `tracks:${album.id}` }));
+  const closing =
+    albums.length > 0 ? `${ALBUM_NUMBER_HINT}${options.more ? `, or "more" for ${options.more}` : ''}.` : options.more ? `Text "more" for ${options.more}.` : '';
   return [
     ...(heading ? [say(heading)] : []),
-    ...entries.map((entry): Reply => ({ kind: 'text', text: entry.text, postback: entry.postback })),
-    { kind: 'text', text: options.closing ?? '', chips, chipsValidMs: options.validMs ?? CHOICE_VALID_MS },
+    ...entries.map((entry): Reply => ({ kind: 'text', text: entry.text, postback: entry.postback, ...(entry.number !== undefined ? { number: entry.number } : {}) })),
+    { kind: 'text', text: closing, chips, chipsValidMs: options.validMs ?? CHOICE_VALID_MS, ...(albums.length > 0 ? { numbers } : {}) },
   ];
 }
 
@@ -370,7 +382,9 @@ type TextReply = Extract<Reply, { kind: 'text' }>;
 /**
  * For chats where a 👍 can't reach the bot (Beeper, RCS for Business, a terminal), where a number picks instead: each
  * song in a list (and each cover in a collage) gets its number from the list's chips, a list's lines are folded back
- * into one message under its heading, and how to pick says to reply with a number. Everything else is left as it is.
+ * into one message under its heading, and how to pick says to reply with a number. The numbers a list has for a 👍
+ * chat (an album's, which opens its songs there) are left out: here an album's number is its line's and gets its zip.
+ * Everything else is left as it is.
  */
 export function joinLists(answer: Reply[]): Reply[] {
   const numbers = new Map<string, number>();
@@ -382,9 +396,13 @@ export function joinLists(answer: Reply[]): Reply[] {
       return { ...reply, images: reply.images.map((image) => (numbers.has(image.postback) ? { ...image, number: numbers.get(image.postback)! } : image)) };
     }
     if (reply.kind !== 'text') return reply;
-    if (reply.chips) return { ...reply, text: reply.text.replace(/^Tap 👍 on (?:one|a song|it) to\b/m, 'Reply with a number to') };
-    const n = reply.postback === undefined ? undefined : numbers.get(reply.postback);
-    return n === undefined ? reply : { ...reply, text: `${n}. ${reply.text}` };
+    const { number: _number, numbers: _numbers, ...plain } = reply;
+    if (plain.chips) {
+      const text = plain.text.replace(`${ALBUM_NUMBER_HINT}, or "more"`, 'Text "more"').replace(`${ALBUM_NUMBER_HINT}.`, '');
+      return { ...plain, text: text.replace(/^Tap 👍 on (?:one|a song|it) to\b/m, 'Reply with a number to') };
+    }
+    const n = plain.postback === undefined ? undefined : numbers.get(plain.postback);
+    return n === undefined ? plain : { ...plain, text: `${n}. ${plain.text}` };
   });
   const out: Reply[] = [];
   const isLine = (reply: Reply | undefined): reply is TextReply => reply?.kind === 'text' && Boolean(reply.postback) && !reply.chips;
@@ -670,10 +688,14 @@ export function createBot(deps: BotDeps): Bot {
       return undefined;
     }
     if (!page || page.songs.length + page.albums.length === 0) return undefined;
-    const { artist, songs, singles } = page;
+    const { artist, singles } = page;
     // One edition of each album here ("album" and the artist lists them all): the original, or else the newest.
     const albums = editions(page.albums);
-    const sizes = [page.albums.length > 0 && plural(page.albums.length, 'album'), singles > 0 && plural(singles, 'single'), plural(songs.length, 'song')].filter(Boolean).join(' · ');
+    // A song on one of their albums is listed under that album (its number lists the album's songs), not on its own as
+    // if it were a single.
+    const onAlbums = new Set(page.albums.filter((album) => !isSingle(album)).map((album) => album.id));
+    const songs = page.songs.filter((song) => !song.album || !onAlbums.has(song.album.id));
+    const sizes = [page.albums.length > 0 && plural(page.albums.length, 'album'), singles > 0 && plural(singles, 'single'), plural(page.songs.length, 'song')].filter(Boolean).join(' · ');
     const show = async (shownSongs: number, shownAlbums: number): Promise<Reply[]> => {
       const nextSongs = songs.slice(shownSongs, shownSongs + ARTIST_SONGS);
       const nextAlbums = albums.slice(shownAlbums, shownAlbums + ARTIST_ALBUMS);
@@ -686,7 +708,8 @@ export function createBot(deps: BotDeps): Bot {
         nextAlbums,
         {
           heading: shownSongs + shownAlbums === 0 ? `🎤 ${artist.name}\n${sizes}` : `🎤 ${artist.name}, continued`,
-          ...(left ? { closing: `Text "more" for more of ${artist.name}.` } : {}),
+          ...(left ? { more: `more of ${artist.name}` } : {}),
+          earlier: albums.slice(0, shownAlbums),
           validMs: LIST_VALID_MS,
         },
       );
@@ -712,7 +735,8 @@ export function createBot(deps: BotDeps): Bot {
       offerMore(left ? async () => show(soFar) : allShown(`${artist.name}'s albums`));
       return pickList([], next, {
         heading: shown === 0 ? `🎤 ${artist.name} · ${plural(albums.length, 'album')}, newest first` : `🎤 ${artist.name}'s albums, continued`,
-        ...(left ? { closing: `Text "more" for more of ${artist.name}'s albums.` } : {}),
+        ...(left ? { more: `more of ${artist.name}'s albums` } : {}),
+        earlier: albums.slice(0, shown),
         validMs: LIST_VALID_MS,
       });
     };
@@ -763,7 +787,10 @@ export function createBot(deps: BotDeps): Bot {
     // The albums the words name come first; with none, the songs are what was asked for and the albums follow them.
     const namedAlbums = albums.filter((album) => named(album, tokens));
     if (namedAlbums.length > 0 && namedSongs.length === 0) return pickList([], albums.slice(0, MAX_CHOICES));
-    return pickList(await Promise.all(songs.slice(0, MAX_CHOICES).map((song) => song.keep())), albums.slice(0, MAX_ALBUMS_LISTED));
+    // A song on an album that is listed too is there, under the album's number, rather than on its own.
+    const listed = albums.slice(0, MAX_ALBUMS_LISTED);
+    const own = songs.filter((song) => !listed.some((album) => album.id === song.album?.id && !isSingle(album)));
+    return pickList(await Promise.all(own.slice(0, MAX_CHOICES).map((song) => song.keep())), listed);
   }
 
   /**
@@ -894,8 +921,39 @@ export function createBot(deps: BotDeps): Bot {
         artist: album.artist,
         songs: songs.flatMap((song, i) => {
           const check = checks[i]!;
-          return check.ok ? [{ number: song.number, title: song.track.title, url: song.track.url, ...(check.bytes ? { bytes: check.bytes } : {}) }] : [];
+          return check.ok ? [{ number: song.number, title: song.track.title, url: song.track.url }] : [];
         }),
+      },
+    ];
+  }
+
+  /**
+   * An album's songs to choose from (an album's number, texted): the album first (a 👍 on it gets all of it as a zip),
+   * then each song with its number on the album (a 👍, or its number, gets that song). Nothing is checked or downloaded
+   * until a song is picked.
+   */
+  async function albumSongs(id: string): Promise<Reply[]> {
+    const albums = deps.albums;
+    if (!albums) return [say('Albums come from Zemer, which is turned off (YOUTUBE_MUSIC=off).')];
+    let opened: Awaited<ReturnType<AlbumSource['open']>>;
+    try {
+      opened = await albums.open(id);
+    } catch (err) {
+      if (!(err instanceof SourceError)) throw err;
+      return [say(`I can't open that album: ${err.message}.`)];
+    }
+    const { album, songs, leftOut } = opened;
+    // A song that is someone else's too (a duet, a guest) still says so.
+    const credit = (artist: string): boolean => artistKey(artist) !== artistKey(album.artist);
+    return [
+      { kind: 'text', text: albumLine(album, true), postback: `album:${album.id}` },
+      ...songs.map(({ number, track }): Reply => ({ kind: 'text', text: songLine(track, credit(track.artist)), postback: `play:${track.id}`, number })),
+      {
+        kind: 'text',
+        text: `Tap 👍 on the songs you want, or on the album for all of it as a zip.${leftOut > 0 ? ` (${plural(leftOut, 'song')} left out: not on Zemer's list.)` : ''}`,
+        chips: songs.map(({ track }, i) => ({ label: chipLabel(i + 1, shownTitle(track.title)), postback: `play:${track.id}` })),
+        chipsValidMs: LIST_VALID_MS,
+        numbers: songs.map(({ number, track }) => ({ number, postback: `play:${track.id}` })),
       },
     ];
   }
@@ -927,6 +985,8 @@ export function createBot(deps: BotDeps): Bot {
         if (all !== undefined) return playAll(all.split('|'));
         const albumId = /^album:(.+)$/.exec(msg.postback)?.[1];
         if (albumId !== undefined) return sendAlbum(albumId);
+        const tracksOf = /^tracks:(.+)$/.exec(msg.postback)?.[1];
+        if (tracksOf !== undefined) return albumSongs(tracksOf);
         const album = /^post:(.+)$/.exec(msg.postback)?.[1];
         if (album !== undefined) {
           const tracks = deps.catalog.postTracks?.(album) ?? [];

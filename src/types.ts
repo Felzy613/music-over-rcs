@@ -12,13 +12,17 @@ export interface AlbumSong {
   number: number;
   title: string;
   url: string;
-  /** Its size, when known before downloading it: lets the zip parts be planned before anything is downloaded. */
-  bytes?: number;
 }
 
 /** A tappable suggestion under a message. `label` is capped at 25 characters by RCS. */
 export interface Chip {
   label: string;
+  postback: string;
+}
+
+/** A number shown in a list where a 👍 picks the rest, and what texting it picks (an album's number opens its songs). */
+export interface NumberedChoice {
+  number: number;
   postback: string;
 }
 
@@ -30,10 +34,12 @@ export interface Chip {
  * `chipsValidMs` (30 minutes unless given): the songs "all" sends, and, in chats where a 👍 can't reach the bot,
  * what each number picks (the songs are numbered there; see joinLists). An image's caption is the song's name, drawn
  * under the cover where pictures can be drawn and sent as text otherwise. A collage is several covers in one picture,
- * each with its song's name, and its number where the list is numbered.
+ * each with its song's name, and its number where the list is numbered. Where a 👍 picks, a few lines of a list carry
+ * a `number` (the albums in a list, the songs of an album), shown before the line, and the text that closes the list
+ * says what each number picks (`numbers`): texting one picks it. Elsewhere every line is numbered from the chips instead.
  */
 export type Reply =
-  | { kind: 'text'; text: string; chips?: Chip[]; chipsValidMs?: number; postback?: string }
+  | { kind: 'text'; text: string; chips?: Chip[]; chipsValidMs?: number; postback?: string; number?: number; numbers?: NumberedChoice[] }
   | { kind: 'album'; title: string; artist: string; songs: AlbumSong[] }
   | { kind: 'image'; url: string; caption?: { title: string; artist: string }; postback?: string }
   | { kind: 'collage'; images: Array<{ url: string; label: string; postback: string; number?: number }> }
