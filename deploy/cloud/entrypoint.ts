@@ -53,6 +53,16 @@ try {
 
 const bucket = s3FromEnv(process.env, { log });
 const lease = bucket ? new LeaseClient({ store: s3LeaseStore(bucket), holder: config.holder }) : undefined;
+// Synapse's signing key is kept in the bucket, so a start does not have Python make a new one (15 to 20 s on this CPU).
+const SIGNING_KEY_OBJECT = 'keys/synapse-signing.key';
+const signingKey = bucket
+  ? {
+      get: async () => (await bucket.get(SIGNING_KEY_OBJECT))?.text,
+      put: async (text: string) => {
+        if (!(await bucket.put(SIGNING_KEY_OBJECT, text)).ok) throw new Error('R2 refused the key');
+      },
+    }
+  : undefined;
 // Render allows 30 s between SIGTERM and SIGKILL, and four processes are stopped one after another.
 const supervisor = new Supervisor({ log, graceMs: 6000 });
 
@@ -73,7 +83,7 @@ process.on('SIGTERM', () => void terminate('SIGTERM'));
 process.on('SIGINT', () => void terminate('SIGINT'));
 
 try {
-  booted = await boot({ config, env: process.env, log, sys, supervisor, lease, onLost: () => process.exit(1), onPhase: (text) => door.setPhase(text) });
+  booted = await boot({ config, env: process.env, log, sys, supervisor, lease, onLost: () => process.exit(1), onPhase: (text) => door.setPhase(text), signingKey });
   log(`up as ${config.holder}`);
 } catch (err) {
   console.error(`cannot start: ${err instanceof Error ? err.message : String(err)}`);

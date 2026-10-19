@@ -19,6 +19,10 @@ const ENV = {
 };
 const EXAMPLE = `homeserver:\n    address: https://example.com\n    domain: example.com\nappservice:\n    address: http://localhost:29336\n    hostname: 0.0.0.0\n    port: 29336\n    as_token: "x"\n    hs_token: "y"\ndatabase:\n    type: "postgres"\n    uri: postgres://x\nprovisioning:\n    allow_matrix_auth: false\nnetwork:\n    initial_chat_sync_count: 25\nbackfill:\n    enabled: true\nlogging:\n    min_level: debug\n    writers:\n        - type: stdout\nbridge:\n    permissions:\n        "*": relay\n`;
 
+/** A signing key as Synapse writes it: algorithm, version, base64 seed. */
+const MADE_KEY = 'ed25519 a_MADE c2VlZHNlZWRzZWVkc2VlZHNlZWRzZWVkc2Vl\n';
+const KEPT_KEY = 'ed25519 a_KEPT a2VwdGtlcHRrZXB0a2VwdGtlcHRrZXB0a2Vw\n';
+
 interface Setup {
   events: string[];
   files: Map<string, string>;
@@ -34,7 +38,7 @@ interface Setup {
   restoreOverlap(): number;
 }
 
-function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; keysCode?: number; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string } } = {}): Setup {
+function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; keysCode?: number; signingKey?: BootDeps['signingKey']; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string } } = {}): Setup {
   const env = { ...ENV, ...options.env } as NodeJS.ProcessEnv;
   if (options.backup === false) for (const name of ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) delete env[name];
   const config = readCloudConfig(env);
@@ -75,6 +79,7 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
         return { code: 0, output: '' };
       }
       if (name === 'python' && args.includes('--generate-keys') && options.keysCode) return { code: options.keysCode, output: 'no signing key for you' };
+      if (name === 'python' && args.includes('--generate-keys')) files.set(paths.synapseKey, MADE_KEY);
       if (name === 'register_new_matrix_user') return options.accountOutput ?? { code: 0, output: '' };
       return { code: 0, output: '' };
     },
@@ -108,6 +113,7 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
           },
     onLost: () => void events.push('onLost'),
     onPhase: (text) => void phases.push(text),
+    ...(options.signingKey ? { signingKey: options.signingKey } : {}),
     renewEveryMs: 10,
   };
   // The lease is granted at once unless a test wants to hold it back.
@@ -189,6 +195,107 @@ describe('the boot sequence', () => {
     assert.ok(bridge.includes('"@me:localhost": admin'));
     assert.ok(bridge.includes('address: "http://127.0.0.1:8008"'));
     assert.deepEqual(s.commands.find((c) => c.args.includes('--generate-keys'))?.args.slice(0, 3), ['-m', 'synapse.app.homeserver', '-c']);
+  });
+
+  describe('Synapse’s signing key', () => {
+    const keyStore = (initial: string | undefined, behaviour: { getThrows?: boolean; putThrows?: boolean } = {}) => {
+      const puts: string[] = [];
+      let gets = 0;
+      return {
+        puts,
+        gets: () => gets,
+        store: {
+          get: async () => {
+            gets++;
+            if (behaviour.getThrows) throw new Error('R2 said no');
+            return initial;
+          },
+          put: async (text: string) => {
+            if (behaviour.putThrows) throw new Error('R2 refused the key');
+            puts.push(text);
+          },
+        },
+      };
+    };
+    const keyPath = pathsFor('/data').synapseKey;
+
+    test('a key kept from an earlier start is put in place, and Python is not asked for another', async () => {
+      const kept = keyStore(KEPT_KEY);
+      const s = setUp({ signingKey: kept.store });
+      await boot(s.deps);
+      assert.equal(s.files.get(keyPath), KEPT_KEY);
+      assert.ok(!s.commands.some((c) => c.args.includes('--generate-keys')), 'the 15 seconds of Python are skipped');
+      assert.deepEqual(kept.puts, [], 'and nothing is written back');
+      assert.ok(s.events.some((event) => /signing key came from the backup/.test(event)));
+    });
+
+    test('the first start makes the key with Synapse and keeps what Synapse wrote for the next', async () => {
+      const kept = keyStore(undefined);
+      const s = setUp({ signingKey: kept.store });
+      await boot(s.deps);
+      assert.ok(s.commands.some((c) => c.args.includes('--generate-keys')));
+      assert.deepEqual(kept.puts, [MADE_KEY]);
+      assert.equal(s.files.get(keyPath), MADE_KEY);
+      assert.ok(s.events.some((event) => /kept Synapse's signing key in the backup/.test(event)));
+    });
+
+    test('a kept key without its final newline still lands as one line, and a key in the wrong form is not trusted', async () => {
+      const bare = setUp({ signingKey: keyStore(KEPT_KEY.trimEnd()).store });
+      await boot(bare.deps);
+      assert.equal(bare.files.get(keyPath), KEPT_KEY);
+
+      for (const garbage of ['', 'not a key', 'rsa a_x AAAA\n', 'ed25519 a_x AAAA\nextra line\n', '<html>Bad Gateway</html>']) {
+        const kept = keyStore(garbage);
+        const s = setUp({ signingKey: kept.store });
+        await boot(s.deps);
+        assert.ok(s.commands.some((c) => c.args.includes('--generate-keys')), `"${garbage}" is not used`);
+        assert.equal(s.files.get(keyPath), MADE_KEY);
+        assert.deepEqual(kept.puts, [MADE_KEY], `"${garbage}" is replaced by Synapse's own`);
+        assert.ok(s.events.some((event) => /not in the form Synapse writes/.test(event)));
+      }
+    });
+
+    test('a bucket that cannot be read makes the start slower, not impossible', async () => {
+      const kept = keyStore(KEPT_KEY, { getThrows: true });
+      const s = setUp({ signingKey: kept.store });
+      await boot(s.deps);
+      assert.ok(s.commands.some((c) => c.args.includes('--generate-keys')));
+      assert.ok(s.events.includes('supervisor.start'));
+      assert.ok(s.events.some((event) => /could not read Synapse's signing key from the backup \(R2 said no\)/.test(event)));
+    });
+
+    test('a bucket that refuses the key is reported and the start carries on', async () => {
+      const s = setUp({ signingKey: keyStore(undefined, { putThrows: true }).store });
+      await boot(s.deps);
+      assert.ok(s.events.includes('supervisor.start'));
+      assert.ok(s.events.some((event) => /could not keep Synapse's signing key in the backup \(R2 refused the key\)/.test(event)));
+    });
+
+    test('a key that Synapse itself failed to make is still a failed start, and nothing bad is kept', async () => {
+      const kept = keyStore(undefined);
+      const s = setUp({ signingKey: kept.store, keysCode: 1 });
+      await assert.rejects(() => boot(s.deps), /Synapse could not make its signing key/);
+      assert.deepEqual(kept.puts, []);
+    });
+
+    test('without a bucket it is made every start, as before', async () => {
+      const s = setUp({ backup: false });
+      await boot(s.deps);
+      assert.ok(s.commands.some((c) => c.args.includes('--generate-keys')));
+    });
+
+    test('is looked up once, while the host waits for the lease and before anything is restored', async () => {
+      const kept = keyStore(KEPT_KEY);
+      const s = setUp({ signingKey: kept.store, holdLease: true, replicaExists: true });
+      const booting = boot(s.deps);
+      await settle(30);
+      assert.equal(kept.gets(), 1);
+      assert.equal(s.files.get(keyPath), KEPT_KEY, 'in place before the lease, so the wait is not spent on it');
+      assert.ok(!s.commands.some((c) => c.args[0] === 'restore'));
+      s.grantLease();
+      await booting;
+      assert.equal(kept.gets(), 1);
+    });
   });
 
   test('starts the replicator, homeserver, bridge and bot, to be stopped in the reverse order', async () => {

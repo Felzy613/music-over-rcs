@@ -95,12 +95,20 @@ export interface BootDeps {
   onLost: () => void;
   /** Told what the start is doing ("restoring the databases"), for the front door's "starting up" page. */
   onPhase?: (text: string) => void;
+  /**
+   * Where Synapse's signing key is kept between starts (the bucket). Without it every start has Synapse make a new one, which on a
+   * tenth of a CPU is 15 to 20 seconds of Python while the bot is away.
+   */
+  signingKey?: { get(): Promise<string | undefined>; put(text: string): Promise<void> };
   renewEveryMs?: number;
 }
 
 export interface Booted {
   shutdown(): Promise<void>;
 }
+
+/** Synapse's signing key file: one line, `<algorithm> <version> <base64 key>`. */
+const SIGNING_KEY = /^ed25519 \S+ \S+\n?$/;
 
 const pick = (env: NodeJS.ProcessEnv, names: string[]): NodeJS.ProcessEnv => Object.fromEntries(names.flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])));
 
@@ -149,8 +157,39 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     const generated = await sys.run(config.bins.bridge, ['-c', paths.bridgeConfig, '-e'], { cwd: paths.bridgeDir });
     if (generated.code !== 0 || !(await sys.exists(paths.bridgeConfig))) throw new Error(`the bridge could not write its example config (exit ${generated.code}): ${generated.output.trim().split('\n').slice(-3).join(' | ')}`);
     await sys.writeFile(paths.bridgeConfig, patchBridgeConfig(await sys.readFile(paths.bridgeConfig), bridge), 0o600);
+    await signingKey();
+  };
+
+  // Synapse's signing key: the one kept from an earlier start if there is one, else Synapse makes it (the first start, or a bucket
+  // that cannot be read) and it is kept for the next. What is kept is what Synapse itself wrote, so its form is never our guess;
+  // it is only checked to be one line of the form `ed25519 <version> <key>` before it is trusted.
+  const signingKey = async (): Promise<void> => {
+    const store = deps.signingKey;
+    let kept: string | undefined;
+    if (store) {
+      try {
+        kept = await store.get();
+      } catch (err) {
+        log(`could not read Synapse's signing key from the backup (${err instanceof Error ? err.message : String(err)}); making a new one`);
+      }
+    }
+    if (kept !== undefined && SIGNING_KEY.test(kept)) {
+      await sys.writeFile(paths.synapseKey, kept.endsWith('\n') ? kept : `${kept}\n`, 0o600);
+      log("Synapse's signing key came from the backup");
+      return;
+    }
+    if (kept !== undefined) log("the signing key in the backup is not in the form Synapse writes; making a new one");
     const keys = await sys.run(config.bins.python, ['-m', 'synapse.app.homeserver', '-c', paths.synapseConfig, '--generate-keys']);
     if (keys.code !== 0) throw new Error(`Synapse could not make its signing key (exit ${keys.code}): ${keys.output.trim().split('\n').slice(-3).join(' | ')}`);
+    if (!store) return;
+    try {
+      const made = await sys.readFile(paths.synapseKey);
+      if (!SIGNING_KEY.test(made)) throw new Error('Synapse wrote a key in a form that was not expected, so it is not kept');
+      await store.put(made);
+      log("kept Synapse's signing key in the backup for the next start");
+    } catch (err) {
+      log(`could not keep Synapse's signing key in the backup (${err instanceof Error ? err.message : String(err)}); the next start makes another`);
+    }
   };
   const provisioned: Promise<unknown> = provision().then(
     () => undefined,
