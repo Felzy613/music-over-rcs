@@ -22,6 +22,9 @@ export class AudioFetchError extends Error {
   }
 }
 
+/** About how much of a download is gathered into one Blob before the next is begun. */
+const PART_BYTES = 4 * 1024 * 1024;
+
 const TYPE_BY_EXTENSION: Record<string, string> = {
   mp3: 'audio/mpeg',
   m4a: 'audio/mp4',
@@ -117,23 +120,35 @@ export async function fetchAudio(rawUrl: string, title?: string, options: FetchA
   if (Number.isFinite(declared) && declared > maxBytes) return refuse(tooBig(declared, maxBytes));
   if (!res.body) return refuse('the file is empty');
 
-  const chunks: Uint8Array[] = [];
+  // The song is gathered into Blobs of a few MB as it arrives (each chunk is copied once, into the Blob it joins), and the Blobs are
+  // joined into one at the end, which shares their data. Keeping every chunk and then copying them all into one Blob held the whole
+  // song twice at its end, and on a small host that is the difference between a 27 MB song fitting and not.
+  const parts: Blob[] = [];
+  let group: Uint8Array[] = [];
+  let groupBytes = 0;
   let total = 0;
   try {
     for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
       total += chunk.byteLength;
       if (total > maxBytes) throw new AudioFetchError(`the file is bigger than the ${megabytes(maxBytes)} MB limit`);
-      chunks.push(chunk);
+      group.push(chunk);
+      groupBytes += chunk.byteLength;
+      if (groupBytes >= PART_BYTES) {
+        parts.push(new Blob(group as unknown as ConstructorParameters<typeof Blob>[0]));
+        group = [];
+        groupBytes = 0;
+      }
     }
   } catch (err) {
     if (err instanceof AudioFetchError) throw err;
     throw new AudioFetchError('the download was interrupted');
   }
   if (total === 0) throw new AudioFetchError('the file is empty');
+  if (group.length > 0) parts.push(new Blob(group as unknown as ConstructorParameters<typeof Blob>[0]));
 
   const generic = kind.type === '' || kind.type === 'application/octet-stream';
   const urlExtension = /\.([a-z0-9]{2,5})$/i.exec(lastSegment(url))?.[1]?.toLowerCase() ?? '';
   const mimeType = generic ? (TYPE_BY_EXTENSION[urlExtension] ?? 'application/octet-stream') : kind.type;
-  const data = new Blob(chunks as unknown as ConstructorParameters<typeof Blob>[0], { type: mimeType });
+  const data = new Blob(parts, { type: mimeType });
   return { data, fileName: fileNameFor(title, url, mimeType), mimeType, bytes: total };
 }

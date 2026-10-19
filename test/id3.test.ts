@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { Catalog } from '../src/catalog.ts';
-import { AudioCache } from '../src/library/audio-cache.ts';
-import { audioTypeOf, hasCover, isMp3, readTextTags, writeTags, type SongTags } from '../src/library/id3.ts';
+import { AudioCache, taggedFetch } from '../src/library/audio-cache.ts';
+import { audioTypeOf, hasCover, headOfBlob, isMp3, readTextTags, writeTags, writeTagsToBlob, type CoverPicture, type SongTags } from '../src/library/id3.ts';
 import { extensionOf, nameSong, songTags } from '../src/library/naming.ts';
 
 const bytes = (text: string) => Uint8Array.from(text, (char) => char.charCodeAt(0));
@@ -189,5 +189,141 @@ describe('id3: kept songs are tagged', () => {
     assert.equal(back?.mimeType, 'audio/mp4');
     assert.equal(back?.fileName, 'Mama Rachel Medley.m4a');
     assert.deepEqual(await kept.organize(), { state: undefined, moved: 0, sorted: 0, tagged: 0, failed: 0 }, 'settled');
+  });
+});
+
+
+describe('id3: the tags put on a song held as a Blob', () => {
+  const COVER: CoverPicture = { data: Uint8Array.of(9, 9, 9), mimeType: 'image/jpeg' };
+  const blobOf = (data: Uint8Array) => new Blob([data], { type: 'audio/mpeg' });
+  const bytesOf = async (blob: Blob) => new Uint8Array(await blob.arrayBuffer());
+  const chapter = frame('CHAP', concat(bytes('ch1\0'), new Uint8Array(16), textFrame('TIT2', 'Part one')));
+  const longAudio = concat(AUDIO, ...Array.from({ length: 300 }, () => AUDIO)); // ~120 KB
+  // a v2.4 tag with a footer (flag 0x10): ten bytes after the tag that are not audio
+  const withFooter = (() => {
+    const body = concat(textFrame('TIT2', 'old', 4), new Uint8Array(16));
+    return concat(bytes('ID3'), Uint8Array.of(4, 0, 0x10), syncsafe(body.length), body, bytes('3DI'), Uint8Array.of(4, 0, 0x10), syncsafe(body.length));
+  })();
+
+  const FILES: Record<string, Uint8Array> = {
+    'an upload: a tag with a picture and junk, an ID3v1 tag at the end': concat(tag(3, textFrame('TIT2', 'Derech - Ishay Ribo (Official Audio)'), textFrame('TCON', 'People & Blogs'), pictureFrame(3)), AUDIO, ID3V1),
+    'a v2.4 tag with a picture': concat(tag(4, textFrame('TIT2', 'old', 4), pictureFrame(4)), AUDIO),
+    'a tag without a picture': concat(tag(4, textFrame('TSSE', 'Lavf', 4)), AUDIO),
+    'chapters of a medley': concat(tag(3, textFrame('TIT2', 'Medley'), chapter), AUDIO),
+    'no tag at all': AUDIO,
+    'an ID3v1 tag only': concat(AUDIO, ID3V1),
+    'two tags one after the other': concat(tag(3, textFrame('TIT2', 'first')), tag(3, textFrame('TIT2', 'second'), pictureFrame(3)), AUDIO),
+    'a v2.4 tag with a footer': concat(withFooter, AUDIO, ID3V1),
+    'padding before the first frame': concat(tag(3, textFrame('TIT2', 'old')), new Uint8Array(20), AUDIO),
+    'a long song': concat(tag(3, textFrame('TIT2', 'old'), pictureFrame(3)), longAudio, ID3V1),
+    'less than 128 bytes of audio after the tag': concat(tag(3, textFrame('TIT2', 'old')), AUDIO.subarray(0, 40)),
+    'a tag that claims more than the file holds': concat(tag(3, textFrame('TIT2', 'old')).subarray(0, 30), new Uint8Array(0)),
+  };
+
+  test('gives the very file writeTags gives, for each kind of MP3, with a cover and without', async () => {
+    for (const [name, file] of Object.entries(FILES)) {
+      for (const cover of [undefined, COVER]) {
+        const expected = writeTags(file, TAGS, cover);
+        const asked: string[] = [];
+        const written = await writeTagsToBlob(blobOf(file), TAGS, cover ? async () => (asked.push('cover'), cover) : undefined);
+        if (!expected) {
+          assert.equal(written, undefined, `${name}: not an MP3, so nothing`);
+          continue;
+        }
+        assert.ok(written, name);
+        assert.ok(Buffer.from(await bytesOf(written)).equals(Buffer.from(expected)), `${name}${cover ? ' with a cover' : ''}: the same bytes`);
+        assert.equal(written.size, expected.length, name);
+        assert.equal(asked.length, hasCover(file) || !cover ? 0 : 1, `${name}: the cover is asked for only when the song has none`);
+      }
+    }
+  });
+
+  test('is what two passes (the tags, then a cover) used to give, in one pass', async () => {
+    for (const name of ['a tag without a picture', 'chapters of a medley', 'no tag at all', 'an ID3v1 tag only']) {
+      const file = FILES[name]!;
+      const twoPasses = writeTags(writeTags(file, TAGS)!, TAGS, COVER)!;
+      const onePass = (await writeTagsToBlob(blobOf(file), TAGS, async () => COVER))!;
+      assert.ok(Buffer.from(await bytesOf(onePass)).equals(Buffer.from(twoPasses)), name);
+    }
+  });
+
+  test('a cover that cannot be had leaves the song tagged without one', async () => {
+    const file = FILES['a tag without a picture']!;
+    const written = (await writeTagsToBlob(blobOf(file), TAGS, async () => undefined))!;
+    assert.equal(hasCover(await bytesOf(written)), false);
+    assert.equal(readTextTags(await bytesOf(written)).TIT2, TAGS.title);
+  });
+
+  test('what is not an MP3 comes back as nothing: an M4A, noise, an empty file', async () => {
+    assert.equal(await writeTagsToBlob(new Blob([M4A]), TAGS), undefined);
+    assert.equal(await writeTagsToBlob(new Blob([new Uint8Array(500).fill(7)]), TAGS), undefined);
+    assert.equal(await writeTagsToBlob(new Blob([]), TAGS), undefined);
+  });
+
+  test('the type is kept (or given), and the audio is not read: only the front and three bytes at the end', async () => {
+    const file = concat(tag(3, textFrame('TIT2', 'old'), pictureFrame(3)), ...Array.from({ length: 40 }, () => longAudio), ID3V1); // ~5 MB
+    const reads: number[] = [];
+    const original = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function (this: Blob) {
+      reads.push(this.size);
+      return original.call(this);
+    };
+    try {
+      const written = (await writeTagsToBlob(blobOf(file), TAGS))!;
+      assert.equal(written.type, 'audio/mpeg');
+      const retyped = (await writeTagsToBlob(blobOf(file), TAGS, undefined, 'audio/x-test'))!;
+      assert.equal(retyped.type, 'audio/x-test');
+    } finally {
+      Blob.prototype.arrayBuffer = original;
+    }
+    assert.ok(file.length > 4_000_000);
+    assert.ok(Math.max(...reads) <= 10 + 4098 + 1500, `the biggest read was ${Math.max(...reads)} bytes`);
+    assert.ok(reads.reduce((sum, n) => sum + n, 0) < 20_000, `${reads.reduce((sum, n) => sum + n, 0)} bytes read in all`);
+  });
+
+  test('the front of a song: every tag, then 4 KiB of audio; and where the audio starts', async () => {
+    const two = FILES['two tags one after the other']!;
+    const front = await headOfBlob(blobOf(concat(two, new Uint8Array(10_000))));
+    assert.equal(front.audioStart, two.length - AUDIO.length);
+    assert.equal(front.head.length, front.audioStart + 4098);
+    assert.equal(isMp3(front.head), true);
+    assert.deepEqual(await headOfBlob(new Blob([])), { head: new Uint8Array(0), audioStart: 0 });
+  });
+
+  test('taggedFetch gives a Blob made of the new tag and the original audio, with a cover once; a song called an MP3 that is an M4A is named for what it is', async () => {
+    const file = FILES['an upload: a tag with a picture and junk, an ID3v1 tag at the end']!;
+    let covers = 0;
+    const fetchTagged = taggedFetch(async () => ({ data: blobOf(file), fileName: 'Raw upload.mp3', mimeType: 'audio/mpeg', bytes: file.length }), {
+      tagsOf: () => ({ ...TAGS, cover: 'https://x.test/c.jpg' }),
+      fetchCover: async () => (covers++, COVER),
+    });
+    const song = await fetchTagged('https://x.test/a');
+    const written = await bytesOf(song.data);
+    assert.equal(song.bytes, written.length);
+    assert.equal(readTextTags(written).TIT2, TAGS.title);
+    assert.ok(endsWith(written, AUDIO));
+    assert.equal(covers, 0, 'it has a picture of its own');
+
+    const bare = await taggedFetch(async () => ({ data: blobOf(FILES['no tag at all']!), fileName: 'x.mp3', mimeType: 'audio/mpeg', bytes: AUDIO.length }), {
+      tagsOf: () => ({ ...TAGS, cover: 'https://x.test/c.jpg' }),
+      fetchCover: async () => (covers++, COVER),
+    })('https://x.test/b');
+    assert.equal(covers, 1);
+    assert.equal(hasCover(await bytesOf(bare.data)), true);
+
+    // an M4A the site calls an MP3: with no tags to write it is just named and typed for what it is
+    const m4a = await taggedFetch(async () => ({ data: new Blob([M4A], { type: 'audio/mpeg' }), fileName: 'Song.mp3', mimeType: 'audio/mpeg', bytes: M4A.length }), { tagsOf: () => undefined })('https://x.test/c');
+    assert.equal(m4a.mimeType, 'audio/mp4');
+    assert.equal(m4a.fileName, 'Song.m4a');
+    assert.equal(m4a.data.type, 'audio/mp4');
+    assert.deepEqual(await bytesOf(m4a.data), M4A);
+    // and with tags the M4A writer cannot use (this one is only a header), it still goes as an M4A, untouched
+    const untouched = await taggedFetch(async () => ({ data: new Blob([M4A], { type: 'audio/mpeg' }), fileName: 'Song.mp3', mimeType: 'audio/mpeg', bytes: M4A.length }), { tagsOf: () => TAGS })('https://x.test/d');
+    assert.equal(untouched.mimeType, 'audio/mp4');
+    assert.deepEqual(await bytesOf(untouched.data), M4A);
+
+    // something that cannot be tagged at all is returned as it was
+    const ogg = { data: new Blob([Uint8Array.of(0x4f, 0x67, 0x67, 0x53, 1)], { type: 'audio/ogg' }), fileName: 'a.ogg', mimeType: 'audio/ogg', bytes: 5 };
+    assert.equal(await taggedFetch(async () => ogg, { tagsOf: () => TAGS })('https://x.test/e'), ogg);
   });
 });

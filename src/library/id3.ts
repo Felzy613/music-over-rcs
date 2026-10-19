@@ -163,7 +163,11 @@ export function writeTags(data: Uint8Array, tags: SongTags, cover?: CoverPicture
   const { audioStart, kept } = readTags(data);
   let audioEnd = data.length;
   if (audioEnd - audioStart >= 128 && latin1(data, audioEnd - 128, audioEnd - 125) === 'TAG') audioEnd -= 128;
+  return concat([newTag(tags, kept, cover), data.subarray(audioStart, audioEnd)]);
+}
 
+/** The ID3v2.3 tag that replaces an MP3's old ones: these tags, the old tag's kept frames, a cover when there is none, and some padding. */
+function newTag(tags: SongTags, kept: Frame[], cover: CoverPicture | undefined): Uint8Array {
   const frames: Frame[] = [
     text('TIT2', tags.title),
     text('TPE1', tags.artist),
@@ -179,7 +183,40 @@ export function writeTags(data: Uint8Array, tags: SongTags, cover?: CoverPicture
   const header = new Uint8Array(10);
   header.set([0x49, 0x44, 0x33, 3, 0, 0]);
   header.set(syncsafeBytes(body.length), 6);
-  return concat([header, body, data.subarray(audioStart, audioEnd)]);
+  return concat([header, body]);
+}
+
+const readRange = async (blob: Blob, start: number, end: number): Promise<Uint8Array> => new Uint8Array(await blob.slice(start, end).arrayBuffer());
+
+/**
+ * The start of a song held as a Blob: every ID3v2 tag at the front, and the first 4 KiB of audio after them, which is all that
+ * `audioTypeOf` and `isMp3` look at; and where the audio begins. Only that is read; the rest of the song stays where it is.
+ */
+export async function headOfBlob(blob: Blob): Promise<{ head: Uint8Array; audioStart: number }> {
+  // The tags' own 10-byte headers say how long they are (the same walk as readTags makes).
+  let audioStart = 0;
+  while (blob.size >= audioStart + 10) {
+    const header = await readRange(blob, audioStart, audioStart + 10);
+    if (latin1(header, 0, 3) !== 'ID3') break;
+    audioStart = Math.min(blob.size, audioStart + 10 + syncsafe(header, 6) + (header[3] === 4 && header[5]! & 0x10 ? 10 : 0));
+  }
+  return { head: await readRange(blob, 0, Math.min(blob.size, audioStart + 4098)), audioStart };
+}
+
+/**
+ * `writeTags` for a song held as a Blob, giving the same file: the new tag is made from the front of the song and put before the
+ * audio, which is not read, not copied and not held a second time (a Blob can be made of another Blob's slice). The old tag's
+ * kept frames and an ID3v1 tag at the end are dealt with as `writeTags` does. `getCover` is asked for a picture only when the old
+ * tag has none. Nothing when the data isn't an MP3.
+ */
+export async function writeTagsToBlob(blob: Blob, tags: SongTags, getCover?: () => Promise<CoverPicture | undefined>, type = blob.type): Promise<Blob | undefined> {
+  const { head, audioStart } = await headOfBlob(blob);
+  if (!isMp3(head)) return undefined;
+  const { kept } = readTags(head);
+  let audioEnd = blob.size;
+  if (audioEnd - audioStart >= 128 && latin1(await readRange(blob, audioEnd - 128, audioEnd - 125), 0, 3) === 'TAG') audioEnd -= 128;
+  const cover = kept.some((frame) => frame.id === 'APIC') ? undefined : await getCover?.();
+  return new Blob([newTag(tags, kept, cover), blob.slice(audioStart, audioEnd)], { type });
 }
 
 /** A text frame: plain Latin-1 when it fits, otherwise UTF-16 (Hebrew, curly quotes). */

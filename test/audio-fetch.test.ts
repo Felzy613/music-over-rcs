@@ -36,6 +36,19 @@ const host: RequestListener = (req, res) => {
       for (let i = 0; i < 3; i++) res.write(Buffer.alloc(400 * 1024));
       res.end();
       break;
+    case '/long.mp3': {
+      // 9.5 MiB in odd-sized pieces, each byte telling its place: more than two of the 4 MiB parts the download is gathered in.
+      const song = Buffer.alloc(9 * MiB + 512 * 1024);
+      for (let i = 0; i < song.length; i++) song[i] = (i * 31 + (i >> 16)) & 0xff;
+      res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': String(song.length) });
+      for (let at = 0; at < song.length; ) {
+        const end = Math.min(song.length, at + 40_000 + (at % 7919));
+        res.write(song.subarray(at, end));
+        at = end;
+      }
+      res.end();
+      break;
+    }
     case '/empty.mp3':
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': '0' });
       res.end();
@@ -80,6 +93,18 @@ describe('fetchAudio', () => {
 
   test('infers the type from the extension when the server says octet-stream', async () => {
     assert.equal((await get('/octet.ogg')).mimeType, 'audio/ogg');
+  });
+
+  test('a song of several parts arrives whole, in order, and as one Blob of the right type', async () => {
+    const song = await get('/long.mp3', 'Long');
+    const expected = Buffer.alloc(9 * MiB + 512 * 1024);
+    for (let i = 0; i < expected.length; i++) expected[i] = (i * 31 + (i >> 16)) & 0xff;
+    assert.equal(song.bytes, expected.length);
+    assert.equal(song.data.size, expected.length);
+    assert.equal(song.data.type, 'audio/mpeg');
+    assert.ok(Buffer.from(await song.data.arrayBuffer()).equals(expected));
+    // and the limit still applies to it (its size is declared, so it is refused before anything is read)
+    await rejectsWith(get('/long.mp3', 'Long', { maxBytes: 5 * MiB }), /9\.5 MB file and the limit is 5\.0 MB/);
   });
 
   test('refuses web pages', async () => {

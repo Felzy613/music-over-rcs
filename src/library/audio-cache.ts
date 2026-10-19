@@ -6,7 +6,7 @@ import type { AudioCheck } from '../audio-check.ts';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { CachedAudio, Catalog, SitePost } from '../catalog.ts';
 import type { Track } from '../types.ts';
-import { audioTypeOf, hasCover, writeTags, type CoverPicture, type SongTags } from './id3.ts';
+import { audioTypeOf, hasCover, headOfBlob, writeTags, writeTagsToBlob, type CoverPicture, type SongTags } from './id3.ts';
 import { hasMp4Cover, writeMp4Tags } from './mp4.ts';
 import { cleanName, extensionOf } from './naming.ts';
 
@@ -450,6 +450,47 @@ export async function tagSong(
 }
 
 /**
+ * A downloaded song with its tags written in (and a cover, when it has none), as the same kind of Blob. An MP3 is tagged without
+ * reading or copying its audio: the new tag is put in front of the original, which stays where it is in the Blob (see
+ * `writeTagsToBlob`), so a 27 MB song costs a few KB more memory, not three more copies of itself. Other types are rewritten as
+ * bytes (`tagSong`). A song whose type can't be tagged, or whose tags can't be written, comes back as it was downloaded.
+ */
+export async function tagSongBlob(
+  url: string,
+  downloaded: DownloadedAudio,
+  options: {
+    tagsOf?: ((url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined) | undefined;
+    fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
+  },
+): Promise<DownloadedAudio> {
+  if (!taggerFor(downloaded.mimeType)) return downloaded;
+  // A site sometimes calls an M4A an MP3: what the front of the file says it is decides.
+  const { head } = await headOfBlob(downloaded.data);
+  const audio = asItIs(downloaded, head);
+  const retyped = audio === downloaded ? downloaded : { ...audio, data: downloaded.data.slice(0, downloaded.bytes, audio.mimeType) };
+  if (!MP3.test(audio.mimeType)) return viaBytes(url, retyped, options);
+  const tags = options.tagsOf?.(url, audio);
+  if (!tags) return retyped;
+  const cover = tags.cover && options.fetchCover ? () => options.fetchCover!(tags.cover!).catch(() => undefined) : undefined;
+  const written = await writeTagsToBlob(downloaded.data, tags, cover, audio.mimeType);
+  return written ? { data: written, fileName: audio.fileName, mimeType: audio.mimeType, bytes: written.size } : retyped;
+}
+
+/** A song rewritten as bytes (an M4A: its tags sit inside the file), handed back as a Blob; the song as it was when nothing changed. */
+async function viaBytes(
+  url: string,
+  audio: DownloadedAudio,
+  options: {
+    tagsOf?: ((url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined) | undefined;
+    fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
+  },
+): Promise<DownloadedAudio> {
+  const song = await tagSong(url, audio, options);
+  if (song.data.byteLength === audio.bytes && song.mimeType === audio.mimeType && song.fileName === audio.fileName) return audio;
+  return { data: new Blob([song.data as unknown as ArrayBuffer], { type: song.mimeType }), fileName: song.fileName, mimeType: song.mimeType, bytes: song.bytes };
+}
+
+/**
  * A downloader whose songs come with their tags and cover written in, the way a music app on the phone wants them
  * (artists, album, number, year, cover; a YouTube song is first put back together as an ordinary M4A). A song that
  * can't be tagged goes as it was downloaded, and so does one whose tagging fails: the song matters more than its tags.
@@ -465,10 +506,7 @@ export function taggedFetch(
   return async (url, title) => {
     const audio = await fetchAudio(url, title);
     try {
-      const song = await tagSong(url, audio, options);
-      if (song.data.byteLength === audio.bytes && song.mimeType === audio.mimeType && song.fileName === audio.fileName) return audio;
-      const data = new Blob([song.data as unknown as ArrayBuffer], { type: song.mimeType });
-      return { data, fileName: song.fileName, mimeType: song.mimeType, bytes: song.bytes };
+      return await tagSongBlob(url, audio, options);
     } catch (err) {
       options.log?.(`could not write the tags into ${audio.fileName}: ${err instanceof Error ? err.message : String(err)}`);
       return audio;

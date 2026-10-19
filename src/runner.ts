@@ -554,6 +554,10 @@ export function createRunner(options: RunnerOptions): Runner {
         } catch (err) {
           log(`could not send audio: ${errorText(err)}`);
           await chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}.`));
+        } finally {
+          // What downloading, tagging and uploading the song left behind is given back now: on 2026-10-19 a 27 MB song's buffers
+          // kept the host near 470 of 512 MB for two minutes after it was sent, until a collection happened to run.
+          freeMemory();
         }
       } else if (reply.kind === 'image' || reply.kind === 'collage') {
         // A picture is a nicety: when it can't be shown, the answer goes on without it, and a song's name goes as text.
