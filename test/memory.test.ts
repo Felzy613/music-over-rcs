@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import { containerMemory, MemoryWatch, memoryCheck, processMemory, type ProcessMemory } from '../src/cloud/memory.ts';
 
 const files = (max: string, stat: string) => (path: string): string => {
@@ -84,7 +84,7 @@ test('where /proc cannot be listed (a Mac) there is nothing to say', () => {
 
 // ---- the watch
 
-function watchSetUp(options: { warnAtPercent?: number } = {}) {
+function watchSetUp(options: { warnAtPercent?: number; warmUpMs?: number; firstReportMs?: number } = {}) {
   const MB = 1048576;
   const logs: string[] = [];
   let used = 300;
@@ -193,4 +193,75 @@ test('the line can be moved, and where there is no container limit there is noth
   none.start();
   assert.equal(none.report(), undefined);
   none.stop();
+});
+
+describe('a rise that stays', () => {
+  /** The routine line is put off for ever, so that the log holds only what is being tested. */
+  const NEVER = 1e12;
+  /** Looks every 5 s for this many seconds with this much in use. */
+  const stay = (set: ReturnType<typeof watchSetUp>, usedMb: number, seconds: number) => {
+    set.setUsed(usedMb);
+    for (let waited = 0; waited < seconds; waited += 5) {
+      set.tick(5000);
+      set.watch.check();
+    }
+  };
+
+  test('is reported once, 45 s after it began, naming who holds it, and again when it has settled', () => {
+    const set = watchSetUp({ warmUpMs: 0, firstReportMs: NEVER });
+    stay(set, 250, 120); // resting
+    assert.deepEqual(set.logs, []);
+    stay(set, 360, 40); // up, but not for long enough yet
+    assert.deepEqual(set.logs, []);
+    stay(set, 360, 20);
+    assert.equal(set.logs.length, 1);
+    assert.match(set.logs[0]!, /^memory \(raised\): 360 of 512 MB in use \(70%\), 110 MB above its resting 250 MB for 45 s - synapse 150 MB, bot 140 MB \(anonymous memory\)$/);
+    assert.ok(set.watch.report()!.raisedSince, 'and /status says it is up');
+    assert.equal(set.watch.report()!.restMb, 250);
+    stay(set, 365, 300); // it stays up for five minutes: said once
+    assert.equal(set.logs.length, 1);
+    stay(set, 285, 5); // down, but not yet within 30 MB of where it rested
+    assert.equal(set.logs.length, 1);
+    stay(set, 270, 5);
+    assert.equal(set.logs.length, 2);
+    assert.match(set.logs[1]!, /^memory \(settled\): 270 of 512 MB in use \(53%\), back to its resting 250 MB level \d+ s after it rose - synapse 150 MB, bot 140 MB \(anonymous memory\)$/);
+    assert.equal(set.watch.report()!.raisedSince, undefined);
+    stay(set, 255, 120);
+    assert.equal(set.logs.length, 2, 'said once');
+  });
+
+  test('a blip, a rise of less than 60 MB, and a slow creep are not reported', () => {
+    const set = watchSetUp({ warmUpMs: 0, firstReportMs: NEVER });
+    stay(set, 250, 60);
+    stay(set, 340, 30); // a blip: up for 30 s only
+    stay(set, 255, 60);
+    stay(set, 305, 300); // 55 MB above: not a rise
+    stay(set, 250, 60);
+    for (let mb = 250; mb < 290; mb += 0.5) stay(set, mb, 5 * 6); // creeping up by a MB a minute, for an hour and more
+    assert.deepEqual(set.logs, []);
+  });
+
+  test('the start is left alone: nothing in the first three minutes', () => {
+    const set = watchSetUp({ firstReportMs: NEVER }); // the default warm-up
+    stay(set, 150, 30);
+    stay(set, 260, 140); // up by 110 MB while everything settles in, and it stays: 170 s in
+    assert.deepEqual(set.logs, []);
+    stay(set, 262, 60); // the rest is read from here on
+    stay(set, 380, 60);
+    assert.equal(set.logs.length, 1);
+    assert.match(set.logs[0]!, /^memory \(raised\): 380 of 512 MB in use \(74%\), 118 MB above its resting 262 MB/);
+  });
+
+  test('one that does not come back in half an hour is let go of, and a new rise from there is reported again', () => {
+    const set = watchSetUp({ warmUpMs: 0, firstReportMs: NEVER, warnAtPercent: 95 });
+    stay(set, 250, 120);
+    stay(set, 360, 60);
+    assert.equal(set.logs.length, 1);
+    stay(set, 362, 31 * 60); // half an hour and more up there: it is the resting level now
+    assert.equal(set.logs.length, 1, 'no more said about it');
+    stay(set, 362, 20 * 60);
+    stay(set, 440, 60); // 78 MB above the new level
+    assert.equal(set.logs.filter((line) => /raised/.test(line)).length, 2);
+    assert.match(set.logs.filter((line) => /raised/.test(line)).at(-1)!, /78 MB above its resting 362 MB/);
+  });
 });
