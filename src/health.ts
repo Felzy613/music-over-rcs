@@ -139,6 +139,13 @@ const BRIDGE_RESTART_GRACE_MS = 2 * 60_000;
 const TROUBLE_GRACE_MS = 15 * 60_000;
 /** How long to wait before restarting a bridge that is still down after the first restart, then after the second and every one after. */
 const RESTART_AGAIN_MS = [5 * 60_000, 10 * 60_000];
+/** How often a bridge is restarted while Google says the phone isn't answering (the first after this long of it too): a restart can't make the phone answer. */
+const PHONE_RESTART_MS = 2 * 60 * 60_000;
+/**
+ * The bridge's reason when Google answers but the phone doesn't: mautrix-gmessages' gm-phone-not-responding, "Your
+ * Google Messages app is not responding. Open the Google Messages app on your phone…".
+ */
+const PHONE_NOT_RESPONDING = /phone.not.responding|not responding.*phone/i;
 
 /**
  * Turns the bridge's status into problems: logged out (log in again), not reaching Google (after a while), RCS off
@@ -149,6 +156,8 @@ const RESTART_AGAIN_MS = [5 * 60_000, 10 * 60_000];
  * stays down: Google can turn it away for a while (a web filter's downtime, a bad stretch of network) and the bridge
  * doesn't reliably try again by itself once Google is reachable, so there is no one restart that is "the" restart.
  * Only a bridge with no Google login at all can't mend itself; linking one takes a code scanned on the phone.
+ * The exception is the phone not answering: the bridge's link to Google is fine then and it reconnects by itself once
+ * the phone answers, so it is restarted only every two hours meanwhile, in case the bridge is what's stuck.
  */
 export class BridgeWatch {
   #health: Health;
@@ -165,6 +174,9 @@ export class BridgeWatch {
   #restarts = 0;
   #lastRestartAt: number | undefined;
   #lastSendFailureRestartAt: number | undefined;
+  /** When the bridge started saying the phone isn't answering, and when it last said so. */
+  #phoneSilentSince: number | undefined;
+  #phoneSilentAt: number | undefined;
 
   constructor(options: {
     health: Health;
@@ -239,6 +251,7 @@ export class BridgeWatch {
       this.#restartAttempted = false;
       this.#restarts = 0;
       this.#lastRestartAt = undefined;
+      this.#phoneSilentSince = this.#phoneSilentAt = undefined;
       this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
       this.#health.problem(
         'bridge',
@@ -255,6 +268,7 @@ export class BridgeWatch {
         this.#restartAttempted = false;
         this.#restarts = 0;
         this.#lastRestartAt = undefined;
+        this.#phoneSilentSince = this.#phoneSilentAt = undefined;
       }
       this.#health.ok('bridge', 'Fixed: the bridge is connected to Google Messages again.');
       this.#health.ok('bridge-restart', 'Fixed: the bridge recovered after its automatic restart.');
@@ -263,8 +277,24 @@ export class BridgeWatch {
       // restarted sooner: a restart is how it tries again, and it costs nothing if it's still being turned away.
       this.#troubleSince ??= now;
       const troubleFor = now - this.#troubleSince;
+      // The phone not answering is waited out instead (see the class comment). The bridge's error can alternate between
+      // two texts, so the phone counts as silent until it hasn't been named for a while; a network recovery or Google
+      // turning the bridge away still gets its prompt restart.
+      if (!signedOut && PHONE_NOT_RESPONDING.test(`${status.error ?? ''} ${status.message ?? ''}`)) {
+        this.#phoneSilentSince ??= now;
+        this.#phoneSilentAt = now;
+      }
+      const phoneSilent = !signedOut && !this.#networkRecovery && this.#phoneSilentAt !== undefined && now - this.#phoneSilentAt < TROUBLE_GRACE_MS;
+      if (!phoneSilent && this.#phoneSilentSince !== undefined) {
+        // Another reason now: the usual restarts, from the first, as for a disconnect that has lasted this long.
+        this.#phoneSilentSince = this.#phoneSilentAt = undefined;
+        this.#restarts = 0;
+        this.#lastRestartAt = undefined;
+      }
       const restartAfter = this.#networkRecovery || signedOut ? BRIDGE_RESTART_GRACE_MS : TROUBLE_GRACE_MS;
-      if (this.#restartDue(now, restartAfter)) {
+      if (phoneSilent) {
+        if (this.#phoneRestartDue(now)) await this.#restartBridge("Google Messages still can't reach the phone; restarting its bridge service in case the bridge is what's stuck.", now);
+      } else if (this.#restartDue(now, restartAfter)) {
         await this.#restartBridge(
           signedOut
             ? 'Google Messages has the bridge signed out; restarting its bridge service to try again.'
@@ -281,9 +311,11 @@ export class BridgeWatch {
         } else if (signedOut) {
           this.#health.problem('bridge', `Google Messages is logged out of the bridge${detail}. Log in again on the service's /pair page.`);
         } else {
-          const phone = /phone/i.test(why ?? '') ? ' Is your phone on and online?' : '';
-          const hint = this.#restart ? retrying : phone || ' It keeps trying; if this lasts, restart the service in Render.';
-          this.#health.problem('bridge', `The bridge can't reach Google Messages${detail}.${hint}${this.#restart ? phone : ''}`);
+          const phone = phoneSilent || /phone/i.test(why ?? '') ? ' Is your phone on and online?' : '';
+          const hint = !this.#restart
+            ? phone || ' It keeps trying; if this lasts, restart the service in Render.'
+            : `${phoneSilent ? ' It reconnects on its own once the phone answers.' : retrying}${phone}`;
+          this.#health.problem('bridge', `The bridge can't reach Google Messages${detail}.${hint}`);
         }
       }
     }
@@ -312,6 +344,12 @@ export class BridgeWatch {
     if (this.#lastRestartAt === undefined) return now - this.#troubleSince >= firstAfterMs;
     const gap = RESTART_AGAIN_MS[Math.min(this.#restarts - 1, RESTART_AGAIN_MS.length - 1)] ?? 10 * 60_000;
     return now - this.#lastRestartAt >= gap;
+  }
+
+  /** Whether a bridge waiting for the phone is due its rare restart: two hours after the phone went silent or after the last restart, whichever is later. */
+  #phoneRestartDue(now: number): boolean {
+    if (!this.#restart || this.#phoneSilentSince === undefined) return false;
+    return now - Math.max(this.#phoneSilentSince, this.#lastRestartAt ?? 0) >= PHONE_RESTART_MS;
   }
 
   async #restartBridge(reason: string, now: number): Promise<void> {

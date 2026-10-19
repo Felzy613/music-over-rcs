@@ -39,6 +39,11 @@ function setUp(options: { restart?: boolean; restartFails?: boolean } = {}) {
   return { state, shown, watch, tick };
 }
 
+/** Ticks every minute from `from` (minutes after 08:00) up to but not including `to`. */
+const run = async (tick: (hour: number, minute: number) => Promise<void>, from: number, to: number) => {
+  for (let t = from; t < to; t++) await tick(8 + Math.floor(t / 60), t % 60);
+};
+
 describe('restarting the bridge on its own', () => {
   test('after the internet comes back, a bridge still disconnected two minutes later is restarted, and again while it stays down', async () => {
     const { state, shown, tick } = setUp();
@@ -129,10 +134,6 @@ describe('restarting the bridge on its own', () => {
 
 describe('recovering by itself when Google turns the bridge away for a while', () => {
   const SIGNED_OUT: BridgeStatus = { state: 'BAD_CREDENTIALS', rcsEnabled: true };
-  /** Ticks every minute from `from` (minutes after 08:00) up to but not including `to`. */
-  const run = async (tick: (hour: number, minute: number) => Promise<void>, from: number, to: number) => {
-    for (let t = from; t < to; t++) await tick(8 + Math.floor(t / 60), t % 60);
-  };
 
   test("a block that lasts hours is waited out: restarts keep coming, the bridge is back within ten minutes of it lifting, and it is said only once", async () => {
     const { state, shown, tick } = setUp();
@@ -231,6 +232,82 @@ describe('recovering by itself when Google turns the bridge away for a while', (
     await run(tick, 0, 60);
     assert.ok(state.restarts >= 3 && state.restarts <= 5, `${state.restarts}`);
     assert.ok(shown.some((line) => /couldn't restart automatically/.test(line)));
+  });
+});
+
+describe("waiting for a phone that isn't answering", () => {
+  const PHONE_SILENT: BridgeStatus = {
+    state: 'TRANSIENT_DISCONNECT',
+    error: 'gm-phone-not-responding',
+    message: "Your Google Messages app is not responding. Open the Google Messages app on your phone and make sure it's connected to the internet",
+    rcsEnabled: true,
+  };
+
+  test('hours of the phone not answering are waited out: a restart only every two hours, said once, fixed when it answers by itself', async () => {
+    const { state, shown, tick } = setUp();
+    state.status = PHONE_SILENT;
+    await run(tick, 0, 120);
+    assert.equal(state.restarts, 0, 'none in the first two hours (a restart cannot make the phone answer)');
+    await run(tick, 120, 360);
+    assert.equal(state.restarts, 2, 'then one every two hours, in case the bridge is what is stuck');
+    assert.equal(shown.length, 1, 'said once');
+    assert.match(shown[0]!, /^The bridge can't reach Google Messages \(Your Google Messages app is not responding\. [^)]*\)\. It reconnects on its own once the phone answers\. Is your phone on and online\?$/);
+    assert.doesNotMatch(shown[0]!, /keeps restarting|Mac/);
+    state.status = CONNECTED;
+    await tick(14, 0);
+    assert.equal(shown.at(-1), 'Fixed: the bridge is connected to Google Messages again.');
+    assert.equal(state.restarts, 2);
+
+    // Only the bridge's text says so (no error code): the same.
+    const text = setUp();
+    text.state.status = { state: 'TRANSIENT_DISCONNECT', message: PHONE_SILENT.message, rcsEnabled: true };
+    await run(text.tick, 0, 180);
+    assert.equal(text.state.restarts, 1);
+  });
+
+  test("the same when the bridge's error alternates between the phone and another text", async () => {
+    const { state, tick } = setUp();
+    for (let t = 0; t < 180; t++) {
+      state.status = Math.floor(t / 5) % 2 === 0 ? PHONE_SILENT : DOWN;
+      await run(tick, t, t + 1);
+    }
+    assert.equal(state.restarts, 1, `restarted ${state.restarts} times in three hours`);
+  });
+
+  test('once the bridge is down for another reason, the usual restarts are back', async () => {
+    const { state, tick } = setUp();
+    state.status = PHONE_SILENT;
+    await run(tick, 0, 180);
+    assert.equal(state.restarts, 1);
+    state.status = DOWN;
+    await run(tick, 180, 194);
+    assert.equal(state.restarts, 1, 'not at once: the texts may only be alternating');
+    await tick(11, 14);
+    assert.equal(state.restarts, 2, 'fifteen minutes after the phone was last named, as for any disconnect that lasts');
+    await run(tick, 195, 240);
+    assert.equal(state.restarts, 7, 'then five minutes later, and every ten after that');
+
+    // Google turning the bridge away is restarted at once, as before.
+    const turnedAway = setUp();
+    turnedAway.state.status = PHONE_SILENT;
+    await run(turnedAway.tick, 0, 60);
+    turnedAway.state.status = { state: 'BAD_CREDENTIALS', rcsEnabled: true };
+    await turnedAway.tick(9, 0);
+    assert.equal(turnedAway.state.restarts, 1);
+  });
+
+  test("after the host's internet comes back, a bridge that blames the phone is still refreshed two minutes later, then the phone is waited for", async () => {
+    const { state, tick } = setUp();
+    state.status = PHONE_SILENT;
+    state.up = false;
+    await run(tick, 0, 30);
+    state.up = true;
+    await run(tick, 30, 32);
+    assert.equal(state.restarts, 0);
+    await tick(8, 32);
+    assert.equal(state.restarts, 1);
+    await run(tick, 33, 150);
+    assert.equal(state.restarts, 1);
   });
 });
 
