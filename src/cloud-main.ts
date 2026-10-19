@@ -12,6 +12,7 @@ import { s3FromEnv } from './cloud/s3.ts';
 import { archivedThisMonth, sentThisMonth } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { parseCloudBudget } from './config.ts';
+import { MemoryWatch } from './cloud/memory.ts';
 
 // The bot on a cloud host (Render): where matrix-main.ts assumes a Mac with the homeserver and bridge already set up and
 // signed in, this starts with nothing but the services running beside it. It opens the web door first (the host wants a
@@ -34,6 +35,10 @@ let stopping = false;
 const catalog = new Catalog(env.CATALOG_DB?.trim() || '/data/catalog.db');
 const roomChosen = (): string | undefined => env.MATRIX_ROOM_ID?.trim() || catalog.getState('matrix.room') || undefined;
 let onRoomChosen: (() => void) | undefined;
+
+// Says in the log who holds the memory whenever the container is past 85% of its limit, and keeps the highest it has been for
+// /status: a host that runs out of memory is stopped with nothing left to read (the first time, it took a 27 MB song).
+const memoryWatch = new MemoryWatch({ log });
 
 const oneDrive = oneDriveFromEnv(env, { state: catalog, log });
 const cloudBudget = parseCloudBudget(env.ONEDRIVE_MAX_MB_PER_MONTH);
@@ -80,6 +85,8 @@ const web = createCloudWeb({
       botEnabled,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       memoryMb: Math.round(process.memoryUsage.rss() / 1048576),
+      // The whole container: what it uses against its limit, who holds it, and the highest it has reached since the start.
+      memory: memoryWatch.report() ?? null,
       node: process.version,
       room: roomChosen() ?? null,
       bridge,
@@ -119,6 +126,9 @@ await new Promise<void>((resolve, reject) => {
   web.listen(port, env.HOST?.trim() || '0.0.0.0', resolve);
 });
 log(`web door open on port ${(web.address() as AddressInfo).port}${env.ADMIN_TOKEN ? '' : ' (ADMIN_TOKEN is not set: only /healthz works)'}`);
+
+// Starts looking now that the door is open: see the MemoryWatch declared above.
+memoryWatch.start();
 
 const stop = () => {
   // Once the bot has started it has its own shutdown (matrix-main.ts), which also ends the process.

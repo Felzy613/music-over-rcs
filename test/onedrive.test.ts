@@ -7,6 +7,15 @@ import { startMockOneDrive, type MockOneDrive } from './helpers/mock-onedrive.ts
 const CLIENT = '0a1b2c3d-1111-2222-3333-444455556666';
 const MiB = 1024 * 1024;
 
+/** A Blob that notes which ranges are read from it. */
+class WatchedBlob extends Blob {
+  reads: Array<[number, number]> = [];
+  override slice(start?: number, end?: number, type?: string): Blob {
+    this.reads.push([start ?? 0, end ?? this.size]);
+    return super.slice(start, end, type);
+  }
+}
+
 describe('OneDrive', () => {
   let mock: MockOneDrive;
   before(async () => {
@@ -149,6 +158,33 @@ describe('OneDrive', () => {
       assert.deepEqual(chunks.map((r) => r.range), [`bytes 0-${10 * MiB - 1}/${song.length}`, `bytes ${10 * MiB}-${20 * MiB - 1}/${song.length}`, `bytes ${20 * MiB}-${song.length - 1}/${song.length}`]);
       assert.ok(chunks.every((r) => !r.authorized), 'the upload address is used without the token');
       assert.equal(10 * MiB % 327_680, 0, '10 MiB is a multiple of 320 KiB, as Graph requires');
+    });
+
+    test('a song handed over as a Blob is read a piece at a time, never whole, and arrives the same', async () => {
+      const { drive } = await signedIn();
+      mock.autoCreateFolders = true;
+      const song = Buffer.alloc(22 * MiB + 123);
+      for (let i = 0; i < song.length; i += 4096) song[i] = i / 4096;
+      const blob = new WatchedBlob([song]);
+      await drive.upload('A/B/blob.mp3', blob);
+      assert.ok(mock.files.get('A/B/blob.mp3')!.equals(song));
+      assert.deepEqual(blob.reads, [[0, 10 * MiB], [10 * MiB, 20 * MiB], [20 * MiB, song.length]], 'three reads of at most 10 MiB, in order');
+      assert.ok(blob.reads.every(([from, to]) => to - from <= 10 * MiB));
+
+      const small = new WatchedBlob([Buffer.from('small song')]);
+      await drive.upload('A/B/small.mp3', small);
+      assert.equal(mock.files.get('A/B/small.mp3')?.toString(), 'small song');
+    });
+
+    test('a piece of a Blob that has to be sent again is not read again', async () => {
+      const { drive } = await signedIn();
+      mock.autoCreateFolders = true;
+      const song = Buffer.alloc(11 * MiB, 3);
+      const blob = new WatchedBlob([song]);
+      mock.failChunks = 2;
+      await drive.upload('A/B/retry-blob.mp3', blob);
+      assert.ok(mock.files.get('A/B/retry-blob.mp3')!.equals(song));
+      assert.equal(blob.reads.length, 2, 'two pieces read, though the first was sent three times');
     });
 
     test('folders that do not exist yet are made, and the upload tried again', async () => {

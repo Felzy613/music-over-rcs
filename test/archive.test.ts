@@ -11,23 +11,25 @@ import { archivedThisMonth } from '../src/usage.ts';
 
 const MPEG = Uint8Array.from([0xff, 0xfb, 0x90, 0x64, ...Array.from({ length: 400 }, (_, i) => i % 251)]);
 const song = (name = 'Ishay Ribo - Derech.mp3', data: Uint8Array = MPEG, mimeType = 'audio/mpeg'): DownloadedAudio => ({ data: new Blob([data], { type: mimeType }), fileName: name, mimeType, bytes: data.length });
-const TAGS = { title: 'Derech', artist: 'Ishay Ribo', albumArtist: 'Ishay Ribo', album: 'Derech - Single', track: '1/1' };
 
 class FakeDrive implements Drive {
   signedIn = true;
   files = new Map<string, Uint8Array>();
   uploads: string[] = [];
+  /** What each upload was handed: a Blob (read a piece at a time) or bytes already in memory. */
+  sources: string[] = [];
   existing = new Set<string>();
   failWith: Error | undefined;
   /** Held back until the test lets it go, to see what waits. */
   gate: Promise<void> | undefined;
   connected = () => this.signedIn;
   exists = async (path: string) => this.existing.has(path) || this.files.has(path);
-  upload = async (path: string, data: Uint8Array) => {
+  upload = async (path: string, data: Uint8Array | Blob) => {
     await this.gate;
     if (this.failWith) throw this.failWith;
     this.uploads.push(path);
-    this.files.set(path, data);
+    this.sources.push(data instanceof Blob ? 'blob' : 'bytes');
+    this.files.set(path, data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : data);
   };
 }
 
@@ -40,7 +42,6 @@ function setUp(options: { budget?: number } = {}) {
     drive,
     state,
     placeOf: (_url, audio) => `Ishay Ribo/Singles/${audio.fileName.replace(/^.* - /, '')}`,
-    tagsOf: () => TAGS,
     monthlyBudgetBytes: options.budget,
     delayMs: 0,
     sleep: async () => {},
@@ -52,17 +53,15 @@ function setUp(options: { budget?: number } = {}) {
 }
 
 describe('saving sent songs to the cloud folder', () => {
-  test('uploads a song to its place with its tags written in, without making the caller wait', async () => {
+  test('uploads the song as it was sent, straight from its Blob, to its place, without making the caller wait', async () => {
     const { drive, state, archive, logs } = setUp();
     archive.offer('https://x.test/1', song());
     assert.equal(drive.uploads.length, 0, 'offer returns before anything is uploaded');
     await archive.idle();
     assert.deepEqual(drive.uploads, ['Ishay Ribo/Singles/Derech.mp3']);
-    const saved = drive.files.get('Ishay Ribo/Singles/Derech.mp3')!;
-    assert.equal(readTextTags(saved).TIT2, 'Derech', 'the tags are inside the saved file');
-    assert.equal(readTextTags(saved).TPE1, 'Ishay Ribo');
-    assert.ok(saved.length > MPEG.length, 'a tag was added');
-    assert.equal(archivedThisMonth(state, new Date('2026-10-20T00:00:00Z')), saved.length, 'the upload is counted for the month');
+    assert.deepEqual(drive.sources, ['blob'], 'the Blob is handed over, to be read a piece at a time, not copied into bytes first');
+    assert.deepEqual(drive.files.get('Ishay Ribo/Singles/Derech.mp3'), MPEG, 'byte for byte what was sent: it was tagged when it was fetched to be sent, and is not tagged again');
+    assert.equal(archivedThisMonth(state, new Date('2026-10-20T00:00:00Z')), MPEG.length, 'the upload is counted for the month');
     assert.ok(logs.some((line) => /saved Ishay Ribo\/Singles\/Derech\.mp3 to OneDrive/.test(line)));
   });
 
@@ -91,7 +90,7 @@ describe('saving sent songs to the cloud folder', () => {
   });
 
   test('stops for the rest of the month once its allowance is used, says so once, and starts again next month', async () => {
-    const { drive, archive, logs, state } = setUp({ budget: 1500 });
+    const { drive, archive, logs, state } = setUp({ budget: 600 });
     archive.offer('https://x.test/1', song());
     await archive.idle();
     assert.equal(drive.uploads.length, 1);
@@ -102,7 +101,7 @@ describe('saving sent songs to the cloud folder', () => {
     assert.equal(drive.uploads.length, 1, 'over the allowance');
     assert.equal(logs.filter((line) => /allowance/.test(line)).length, 1, 'said once');
     // A new month: a fresh allowance.
-    const next = new SongArchive({ drive, state, placeOf: (_u, a) => `Ishay Ribo/Singles/${a.fileName.replace(/^.* - /, '')}`, tagsOf: () => TAGS, monthlyBudgetBytes: 1500, delayMs: 0, sleep: async () => {}, now: () => new Date('2026-11-01T00:00:00Z') });
+    const next = new SongArchive({ drive, state, placeOf: (_u, a) => `Ishay Ribo/Singles/${a.fileName.replace(/^.* - /, '')}`, monthlyBudgetBytes: 600, delayMs: 0, sleep: async () => {}, now: () => new Date('2026-11-01T00:00:00Z') });
     next.offer('https://x.test/4', song('Ishay Ribo - Song 4.mp3'));
     await next.idle();
     assert.equal(drive.uploads.length, 2);
@@ -134,11 +133,27 @@ describe('saving sent songs to the cloud folder', () => {
   test('a song waits a few seconds before it is saved, so the send that fetched it is over', async () => {
     const drive = new FakeDrive();
     const waits: number[] = [];
-    const archive = new SongArchive({ drive, state: new Catalog(':memory:'), placeOf: (_u, a) => `A/B/${a.fileName}`, tagsOf: () => TAGS, sleep: async (ms) => void waits.push(ms) });
+    const archive = new SongArchive({ drive, state: new Catalog(':memory:'), placeOf: (_u, a) => `A/B/${a.fileName}`, sleep: async (ms) => void waits.push(ms) });
     archive.offer('https://x.test/1', song('A - one.mp3'));
     await archive.idle();
     assert.deepEqual(waits, [5000]);
     assert.equal(drive.uploads.length, 1);
+  });
+
+  test('a big song waits longer: half a second more for each MB, up to 30 s, while the bridge and the homeserver hand it on to Google', async () => {
+    const MB = 1048576;
+    const delayFor = async (songMb: number): Promise<number> => {
+      const waits: number[] = [];
+      const archive = new SongArchive({ drive: new FakeDrive(), state: new Catalog(':memory:'), placeOf: (_u, a) => `A/B/${a.fileName}`, sleep: async (ms) => void waits.push(ms) });
+      const data = new Uint8Array(songMb * MB);
+      data.set([0xff, 0xfb]);
+      archive.offer('https://x.test/s', song('A - song.mp3', data));
+      await archive.idle();
+      return waits[0]!;
+    };
+    assert.equal(await delayFor(1), 5500);
+    assert.equal(await delayFor(27), 5000 + 13_500);
+    assert.equal(await delayFor(60), 30_000, 'but never more than 30 s');
   });
 
   test('a song waits for memory to come free, and goes ahead once it does', async () => {
@@ -151,8 +166,7 @@ describe('saving sent songs to the cloud folder', () => {
       drive,
       state,
       placeOf: (_u, a) => `A/B/${a.fileName}`,
-      tagsOf: () => TAGS,
-      memory: () => ({ limit: 512 * MB, used }),
+        memory: () => ({ limit: 512 * MB, used }),
       delayMs: 0,
       sleep: async (ms) => {
         waits.push(ms);
@@ -165,25 +179,25 @@ describe('saving sent songs to the cloud folder', () => {
     assert.deepEqual(drive.uploads, ['A/B/A - one.mp3']);
   });
 
-  test('a song needs two more copies of itself, a piece and some room to spare; one that does not fit is skipped, with a note', async () => {
+  test('a song needs only a couple of upload pieces and some room to spare, however big it is; with less than that it is skipped, with a note', async () => {
     const MB = 1048576;
     const fits = async (songMb: number, usedMb: number): Promise<{ saved: boolean; note: string | undefined }> => {
       const drive = new FakeDrive();
       const logs: string[] = [];
-      const data = Uint8Array.from({ length: songMb * MB }, (_, i) => (i === 0 ? 0xff : i === 1 ? 0xfb : 0));
-      const archive = new SongArchive({ drive, state: new Catalog(':memory:'), placeOf: (_u, a) => `A/B/${a.fileName}`, tagsOf: () => TAGS, memory: () => ({ limit: 512 * MB, used: usedMb * MB }), delayMs: 0, sleep: async () => {}, log: (line) => logs.push(line) });
+      const data = new Uint8Array(songMb * MB);
+      data.set([0xff, 0xfb]);
+      const archive = new SongArchive({ drive, state: new Catalog(':memory:'), placeOf: (_u, a) => `A/B/${a.fileName}`, memory: () => ({ limit: 512 * MB, used: usedMb * MB }), delayMs: 0, sleep: async () => {}, log: (line) => logs.push(line) });
       archive.offer('https://x.test/s', song('A - song.mp3', data));
       await archive.idle();
       return { saved: drive.uploads.length === 1, note: logs.find((line) => /too little memory/.test(line)) };
     };
-    // 512 − used must be at least 2 × song + 10 + 40.
-    assert.equal((await fits(20, 400)).saved, true, '112 free needs 90');
-    assert.equal((await fits(30, 400)).saved, true, '112 free needs 110');
-    assert.equal((await fits(31, 400)).saved, true, '112 free needs exactly 112');
-    assert.equal((await fits(32, 400)).saved, false, '112 free needs 114');
-    const skipped = await fits(40, 400);
+    // 512 − used must be at least 2 × 10 (the piece being sent and the next being read) + 80 to spare, whatever the song's size.
+    assert.equal((await fits(5, 412)).saved, true, '100 free needs 100');
+    assert.equal((await fits(30, 412)).saved, true, 'the same for a 30 MB song: it is not copied');
+    assert.equal((await fits(5, 413)).saved, false, '99 free needs 100');
+    const skipped = await fits(30, 413);
     assert.equal(skipped.saved, false);
-    assert.match(skipped.note!, /not saving A\/B\/A - song\.mp3 to OneDrive: it is 40 MB and this host has too little memory/);
+    assert.match(skipped.note!, /not saving A\/B\/A - song\.mp3 to OneDrive: it is 30 MB and this host has too little memory/);
   });
 
   test('failures are said once they repeat, and when saving works again', async () => {
@@ -210,7 +224,7 @@ describe('saving sent songs to the cloud folder', () => {
     assert.deepEqual(problems, [['Microsoft would not renew the OneDrive sign-in (invalid_grant).', true]]);
   });
 
-  test('a song that cannot be tagged is saved as it was downloaded', async () => {
+  test('a song of any type is saved exactly as it was sent', async () => {
     const { drive, archive } = setUp();
     const ogg = Uint8Array.from([0x4f, 0x67, 0x67, 0x53, 1, 2, 3]);
     archive.offer('https://x.test/1', song('Ishay Ribo - Derech.ogg', ogg, 'audio/ogg'));
@@ -257,6 +271,7 @@ describe('the library offers each song it fetches to be sent', () => {
     );
     await library.archive!.idle();
     assert.deepEqual(drive.uploads, ['Ishay Ribo/Singles/Derech (feat. Zusha).mp3']);
+    assert.deepEqual(drive.files.get('Ishay Ribo/Singles/Derech (feat. Zusha).mp3'), new Uint8Array(await sent.data.arrayBuffer()), 'the copy in OneDrive is the file that was sent, tags and all, not a second tagging of it');
     assert.match(library.summary, /songs sent are saved to OneDrive/);
   });
 

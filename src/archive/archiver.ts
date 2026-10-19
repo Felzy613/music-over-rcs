@@ -1,7 +1,6 @@
-import { tagSong } from '../library/audio-cache.ts';
-import type { CoverPicture, SongTags } from '../library/id3.ts';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import { addArchived, archivedThisMonth } from '../usage.ts';
+import type { UploadSource } from './onedrive.ts';
 
 interface StateStore {
   getState(key: string): string | undefined;
@@ -12,7 +11,7 @@ interface StateStore {
 export interface Drive {
   connected(): boolean;
   exists(path: string): Promise<boolean>;
-  upload(path: string, data: Uint8Array): Promise<void>;
+  upload(path: string, data: UploadSource): Promise<void>;
 }
 
 export interface SongArchiveOptions {
@@ -20,18 +19,20 @@ export interface SongArchiveOptions {
   state: StateStore;
   /** Where a song goes in the folder: "Artist/Album/01 Title.mp3". */
   placeOf: (url: string, audio: { fileName: string; mimeType: string }) => string;
-  tagsOf: (url: string, audio: { fileName: string; mimeType: string }) => SongTags | undefined;
-  fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
   /** The most to upload in a calendar month, in bytes. Undefined for no limit. */
   monthlyBudgetBytes?: number | undefined;
   /**
-   * What memory there is and how much is used, for a host with little (see memory.ts). Beyond the copy the bot already holds, a song
-   * takes two more copies of its size while it is tagged and uploaded; when that doesn't fit with some room to spare, the song waits a
-   * while for other work to finish, and is skipped if it never does: the song has been sent in any case, and a crashed host helps
-   * nobody. Undefined for no limit.
+   * What memory there is and how much is used, for a host with little (see memory.ts). The song offered is the one that was sent, tags
+   * and cover already written in, and it goes up straight from its Blob a 10 MiB piece at a time, so it costs about two pieces however
+   * big it is; when even that doesn't fit with some room to spare, the song waits a while for other work to finish, and is skipped if
+   * it never does: the song has been sent in any case, and a crashed host helps nobody. Undefined for no limit.
    */
   memory?: (() => { limit: number; used: number } | undefined) | undefined;
-  /** How long a song waits before it is saved, so that the send that fetched it is over and its memory is free (default 5 s). */
+  /**
+   * How long a song waits before it is saved, so that the send that fetched it is over and its memory is free, and the bridge and the
+   * homeserver have handed it on to Google (default 5 s, and half a second more for each MB of the song, up to 30 s: a 27 MB song
+   * was being relayed by them at the very moment its copy to OneDrive began, and the host ran out of memory).
+   */
   delayMs?: number | undefined;
   /** Test hook: a wait. */
   sleep?: ((ms: number) => Promise<void>) | undefined;
@@ -43,8 +44,12 @@ export interface SongArchiveOptions {
 
 /** Songs waiting to be saved. More than this and the newest are not saved (the song is whole in memory until then). */
 const MAX_WAITING = 3;
-/** Memory kept free beyond what a song needs, in bytes. */
-const MEMORY_HEADROOM = 40 * 1048576;
+/** The size of one piece of an upload (src/archive/onedrive.ts), in bytes. */
+const UPLOAD_PIECE = 10 * 1048576;
+/** Memory kept free beyond what a song needs, in bytes: whatever else on the host may move meanwhile. */
+const MEMORY_HEADROOM = 80 * 1048576;
+/** The pause before a song is saved, in ms: this, and half a second more for each MB of the song (but never more than 30 s). */
+const SETTLE_MS = 5000;
 /** Failed saves in a row before it is called a problem. */
 const FAILURES_BEFORE_PROBLEM = 3;
 
@@ -98,7 +103,8 @@ export class SongArchive {
   async #work(): Promise<void> {
     for (let item = this.#queue.shift(); item; item = this.#queue.shift()) {
       try {
-        await (this.#options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(this.#options.delayMs ?? 5000);
+        const settle = this.#options.delayMs ?? Math.min(30_000, SETTLE_MS + Math.round(item.audio.bytes / 1048576) * 500);
+        await (this.#options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(settle);
         await this.#save(item.url, item.audio);
         this.#failures = 0;
         if (this.#told) {
@@ -119,13 +125,14 @@ export class SongArchive {
     }
   }
 
-  /** Waits (up to two minutes) until this song fits in the memory there is to spare; false, with a note, if it never does. */
+  /** Waits (up to two minutes) until there is memory to spare for uploading this song; false, with a note, if there never is. */
   async #roomFor(bytes: number, place: string): Promise<boolean> {
     const memory = this.#options.memory;
     if (!memory) return true;
     const sleep = this.#options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    // Two more copies of the song, one upload piece (10 MiB), and room to spare for everything else that may move meanwhile.
-    const needed = 2 * bytes + 10 * 1048576 + MEMORY_HEADROOM;
+    // The piece being sent and the next one being read, and room to spare for everything else that may move meanwhile. (Not the song:
+    // it is already in memory, as the copy that was sent, and is read from there.)
+    const needed = 2 * UPLOAD_PIECE + MEMORY_HEADROOM;
     for (let waited = 0; waited <= 120_000; waited += 3000) {
       // The bot runs with --expose-gc on a small host: free what the send left behind before measuring.
       (globalThis as { gc?: () => void }).gc?.();
@@ -157,11 +164,12 @@ export class SongArchive {
       return;
     }
     if (!(await this.#roomFor(audio.bytes, place))) return;
-    const tagged = await tagSong(url, audio, { tagsOf: this.#options.tagsOf, fetchCover: this.#options.fetchCover });
-    await drive.upload(place, tagged.data);
+    // The song as it was sent: tagged, with its cover, by the same step that tagged it for Google Messages (taggedFetch). Tagging it
+    // again here would read it into one new copy and write it into another, to end up with the same file.
+    await drive.upload(place, audio.data);
     state.setState(marker, '1');
     state.setState('onedrive.error', '');
-    addArchived(state, tagged.bytes, when);
-    this.#options.log?.(`saved ${place} to OneDrive (${(tagged.bytes / 1048576).toFixed(1)} MB)`);
+    addArchived(state, audio.bytes, when);
+    this.#options.log?.(`saved ${place} to OneDrive (${(audio.bytes / 1048576).toFixed(1)} MB)`);
   }
 }

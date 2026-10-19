@@ -85,6 +85,20 @@ describe('the host checks', () => {
     assert.match(byName(results, 'No problems reported').detail, /unlinked the bridge/);
   });
 
+  test('the host’s whole-container memory is what is judged when it reports it: now and at its highest, with who held it', async () => {
+    const holders = [{ name: 'synapse', anonMb: 150 }, { name: 'bot', anonMb: 140 }];
+    const comfortable = { limitMb: 512, usedMb: 320, percent: 63, currentMb: 400, processes: holders, peak: { usedMb: 380, percent: 74, at: '2026-10-18T22:00:00Z', processes: holders }, warnAtPercent: 85 };
+    const fine = byName(await check({ ...RUNNING, memory: comfortable }), 'Memory is within the free plan');
+    assert.equal(fine.ok, true);
+    assert.match(fine.detail, /320 of 512 MB in use \(63%\); the most since the start 380 MB \(74%\), then held by synapse 150 MB, bot 140 MB/);
+
+    // The bot alone is small (300 MB), but the container reached 92% earlier: that is what counts.
+    const tight = byName(await check({ ...RUNNING, memory: { ...comfortable, peak: { ...comfortable.peak, usedMb: 471, percent: 92 } } }), 'Memory is within the free plan');
+    assert.equal(tight.ok, false);
+    assert.match(tight.fix!, /lines starting "memory:"/);
+    assert.equal(byName(await check({ ...RUNNING, memory: { ...comfortable, percent: 90, usedMb: 461 } }), 'Memory is within the free plan').ok, false, 'and so is being high right now');
+  });
+
   test('a test alert is left for the Worker when asked, and a host with nowhere to leave it says so', async () => {
     const withAlerts = await checkCloud({ render: await host(RUNNING, { withAlerts: true }), adminToken: 'admin-secret', now: () => NOW, sendTestAlert: true });
     assert.equal(byName(withAlerts, 'A test alert is left for the Worker').ok, true);

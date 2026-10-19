@@ -76,7 +76,21 @@ export async function checkCloud(options: CheckOptions): Promise<CheckResult[]> 
   }
   const s = status.json;
   add('The host accepts the admin password', true, `up ${Math.round(s.uptimeSeconds / 60)} min, ${s.memoryMb} MB of memory`);
-  add('Memory is within the free plan', s.memoryMb < 450, `${s.memoryMb} MB (the free plan has 512 MB; under about 450 is comfortable)`, 'Memory is tight: see "Moving to a paid host" in docs/cloud.md.');
+  // The host reports the whole container's memory when it can; the bot's own size alone (memoryMb) says little about a host whose
+  // homeserver, bridge and replicator share the same 512 MB.
+  const memory = s.memory;
+  if (memory) {
+    const highest = Math.max(memory.percent ?? 0, memory.peak?.percent ?? 0);
+    const holders = (memory.peak?.processes ?? memory.processes ?? []).slice(0, 4).map((p: { name: string; anonMb: number }) => `${p.name} ${p.anonMb} MB`).join(', ');
+    add(
+      'Memory is within the free plan',
+      highest < (memory.warnAtPercent ?? 85),
+      `${memory.usedMb} of ${memory.limitMb} MB in use (${memory.percent}%); the most since the start ${memory.peak?.usedMb ?? memory.usedMb} MB (${memory.peak?.percent ?? memory.percent}%)${holders ? `, then held by ${holders}` : ''}`,
+      'Memory got tight: the host\'s log has lines starting "memory:" naming who held it, and /status has the breakdown. See "Moving to a paid host" in docs/cloud.md.',
+    );
+  } else {
+    add('Memory is within the free plan', s.memoryMb < 450, `${s.memoryMb} MB (the free plan has 512 MB; under about 450 is comfortable)`, 'Memory is tight: see "Moving to a paid host" in docs/cloud.md.');
+  }
 
   const edge = s.edge;
   if (!edge) {

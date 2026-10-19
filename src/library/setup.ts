@@ -95,8 +95,6 @@ export function setUpLibrary(options: LibraryOptions): Library {
         drive: options.cloudFolder,
         state: catalog,
         placeOf: naming.placeOf,
-        tagsOf: naming.tagsOf,
-        fetchCover: coverFetcher(),
         monthlyBudgetBytes: options.cloudMonthlyBytes,
         memory: options.cloudMemory,
         onProblem: options.onCloudFolder,
