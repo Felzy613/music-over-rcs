@@ -107,6 +107,22 @@ export interface MemoryReport {
   restMb: number | undefined;
   /** Set while it has been well above its resting level for a while (and the log has said so): when that began. */
   raisedSince: string | undefined;
+  /** Who held what the last time it was resting (refreshed about once a minute while it stays near its lowest): what a rise is measured against, process by process. */
+  restProcesses: ProcessMemory[];
+}
+
+/**
+ * Who holds what, with how much more each holds than at rest: "synapse 143 MB (+51), bot 89 MB (+42)", the largest growth first, a
+ * process that was not there at rest marked "new". Without a resting breakdown to compare with, just what each holds.
+ */
+function holdersLine(now: ProcessMemory[], rest: ProcessMemory[]): string {
+  if (now.length === 0) return '';
+  if (rest.length === 0) return ` - ${now.slice(0, 6).map((p) => `${p.name} ${p.anonMb} MB`).join(', ')}`;
+  const before = new Map(rest.map((p) => [p.name, p.anonMb]));
+  const rows = now
+    .map((p) => ({ p, isNew: !before.has(p.name), growth: p.anonMb - (before.get(p.name) ?? 0) }))
+    .sort((a, b) => b.growth - a.growth || b.p.anonMb - a.p.anonMb);
+  return ` - ${rows.slice(0, 6).map(({ p, isNew, growth }) => `${p.name} ${p.anonMb} MB (${isNew ? 'new' : growth >= 0 ? `+${growth}` : growth})`).join(', ')}`;
 }
 
 const readCurrent = (): number | undefined => {
@@ -126,7 +142,8 @@ const readCurrent = (): number | undefined => {
  * It also notices memory that goes up and stays up well short of the warning line, which is how a big song leaves it (on
  * 2026-10-19 a 27 MB song took the container from 257 to 370 MB and it stayed there for minutes): once it has been `riseMb` or more
  * above its resting level (the lowest of the last 15 minutes) for `holdMs`, one line names who holds it, and another says when it
- * has settled. Nothing is said in the first minutes after a start, when everything is still settling in.
+ * has settled, each with how much more every process holds than when memory last rested. Nothing is said in the first 90 s after a
+ * start, when everything is still settling in.
  */
 export class MemoryWatch {
   #read: () => MemoryUse | undefined;
@@ -152,8 +169,11 @@ export class MemoryWatch {
   #episodeMaxMs: number;
   /** What it used at each look since the start settled, for the last quarter of an hour. */
   #samples: Array<{ at: number; used: number }> = [];
-  /** A rise being watched: from when, from what level, and whether the log has said so. */
-  #rising: { since: number; restMb: number; announced: boolean } | undefined;
+  /** A rise being watched: from when, from what level (and who held what then), and whether the log has said so. */
+  #rising: { since: number; restMb: number; restProcesses: ProcessMemory[]; announced: boolean } | undefined;
+  /** Who held what at the last look while it was resting, and when that was taken. */
+  #restProcesses: ProcessMemory[] = [];
+  #restSnapshotAt = 0;
 
   constructor(options: {
     log: (line: string) => void;
@@ -170,7 +190,7 @@ export class MemoryWatch {
     /** When the first routine line is written after the start (default 90 s, when everything is up), and how often after that (default 6 hours). */
     firstReportMs?: number;
     reportEveryMs?: number;
-    /** The start is left alone this long before a rise is looked for (default 3 minutes). */
+    /** The start is left alone this long before a rise is looked for (default 90 s, by when everything is up and the routine line is written). */
     warmUpMs?: number;
     /** How far above its resting level counts as a rise, in MB (default 60); how long it must last (default 45 s); how near the resting level counts as settled again (default 30 MB). */
     riseMb?: number;
@@ -188,7 +208,7 @@ export class MemoryWatch {
     this.#reportEveryMs = options.reportEveryMs ?? 6 * 3_600_000;
     this.#nextReportAt = this.#now().getTime() + (options.firstReportMs ?? 90_000);
     this.#startedAt = this.#now().getTime();
-    this.#warmUpMs = options.warmUpMs ?? 180_000;
+    this.#warmUpMs = options.warmUpMs ?? 90_000;
     this.#riseMb = options.riseMb ?? 60;
     this.#holdMs = options.holdMs ?? 45_000;
     this.#settleMb = options.settleMb ?? 30;
@@ -242,29 +262,31 @@ export class MemoryWatch {
     if (now - this.#startedAt < this.#warmUpMs) return;
     const usedMb = use.used / MB;
     const total = `${Math.round(usedMb)} of ${Math.round(use.limit / MB)} MB`;
-    const who = (): string => {
-      const holders = this.#processes();
-      return holders.length ? ` - ${holders.slice(0, 6).map((p) => `${p.name} ${p.anonMb} MB`).join(', ')}` : '';
-    };
     const rising = this.#rising;
     if (!rising) {
       this.#samples = this.#samples.filter((sample) => now - sample.at <= this.#restWindowMs);
       const floor = this.#samples.length > 0 ? Math.min(...this.#samples.map((sample) => sample.used)) / MB : undefined;
       this.#samples.push({ at: now, used: use.used });
-      if (floor !== undefined && usedMb - floor >= this.#riseMb) this.#rising = { since: now, restMb: floor, announced: false };
+      // Who holds what while it rests, looked at about once a minute while it stays near its lowest: a rise is told process by process against this.
+      if ((floor === undefined || usedMb <= floor + 15) && now - this.#restSnapshotAt >= 60_000) {
+        this.#restSnapshotAt = now;
+        const holders = this.#processes();
+        if (holders.length > 0) this.#restProcesses = holders;
+      }
+      if (floor !== undefined && usedMb - floor >= this.#riseMb) this.#rising = { since: now, restMb: floor, restProcesses: this.#restProcesses, announced: false };
       return;
     }
     if (!rising.announced) {
       if (usedMb - rising.restMb < this.#riseMb) this.#rising = undefined; // a blip, not a rise
       else if (now - rising.since >= this.#holdMs) {
         rising.announced = true;
-        this.#log(`memory (raised): ${total} in use (${Math.round(percent)}%), ${Math.round(usedMb - rising.restMb)} MB above its resting ${Math.round(rising.restMb)} MB for ${Math.round((now - rising.since) / 1000)} s${who()} (anonymous memory)`);
+        this.#log(`memory (raised): ${total} in use (${Math.round(percent)}%), ${Math.round(usedMb - rising.restMb)} MB above its resting ${Math.round(rising.restMb)} MB for ${Math.round((now - rising.since) / 1000)} s${holdersLine(this.#processes(), rising.restProcesses)} (anonymous memory)`);
       }
       return;
     }
     if (usedMb <= rising.restMb + this.#settleMb) {
       this.#rising = undefined;
-      this.#log(`memory (settled): ${total} in use (${Math.round(percent)}%), back to its resting ${Math.round(rising.restMb)} MB level ${Math.round((now - rising.since) / 1000)} s after it rose${who()} (anonymous memory)`);
+      this.#log(`memory (settled): ${total} in use (${Math.round(percent)}%), back to its resting ${Math.round(rising.restMb)} MB level ${Math.round((now - rising.since) / 1000)} s after it rose${holdersLine(this.#processes(), rising.restProcesses)} (anonymous memory)`);
     } else if (now - rising.since > this.#episodeMaxMs) {
       // It has not come back in half an hour: this is the level it rests at now.
       this.#rising = undefined;
@@ -287,6 +309,7 @@ export class MemoryWatch {
       warnAtPercent: this.#warnAt,
       restMb: this.#samples.length > 0 ? Math.round(Math.min(...this.#samples.map((sample) => sample.used)) / MB) : undefined,
       raisedSince: this.#rising?.announced ? new Date(this.#rising.since).toISOString() : undefined,
+      restProcesses: this.#rising ? this.#rising.restProcesses : this.#restProcesses,
     };
   }
 }

@@ -90,7 +90,7 @@ function watchSetUp(options: { warnAtPercent?: number; warmUpMs?: number; firstR
   let used = 300;
   let clock = Date.parse('2026-10-18T22:00:00Z');
   let reads = 0;
-  const holders: ProcessMemory[] = [
+  let holders: ProcessMemory[] = [
     { name: 'synapse', count: 1, anonMb: 150, rssMb: 200 },
     { name: 'bot', count: 1, anonMb: 140, rssMb: 180 },
   ];
@@ -102,7 +102,7 @@ function watchSetUp(options: { warnAtPercent?: number; warmUpMs?: number; firstR
     now: () => new Date(clock),
     ...options,
   });
-  return { watch, logs, setUsed: (mb: number) => void (used = mb), tick: (ms: number) => void (clock += ms), reads: () => reads };
+  return { watch, logs, setUsed: (mb: number) => void (used = mb), setHolders: (list: ProcessMemory[]) => void (holders = list), tick: (ms: number) => void (clock += ms), reads: () => reads };
 }
 
 test('below the line it says nothing, but remembers the highest it saw and who held it then', () => {
@@ -198,6 +198,8 @@ test('the line can be moved, and where there is no container limit there is noth
 describe('a rise that stays', () => {
   /** The routine line is put off for ever, so that the log holds only what is being tested. */
   const NEVER = 1e12;
+  const procs = (spec: Record<string, number>): ProcessMemory[] => Object.entries(spec).map(([name, anonMb]) => ({ name, count: 1, anonMb, rssMb: anonMb + 20 }));
+  const REST = { synapse: 100, bot: 50, litestream: 15 };
   /** Looks every 5 s for this many seconds with this much in use. */
   const stay = (set: ReturnType<typeof watchSetUp>, usedMb: number, seconds: number) => {
     set.setUsed(usedMb);
@@ -207,27 +209,56 @@ describe('a rise that stays', () => {
     }
   };
 
-  test('is reported once, 45 s after it began, naming who holds it, and again when it has settled', () => {
+  test('is reported once, 45 s after it began, with each process’s growth from where it rested, and again when it has settled', () => {
     const set = watchSetUp({ warmUpMs: 0, firstReportMs: NEVER });
-    stay(set, 250, 120); // resting
+    set.setHolders(procs(REST));
+    stay(set, 250, 120); // resting: who holds what is noted
     assert.deepEqual(set.logs, []);
+    assert.deepEqual(set.watch.report()!.restProcesses, procs(REST));
+    set.setHolders(procs({ synapse: 150, bot: 140, litestream: 17, bridge: 40 }));
     stay(set, 360, 40); // up, but not for long enough yet
     assert.deepEqual(set.logs, []);
     stay(set, 360, 20);
     assert.equal(set.logs.length, 1);
-    assert.match(set.logs[0]!, /^memory \(raised\): 360 of 512 MB in use \(70%\), 110 MB above its resting 250 MB for 45 s - synapse 150 MB, bot 140 MB \(anonymous memory\)$/);
+    assert.match(set.logs[0]!, /^memory \(raised\): 360 of 512 MB in use \(70%\), 110 MB above its resting 250 MB for 45 s - bot 140 MB \(\+90\), synapse 150 MB \(\+50\), bridge 40 MB \(new\), litestream 17 MB \(\+2\) \(anonymous memory\)$/);
     assert.ok(set.watch.report()!.raisedSince, 'and /status says it is up');
     assert.equal(set.watch.report()!.restMb, 250);
     stay(set, 365, 300); // it stays up for five minutes: said once
     assert.equal(set.logs.length, 1);
+    set.setHolders(procs({ synapse: 105, bot: 55, litestream: 15 }));
     stay(set, 285, 5); // down, but not yet within 30 MB of where it rested
     assert.equal(set.logs.length, 1);
     stay(set, 270, 5);
     assert.equal(set.logs.length, 2);
-    assert.match(set.logs[1]!, /^memory \(settled\): 270 of 512 MB in use \(53%\), back to its resting 250 MB level \d+ s after it rose - synapse 150 MB, bot 140 MB \(anonymous memory\)$/);
+    assert.match(set.logs[1]!, /^memory \(settled\): 270 of 512 MB in use \(53%\), back to its resting 250 MB level \d+ s after it rose - synapse 105 MB \(\+5\), bot 55 MB \(\+5\), litestream 15 MB \(\+0\) \(anonymous memory\)$/);
     assert.equal(set.watch.report()!.raisedSince, undefined);
     stay(set, 255, 120);
     assert.equal(set.logs.length, 2, 'said once');
+  });
+
+  test('the resting breakdown follows a slow creep about once a minute, and is frozen once a rise begins', () => {
+    const set = watchSetUp({ warmUpMs: 0, firstReportMs: NEVER });
+    set.setHolders(procs(REST));
+    stay(set, 250, 120);
+    set.setHolders(procs({ synapse: 110, bot: 55, litestream: 15 })); // an hour later it rests a little higher
+    stay(set, 258, 120);
+    assert.deepEqual(set.watch.report()!.restProcesses, procs({ synapse: 110, bot: 55, litestream: 15 }));
+    set.setHolders(procs({ synapse: 160, bot: 120, litestream: 15 }));
+    stay(set, 345, 60);
+    assert.equal(set.logs.length, 1);
+    assert.match(set.logs[0]!, /- bot 120 MB \(\+65\), synapse 160 MB \(\+50\), litestream 15 MB \(\+0\) \(anonymous memory\)$/);
+    set.setHolders(procs({ synapse: 170, bot: 130, litestream: 15 }));
+    stay(set, 346, 300); // while it is up, the breakdown it is measured against stays as it was
+    assert.deepEqual(set.watch.report()!.restProcesses, procs({ synapse: 110, bot: 55, litestream: 15 }));
+  });
+
+  test('where who holds what cannot be read (a Mac), the rise is still reported, without names', () => {
+    const set = watchSetUp({ warmUpMs: 0, firstReportMs: NEVER });
+    set.setHolders([]);
+    stay(set, 250, 120);
+    stay(set, 340, 60);
+    assert.equal(set.logs.length, 1);
+    assert.match(set.logs[0]!, /^memory \(raised\): 340 of 512 MB in use \(66%\), 90 MB above its resting 250 MB for 45 s \(anonymous memory\)$/);
   });
 
   test('a blip, a rise of less than 60 MB, and a slow creep are not reported', () => {
@@ -241,12 +272,12 @@ describe('a rise that stays', () => {
     assert.deepEqual(set.logs, []);
   });
 
-  test('the start is left alone: nothing in the first three minutes', () => {
+  test('the start is left alone: nothing in the first 90 s, and the resting level is learned from there on', () => {
     const set = watchSetUp({ firstReportMs: NEVER }); // the default warm-up
     stay(set, 150, 30);
-    stay(set, 260, 140); // up by 110 MB while everything settles in, and it stays: 170 s in
+    stay(set, 260, 55); // up by 110 MB while everything settles in, 85 s in: not looked at
     assert.deepEqual(set.logs, []);
-    stay(set, 262, 60); // the rest is read from here on
+    stay(set, 262, 60); // it rests here
     stay(set, 380, 60);
     assert.equal(set.logs.length, 1);
     assert.match(set.logs[0]!, /^memory \(raised\): 380 of 512 MB in use \(74%\), 118 MB above its resting 262 MB/);
