@@ -346,6 +346,10 @@ export function createRunner(options: RunnerOptions): Runner {
   let timer: NodeJS.Timeout | undefined;
   let stopped = true;
   let current: Promise<void> | undefined;
+  /** The answers with a song, picture or album in them, sent one at a time, in the order they were asked for (see `send`). */
+  let delivery: Promise<void> = Promise.resolve();
+  /** How many of those are waiting or under way. */
+  let delivering = 0;
   let failures = 0;
   /** When the last song went out, so the next one waits its turn. */
   let lastSongAt: number | undefined;
@@ -614,33 +618,90 @@ export function createRunner(options: RunnerOptions): Runner {
     }
   }
 
+  /** Requests being worked on right now (one may be on its way to the phone while another is looked up), and what keeps "typing…" up. */
+  let typingFor = 0;
+  let typingFailed = false;
+  let typingRenew: NodeJS.Timeout | undefined;
+  let typingQueue: Promise<void> = Promise.resolve();
+
+  /** One call at a time and in order, so "stopped" can never overtake "started". */
+  function postTyping(typing: boolean): Promise<void> {
+    const setTyping = chat.setTyping!.bind(chat);
+    typingQueue = typingQueue.then(async () => {
+      try {
+        await setTyping(chatID, typing);
+      } catch (err) {
+        if (!typingFailed) log(`typing indicator failed: ${errorText(err)}`);
+        typingFailed = true;
+      }
+    });
+    return typingQueue;
+  }
+
   /**
    * Shows "typing…" while a request is being worked on, renewing it before it lapses, and returns the function that
-   * clears it. A failure here is logged once and never gets in the way of the answer.
+   * clears it. It stays up while any request is still being worked on, and calling the function again does nothing. A
+   * failure here is logged once and never gets in the way of the answer.
    */
   function startTyping(): () => Promise<void> {
     if (!chat.setTyping) return async () => {};
-    const setTyping = chat.setTyping.bind(chat);
-    let failed = false;
-    let queue: Promise<void> = Promise.resolve();
-    // One call at a time and in order, so "stopped" can never overtake "started".
-    const post = (typing: boolean): Promise<void> => {
-      queue = queue.then(async () => {
-        try {
-          await setTyping(chatID, typing);
-        } catch (err) {
-          if (!failed) log(`typing indicator failed: ${errorText(err)}`);
-          failed = true;
-        }
-      });
-      return queue;
-    };
-    void post(true);
-    const renew = setInterval(() => void post(true), typingRefreshMs);
+    typingFor += 1;
+    if (typingFor === 1) {
+      typingFailed = false;
+      void postTyping(true);
+      typingRenew = setInterval(() => void postTyping(true), typingRefreshMs);
+    }
+    let stopped = false;
     return async () => {
-      clearInterval(renew);
-      await post(false);
+      if (stopped) return;
+      stopped = true;
+      typingFor -= 1;
+      if (typingFor > 0) return;
+      clearInterval(typingRenew);
+      await postTyping(false);
     };
+  }
+
+  /**
+   * Sends the bot's answer to one request, then calls `done` (which clears "typing…"). An answer of text alone goes out
+   * at once. One with a song, a picture or an album waits its turn behind the ones handed over before it, and is not
+   * waited for: the poll goes on, so a request made while a song is on its way is read and answered then, not after the
+   * song. They go one at a time because the songs have to arrive in the order they were asked for, and a small host
+   * can't hold two downloads' worth of memory.
+   */
+  async function send(replies: Reply[], done: () => Promise<void>): Promise<void> {
+    const run = async (): Promise<void> => {
+      try {
+        await respond(replies);
+      } finally {
+        await done();
+      }
+    };
+    if (replies.every((reply) => reply.kind === 'text')) return run();
+    delivering += 1;
+    delivery = delivery.then(async () => {
+      try {
+        await run();
+      } catch (err) {
+        failed('sending', err);
+      } finally {
+        delivering -= 1;
+        // Nothing is half-answered now, unless a poll is partway through (it saves its own point when it ends).
+        if (!current) checkpoint();
+      }
+    });
+  }
+
+  /** Waits until every answer handed over for delivery has been sent. */
+  async function idle(): Promise<void> {
+    while (delivering > 0) await delivery;
+  }
+
+  /** A poll or a delivery that failed: counted the same, since either means the chat isn't taking what the bot says. */
+  function failed(what: 'poll' | 'sending', err: unknown): void {
+    failures++;
+    log(`${what} failed (${failures} in a row): ${errorText(err)}`);
+    options.onPoll?.(false, failures, errorText(err));
   }
 
   async function handleMessage(message: ChatMessage): Promise<void> {
@@ -689,9 +750,10 @@ export function createRunner(options: RunnerOptions): Runner {
           replies = [{ kind: 'text', text: ERROR_NOTICE }];
         }
       }
-      await respond(replies);
-    } finally {
+      await send(replies, stopTyping);
+    } catch (err) {
       await stopTyping();
+      throw err;
     }
   }
 
@@ -723,15 +785,19 @@ export function createRunner(options: RunnerOptions): Runner {
           }
         }),
       );
-      await respond(answers.flat());
-    } finally {
+      await send(answers.flat(), stopTyping);
+    } catch (err) {
       await stopTyping();
+      throw err;
     }
   }
 
-  /** Writes down how far the runner got. Called when nothing is half-answered, so a crash repeats work rather than losing it. */
+  /**
+   * Writes down how far the runner got. Called when nothing is half-answered, so a crash repeats work rather than losing
+   * it: not while a song or album handed over for delivery is still on its way.
+   */
   function checkpoint(): void {
-    if (!options.resume || !unsaved) return;
+    if (!options.resume || !unsaved || delivering > 0) return;
     unsaved = false;
     try {
       options.resume.save({ at: lastAt, ids: [...seen].slice(-RESUME_IDS) });
@@ -769,7 +835,7 @@ export function createRunner(options: RunnerOptions): Runner {
 
   /** Runs a job that sends on its own (an announcement), after whatever is under way, and makes polls wait for it. */
   async function exclusive(job: () => Promise<void>): Promise<void> {
-    while (current) await current.catch(() => {});
+    while (current || delivering > 0) await (current ?? delivery).catch(() => {});
     const run = (async () => {
       try {
         await job();
@@ -781,7 +847,8 @@ export function createRunner(options: RunnerOptions): Runner {
     return run;
   }
 
-  function tick(): Promise<void> {
+  /** Reads the chat once and starts answering what's new. Songs and albums are sent in the background (see `send`). */
+  function poll(): Promise<void> {
     if (current) return current;
     const run = (async () => {
       try {
@@ -832,9 +899,7 @@ export function createRunner(options: RunnerOptions): Runner {
         await answerLikes();
         checkpoint();
       } catch (err) {
-        failures++;
-        log(`poll failed (${failures} in a row): ${errorText(err)}`);
-        options.onPoll?.(false, failures, errorText(err));
+        failed('poll', err);
       } finally {
         current = undefined;
       }
@@ -843,9 +908,15 @@ export function createRunner(options: RunnerOptions): Runner {
     return run;
   }
 
+  /** Reads the chat once and answers what's new, songs and albums included: it returns when they've been sent. */
+  async function tick(): Promise<void> {
+    await poll();
+    await idle();
+  }
+
   async function loop(): Promise<void> {
     if (stopped) return;
-    await tick();
+    await poll();
     if (stopped) return;
     timer = setTimeout(() => void loop(), Math.min(pollMs * 2 ** Math.min(failures, 4), 15_000));
   }
@@ -869,6 +940,7 @@ export function createRunner(options: RunnerOptions): Runner {
       clearTimeout(timer);
       wake?.(); // a song waiting its turn goes now
       await current;
+      await idle();
     },
   };
 }

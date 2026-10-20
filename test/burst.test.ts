@@ -109,14 +109,14 @@ describe('a burst of 👍', () => {
     assert.deepEqual(typing, [true, false]);
   });
 
-  test('a 👍 on something that is not a song is skipped, the rest are answered, and a request in between comes after them', async () => {
+  test('a 👍 on something that is not a song is skipped, the rest go in order, and a text request in between is answered without waiting for them', async () => {
     const { runner, events, incoming } = setup(3);
     await runner.prime();
     incoming.push(like('m1'), like('a heading'), like('m2'), { id: 'typed', timestamp: '', text: 'help', hasAttachments: false, isDeleted: false });
     await runner.tick();
     assert.deepEqual(
       events.filter((e) => e.startsWith('audio:') || e.startsWith('text:')),
-      ['audio:song 1.mp3', 'audio:song 2.mp3', 'text:🎵 answer to help'],
+      ['text:🎵 answer to help', 'audio:song 1.mp3', 'audio:song 2.mp3'],
     );
   });
 
