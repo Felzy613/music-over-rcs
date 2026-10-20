@@ -185,6 +185,10 @@ describe('the homeserver config', () => {
     assert.match(text, /presence:\n {2}enabled: false/);
   });
 
+  test('lets the bot send a long list at once: no message limit to speak of', () => {
+    assert.match(text, /rc_message:\n {2}per_second: 20\n {2}burst_count: 200\n/);
+  });
+
   test('has secrets derived from the master, the same each time', () => {
     assert.equal(text, synapseConfig({ serverName: 'localhost', paths, master: OPTIONS.master }));
     assert.notEqual(text, synapseConfig({ serverName: 'localhost', paths, master: 'another master' }));

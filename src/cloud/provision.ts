@@ -75,7 +75,8 @@ export interface SynapseOptions {
 
 /**
  * Synapse's settings for one user on a small host: it listens on this machine only, never federates, keeps no presence
- * and few caches, and drops media a day after it is uploaded (a song has been handed to the bridge by then).
+ * and few caches, drops media a day after it is uploaded (a song has been handed to the bridge by then), and lets the
+ * bot send as fast as it likes (a list is one message per line).
  */
 export function synapseConfig(options: SynapseOptions): string {
   const { paths, master, serverName } = options;
@@ -115,6 +116,11 @@ media_retention:
 redaction_retention_period: 1h
 presence:
   enabled: false
+# One person on a homeserver of their own: Synapse's default (a message every 5 s after a burst of 10) made a long list,
+# one message per line so each can be 👍'd, arrive over minutes. The runner keeps its own loop guard.
+rc_message:
+  per_second: 20
+  burst_count: 200
 caches:
   global_factor: ${options.cacheFactor ?? 0.25}
 `;

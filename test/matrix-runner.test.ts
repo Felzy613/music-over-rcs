@@ -409,6 +409,48 @@ describe('runner over Matrix (the bridge case)', () => {
     assert.deepEqual(asked, ['tracks:a2', 'tracks:a1'], 'the list stays open for another number');
   });
 
+  test('a long list (an album of 50 songs) goes out whole: the loop guard counts answers, not messages', async () => {
+    let clock = 1_000_000;
+    const logs: string[] = [];
+    const songs = Array.from({ length: 50 }, (_, i) => i + 1);
+    const bot = {
+      handle: async (msg: Incoming): Promise<Reply[]> =>
+        msg.text === 'search long album'
+          ? [
+              { kind: 'text', text: '💿 A Long Album · 2020 · 50 songs', postback: 'album:long' },
+              ...songs.map((n): Reply => ({ kind: 'text', text: `Song ${n}`, postback: `play:${n}`, number: n })),
+              { kind: 'text', text: 'Tap 👍 on the songs you want.', chips: songs.map((n) => ({ label: `${n}`, postback: `play:${n}` })), numbers: songs.map((n) => ({ number: n, postback: `play:${n}` })) },
+            ]
+          : [{ kind: 'text', text: `answer to ${msg.text}` }],
+    };
+    const runner = createRunner({
+      chat: new MatrixClient({ token: mock.token, homeserver: mock.url }),
+      bot,
+      chatID: mock.roomId,
+      fetchAudio: (url, title) => fetchAudio(url, title),
+      pollMs: 20,
+      now: () => clock,
+      log: (line) => logs.push(line),
+      maxAnswersPerMinute: 3,
+    });
+    await runner.prime();
+    typedOnPhone('search long album');
+    await runner.tick();
+    assert.equal(mock.sent.length, 52, 'the album, its 50 songs and the closing line');
+    assert.equal(mock.sent[50]?.content.body, '🎵 50. Song 50');
+    // Answers are what is counted: three in the minute, then the next request gets none until the minute is over.
+    for (const text of ['one', 'two', 'three']) {
+      typedOnPhone(text);
+      await runner.tick();
+    }
+    assert.deepEqual(mock.sent.slice(52).map((s) => s.content.body), ['🎵 answer to one', '🎵 answer to two']);
+    assert.ok(logs.some((line) => line.includes('answer limit reached (3 a minute)')));
+    clock += 61_000;
+    typedOnPhone('four');
+    await runner.tick();
+    assert.equal(mock.sent.at(-1)?.content.body, '🎵 answer to four');
+  });
+
   test("a list's closing line coming back from the phone (its copy of what the bot sent) is not taken for a request", async () => {
     const { runner } = makeRunner();
     await runner.prime();

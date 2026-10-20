@@ -154,9 +154,9 @@ describe('runner over Beeper', () => {
     assert.ok(logs.some((line) => line.includes('could not get Nobody — Flaky File ready')));
   });
 
-  test('stops sending when the per-minute limit is hit, and resumes later', async () => {
+  test('stops answering when the per-minute limit is hit, and resumes later', async () => {
     let clock = 1_000_000;
-    const { runner, logs } = makeRunner({ maxSendsPerMinute: 2, now: () => clock });
+    const { runner, logs } = makeRunner({ maxAnswersPerMinute: 1, now: () => clock });
     await runner.prime();
 
     beeper.addUserMessage('search paper planes');
@@ -167,7 +167,7 @@ describe('runner over Beeper', () => {
     beeper.addUserMessage('search paper planes at dawn');
     await runner.tick();
     assert.equal(beeper.sent.length, 2, 'the second answer is dropped');
-    assert.ok(logs.some((line) => line.includes('send limit')));
+    assert.ok(logs.some((line) => line.includes('answer limit')));
 
     clock += 61_000;
     beeper.addUserMessage('search blue horizon live');

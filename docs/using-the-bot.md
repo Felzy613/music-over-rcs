@@ -226,7 +226,7 @@ A thumbs up (any skin tone) on a message that stands for one song gets you that 
   ```
 
 - The same request repeated word for word within 20 seconds is answered once. In a chat with yourself a phone can show a text twice, and this keeps the bot from answering both. (So `all` twice in a row sends the songs once.)
-- As a safety net the bot stops after 30 messages in a minute.
+- As a safety net the bot answers at most 30 requests in a minute. A long list (an album's songs) is one answer and arrives whole, a line for each song, as fast as the phone takes them.
 - While it works it shows "typing…" in the chat. (The bridge passes it to Google Messages; whether a phone shows it in a chat with yourself depends on the phone.)
 - A song that can't be sent (gone from the site, over the size limit) is named and explained, and the others still come.
 - No buttons, cards or carousels: those are an RCS for Business feature, and the bridge carries only text, pictures and files. See [Other routes](other-routes.md#rcs-for-business-agent).

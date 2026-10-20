@@ -49,6 +49,10 @@ const LIKE_HINT = 'To get a song from the list, tap 👍 on it.';
 const CHOICE_TTL_MS = 30 * 60_000;
 /** The most one file may weigh, unless told otherwise: Google Messages and the bridge take about 100 MB. */
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
+/** Circuit breaker: the most answers (and announcements) sent in a minute, unless the runner is told another number. */
+const MAX_ANSWERS_PER_MINUTE = 30;
+/** The most messages one answer may have; the rest is dropped. The longest real one, an album's songs, is about 50. */
+const MAX_MESSAGES_PER_ANSWER = 200;
 const ERROR_NOTICE = 'Something went wrong on my side. Please try again in a moment.';
 
 /** Hebrew words (with the spaces between them) followed by something that isn't Hebrew. */
@@ -204,8 +208,12 @@ export interface RunnerOptions {
   catchUpMs?: number;
   /** Songs downloading at once, ahead of their turn (default 3). A small host holds each whole file in memory, so it sets fewer. */
   downloadsAhead?: number;
-  /** Circuit breaker: stop sending once this many messages went out in the last minute. */
-  maxSendsPerMinute?: number;
+  /**
+   * Circuit breaker: at most this many answers (and announcements) a minute; past it, a request gets no answer (default
+   * 30). It counts answers, not messages: a loop (the bot answering itself) shows as answer after answer, while a long
+   * list (an album's songs, one message each so each can be 👍'd) is one answer, and it has to arrive whole.
+   */
+  maxAnswersPerMinute?: number;
   /**
    * The least time between two songs, so the phone has sent one before the next arrives (three 👍 in a row, "all").
    * A song's card waits with it. 0, the default, sends them as fast as they're ready.
@@ -255,7 +263,7 @@ export function createRunner(options: RunnerOptions): Runner {
   const now = options.now ?? Date.now;
   const pollMs = options.pollMs ?? 1500;
   const typingRefreshMs = options.typingRefreshMs ?? 20_000;
-  const maxSends = options.maxSendsPerMinute ?? 30;
+  const maxAnswers = options.maxAnswersPerMinute ?? MAX_ANSWERS_PER_MINUTE;
   const songGapMs = options.songGapMs ?? 0;
   const catchUpMs = options.catchUpMs ?? CATCH_UP_MS;
   const downloadsAhead = Math.max(1, options.downloadsAhead ?? DOWNLOADS_AHEAD);
@@ -266,7 +274,8 @@ export function createRunner(options: RunnerOptions): Runner {
   /** When the newest message dealt with was sent, and whether that has changed since the resume point was saved. */
   let lastAt = 0;
   let unsaved = false;
-  const sendTimes: number[] = [];
+  /** When each answer of the last minute was sent. */
+  const answerTimes: number[] = [];
   /** The list of options last offered. A pick keeps it, so another number from the same list works; a new search ends it. */
   let pending: PendingChoices | undefined;
   /** This run's messages that stand for a song, for when no store is given. */
@@ -383,11 +392,11 @@ export function createRunner(options: RunnerOptions): Runner {
     if (seen.size > SEEN_LIMIT) seen.delete(seen.values().next().value!);
   }
 
-  function allowSend(): boolean {
+  function allowAnswer(): boolean {
     const cutoff = now() - 60_000;
-    while (sendTimes.length > 0 && sendTimes[0]! < cutoff) sendTimes.shift();
-    if (sendTimes.length >= maxSends) return false;
-    sendTimes.push(now());
+    while (answerTimes.length > 0 && answerTimes[0]! < cutoff) answerTimes.shift();
+    if (answerTimes.length >= maxAnswers) return false;
+    answerTimes.push(now());
     return true;
   }
 
@@ -413,7 +422,7 @@ export function createRunner(options: RunnerOptions): Runner {
   async function sendAlbum(album: Extract<Reply, { kind: 'album' }>): Promise<void> {
     const missing: string[] = [];
     const said = async (text: string): Promise<void> => {
-      if (allowSend()) await chat.sendText(chatID, markBotText(text));
+      await chat.sendText(chatID, markBotText(text));
     };
     // The songs in album order, the next ones downloading while one is used, never more than downloadsAhead at once.
     const ahead: Array<Promise<DownloadedAudio | undefined>> = [];
@@ -438,7 +447,6 @@ export function createRunner(options: RunnerOptions): Runner {
         const file = await next();
         if (!file) continue;
         had += 1;
-        if (!allowSend()) return log(`send limit reached (${maxSends} a minute); dropping the rest of this album`);
         await songTurn();
         try {
           await chat.sendAudio(chatID, file);
@@ -484,8 +492,7 @@ export function createRunner(options: RunnerOptions): Runner {
         for (const [i, part] of parts.entries()) {
           const fileName = `${base}${parts.length > 1 ? ` (part ${i + 1} of ${parts.length})` : ''}.zip`;
           const zip = zipBlob(part);
-          if (!allowSend()) return log(`send limit reached (${maxSends} a minute); dropping the rest of this album`);
-          await songTurn();
+            await songTurn();
           try {
             await sendFile(chatID, { data: zip, fileName, mimeType: 'application/zip', bytes: zip.size });
           } catch (err) {
@@ -506,6 +513,11 @@ export function createRunner(options: RunnerOptions): Runner {
   }
 
   async function respond(answer: Reply[]): Promise<void> {
+    if (answer.length === 0) return;
+    if (!allowAnswer()) {
+      log(`answer limit reached (${maxAnswers} a minute); not sending this answer`);
+      return;
+    }
     const replies = chat.reactions ? answer : joinLists(answer);
     // Songs start downloading ahead of their turn, so a song gets ready while its picture is drawn and sent; at most
     // DOWNLOADS_AHEAD at a time, so "all" doesn't fetch twenty files at once.
@@ -545,8 +557,8 @@ export function createRunner(options: RunnerOptions): Runner {
         songNext = false;
         await songTurn();
       }
-      if (!allowSend()) {
-        log(`send limit reached (${maxSends} a minute); dropping the rest of this answer`);
+      if (i >= MAX_MESSAGES_PER_ANSWER) {
+        log(`an answer of ${replies.length} messages; dropping all after the first ${MAX_MESSAGES_PER_ANSWER}`);
         return;
       }
       if (reply.kind === 'audio') {
@@ -580,7 +592,7 @@ export function createRunner(options: RunnerOptions): Runner {
         // A picture is a nicety: when it can't be shown, the answer goes on without it, and a song's name goes as text.
         const caption = reply.kind === 'image' && reply.caption ? markBotText(`${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}`) : undefined;
         const sendCaption = async () => {
-          if (caption && allowSend()) await sendLinkedText(caption, reply.kind === 'image' ? reply.postback : undefined);
+          if (caption) await sendLinkedText(caption, reply.kind === 'image' ? reply.postback : undefined);
         };
         if (!chat.sendImage || !options.prepareImage) {
           await sendCaption();

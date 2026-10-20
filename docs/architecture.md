@@ -97,7 +97,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 ## Safety rails
 
 - Every bot message starts with 🎵; messages it sent itself, and anything starting with 🎵, are never answered.
-- At most 30 messages a minute; a word-for-word repeat within 20 seconds is answered once.
+- At most 30 answers a minute (a loop shows as answer after answer; a long list, like an album's 50 songs, is one answer and goes out whole, up to 200 messages); a word-for-word repeat within 20 seconds is answered once. The homeserver's own message limit is lifted (`rc_message` in `src/cloud/provision.ts`): its default, a message every 5 s after a burst of 10, made a long list arrive over minutes.
 - Downloads are refused unless they're audio and within the size limit; links to web pages are rejected.
 - The site client paces its requests and remembers answers; download hosts must be the site's own over HTTPS.
 - The simulator listens on 127.0.0.1 and refuses other hosts and requests without its header. The cloud host's web door listens on every interface because Render must reach it: `/healthz` and `/ping` are open, everything else needs `ADMIN_TOKEN`; Synapse and the bridge listen on 127.0.0.1 inside the container.
