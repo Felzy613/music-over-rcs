@@ -3,20 +3,20 @@ import { describe, test, type TestContext } from 'node:test';
 import { AudioFetchError, type DownloadedAudio } from '../src/audio-fetch.ts';
 import { createRunner, type ChatClient, type ChatMessage, type ResumePoint } from '../src/runner.ts';
 
+const typed = (id: string, text: string): ChatMessage => ({ id, timestamp: '', text, hasAttachments: false, isDeleted: false });
+
+/** Resolves once `ready` holds (polling), or fails the test after two seconds. */
+async function until(ready: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!ready()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
 /** A request made while a song or album is on its way is answered then, not after it. */
 describe('requests that overlap a song being sent', () => {
   const song = (n: number): DownloadedAudio => ({ data: new Blob(['x']), fileName: `song ${n}.mp3`, mimeType: 'audio/mpeg', bytes: 1 });
-  const typed = (id: string, text: string): ChatMessage => ({ id, timestamp: '', text, hasAttachments: false, isDeleted: false });
-
-  /** Resolves once `ready` holds (polling), or fails the test after two seconds. */
-  async function until(ready: () => boolean, what: string): Promise<void> {
-    const deadline = Date.now() + 2_000;
-    while (!ready()) {
-      if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-      await new Promise((resolve) => setTimeout(resolve, 2));
-    }
-  }
-
   /**
    * A chat where "song N" is answered with song N, whose download waits until `release(N)`, and any other text with
    * a line of text. A song N in `unreachable` can't be downloaded.
@@ -164,5 +164,57 @@ describe('requests that overlap a song being sent', () => {
     release(1);
     await stopping;
     assert.ok(events.includes('audio:song 1.mp3'));
+  });
+});
+
+/** On 2026-10-19 a daily message refused by a deleted room crashed the whole bot, because the poll loop was handed the failure. */
+describe('an announcement the chat refuses', () => {
+  test('is for the announcer to handle: the poll loop does not die of it, and the bot goes on answering', async (t) => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => void unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    const incoming: ChatMessage[] = [];
+    const texts: string[] = [];
+    let refuse!: () => void;
+    const refused = new Promise<void>((resolve) => (refuse = resolve));
+    const chat: ChatClient = {
+      reactions: true,
+      listMessages: async () => incoming.splice(0),
+      sendText: async (_room, text) => {
+        if (text.includes('daily')) {
+          await refused;
+          throw new Error('User @me:localhost not in room');
+        }
+        texts.push(text);
+      },
+      sendAudio: async () => {},
+    };
+    const runner = createRunner({
+      chat,
+      bot: { handle: async (msg) => [{ kind: 'text', text: `answer to ${msg.text}` }] },
+      chatID: 'room',
+      pollMs: 3,
+      fetchAudio: async () => assert.fail('no song was asked for'),
+      log: () => {},
+    });
+    t.after(async () => {
+      refuse();
+      await runner.stop();
+      process.off('unhandledRejection', onUnhandled);
+    });
+    await runner.start();
+
+    const announced = runner.announce([{ kind: 'text', text: 'daily' }]).then(
+      () => 'sent',
+      (err: Error) => err.message,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30)); // several polls meet the announcement and wait for it
+    refuse();
+    assert.equal(await announced, 'User @me:localhost not in room', 'the one who announced is told');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(unhandled, [], 'and nothing else is handed the failure');
+
+    incoming.push(typed('a', 'help'));
+    await until(() => texts.includes('🎵 answer to help'), 'the bot to go on answering');
   });
 });

@@ -13,6 +13,7 @@ import { setUpLibrary } from './library/setup.ts';
 import { addSent } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { memoryCheck } from './cloud/memory.ts';
+import { watchJoinedRoom } from './cloud/room.ts';
 import { youTubeRelayFromEnv } from './cloud/youtube-relay.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
@@ -191,17 +192,28 @@ try {
     `signed in as ${userId}, watching room ${config.roomID}, ${catalog.count()} tracks in ${config.dbPath}, Zemer ${zemer ? 'on' : youTube ? 'off (YouTube Music search instead)' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}${extensions.map((extension) => `, ${extension.summary ?? extension.name}`).join('')}. Text "search" and a song name in that chat.`,
   );
 
-  const shutdown = async () => {
+  const shutdown = async (code = 0) => {
     log('shutting down');
     shuttingDown = true;
     clearInterval(watching);
+    stopRoomWatch();
     stopWatching?.();
     await stopExtensions(extensions, log);
     await library.stop();
     await runner.stop();
     catalog.close();
-    process.exit(0);
+    process.exit(code);
   };
+  // A chat deleted on the phone takes its room with it, and the bot would go on running without hearing from it. Stopping makes the host
+  // start the bot again, and that start (cloud-main.ts) says the chat is gone, mails it, and waits for a new chat on the /pair page.
+  const stopRoomWatch = watchJoinedRoom({
+    join: () => matrix.joinRoom(config.roomID),
+    onGone: () => {
+      log(`the chat room ${config.roomID} is gone (the homeserver no longer knows it or won't let the bot in); stopping so the host can wait for a new chat to be chosen`);
+      void shutdown(1);
+    },
+    log,
+  });
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
 } catch (err) {

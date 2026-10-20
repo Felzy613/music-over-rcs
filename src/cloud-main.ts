@@ -5,9 +5,10 @@ import { Catalog } from './catalog.ts';
 import { ensureTokenPatiently, waitForHomeserver } from './cloud/bootstrap.ts';
 import { Pairing, selfChatRooms } from './cloud/pairing.ts';
 import { createCloudWeb } from './cloud/web.ts';
-import { bridgeStatus } from './health.ts';
+import { Health, bridgeStatus, macNotify } from './health.ts';
 import { DEFAULT_HOMESERVER, MatrixClient } from './matrix/client.ts';
-import { outboxNotify } from './alert.ts';
+import { alertFromEnv, allNotify, outboxNotify } from './alert.ts';
+import { RoomWatch } from './cloud/room.ts';
 import { s3FromEnv } from './cloud/s3.ts';
 import { archivedThisMonth, sentThisMonth } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
@@ -26,15 +27,25 @@ const bridgeUrl = (env.BRIDGE_URL?.trim() || 'http://127.0.0.1:29336').replace(/
 const bridgeDb = env.BRIDGE_DB?.trim() || '/data/gmessages/mautrix-gmessages.db';
 const botEnabled = !/^(off|false|no|0)$/i.test(env.BOT_ENABLED?.trim() ?? '');
 
-/** starting: waiting for the homeserver; setup: waiting for a chat to be chosen; bot-starting: the bot is coming up; running: it is answering. */
+/**
+ * starting: waiting for the homeserver; setup: waiting for a chat to be chosen; bot-starting: the bot is coming up; running: it
+ * is answering. /status also says room-missing for a setup that is waiting because the chat it was given can't be joined.
+ */
 type Phase = 'starting' | 'setup' | 'bot-starting' | 'running';
 let phase: Phase = 'starting';
 let session: { token: string; userId: string; pairing: Pairing } | undefined;
 let stopping = false;
 
 const catalog = new Catalog(env.CATALOG_DB?.trim() || '/data/catalog.db');
-const roomChosen = (): string | undefined => env.MATRIX_ROOM_ID?.trim() || catalog.getState('matrix.room') || undefined;
+/** The rooms to try, best first: MATRIX_ROOM_ID, then the one chosen on the setup page (the second only matters when the first is gone). */
+const roomsChosen = (): string[] => [...new Set([env.MATRIX_ROOM_ID?.trim(), catalog.getState('matrix.room')].filter((room): room is string => Boolean(room)))];
+const roomChosen = (): string | undefined => roomsChosen()[0];
 let onRoomChosen: (() => void) | undefined;
+
+// Problems found before the bot starts (its chat room is gone) are mailed through the alert outbox like the bot's own; the bot makes its
+// own Health when it starts, which also clears this list.
+const health = new Health({ notify: allNotify(macNotify, alertFromEnv(env, log)), log, save: (problems) => catalog.setState('health.problems', JSON.stringify(problems)) });
+let roomWatch: RoomWatch | undefined;
 
 // Says in the log who holds the memory whenever the container is past 85% of its limit, and keeps the highest it has been for
 // /status: a host that runs out of memory is stopped with nothing left to read (the first time, it took a 27 MB song).
@@ -80,8 +91,9 @@ const web = createCloudWeb({
     } catch {
       // a half-written value is not worth failing the report for
     }
+    const room = roomWatch?.report();
     return {
-      phase,
+      phase: phase === 'setup' && room?.state === 'gone' ? 'room-missing' : phase,
       botEnabled,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       memoryMb: Math.round(process.memoryUsage.rss() / 1048576),
@@ -89,6 +101,8 @@ const web = createCloudWeb({
       memory: memoryWatch.report() ?? null,
       node: process.version,
       room: roomChosen() ?? null,
+      // The rooms that could not be joined (the chat was deleted and the bridge made another), and since when.
+      roomGone: room?.state === 'gone' ? { rooms: room.gone, since: room.since } : null,
       bridge,
       problems,
       tracks: catalog.count(),
@@ -151,17 +165,30 @@ try {
   phase = 'setup';
 
   if (!botEnabled) log('BOT_ENABLED is off: the setup page works, but the bot will not answer');
-  // Wait for a chat to be chosen (on the setup page, or MATRIX_ROOM_ID), and for the bot to be switched on.
-  while (!stopping && (!botEnabled || !roomChosen())) {
-    if (botEnabled) log('no chat chosen yet: open the setup page, connect Google Messages and choose your chat');
-    await new Promise<void>((resolve) => {
-      onRoomChosen = resolve;
-      setTimeout(resolve, 60_000).unref();
-    });
-  }
-  if (!stopping) {
+  // Wait for a chat to be chosen (on the setup page, or MATRIX_ROOM_ID) and joined, and for the bot to be switched on. A chat that
+  // can't be joined any more (deleted on the phone; the bridge made another room) is waited on here with the web door up, so the
+  // setup page can say so and take the new one, instead of the bot starting and failing at every restart.
+  roomWatch = new RoomWatch({
+    rooms: roomsChosen,
+    enabled: () => botEnabled,
+    join: (room) => matrix.joinRoom(room),
+    wait: () =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 60_000);
+        timer.unref();
+        onRoomChosen = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      }),
+    stopped: () => stopping,
+    health,
+    log,
+  });
+  const room = await roomWatch.ready();
+  if (!stopping && room) {
     process.env.MATRIX_ACCESS_TOKEN = token;
-    process.env.MATRIX_ROOM_ID = roomChosen()!;
+    process.env.MATRIX_ROOM_ID = room;
     phase = 'bot-starting';
     // The bot proper: this returns once it is up (it signs in, joins the chat and starts answering), and it runs until the process ends.
     await import('./matrix-main.ts');

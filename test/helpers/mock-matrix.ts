@@ -45,6 +45,8 @@ export interface MockMatrix extends Listening {
   rooms: MockRoom[];
   invites: MockInvite[];
   joinedViaApi: string[];
+  /** Rooms the homeserver has no record of (a chat deleted on the phone): joining one is answered 404, as Synapse does. */
+  goneRooms: string[];
   created: Record<string, any>[];
   /** Act like a bridge: re-post each text the client sends, from the ghost user, under a new event id. */
   echoAsGhost: boolean;
@@ -88,6 +90,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
   const requests: MockMatrix['requests'] = [];
   const typing: MockMatrix['typing'] = [];
   const joinedViaApi: string[] = [];
+  const goneRooms: string[] = [];
   const created: Record<string, any>[] = [];
   const reactionsSent: MockMatrix['reactionsSent'] = [];
   const redactions: string[] = [];
@@ -267,6 +270,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     const join = /^\/_matrix\/client\/v3\/join\/([^/]+)$/.exec(url.pathname);
     if (req.method === 'POST' && join) {
       const id = decodeURIComponent(join[1]!);
+      if (goneRooms.includes(id)) return json(404, { errcode: 'M_UNKNOWN', error: "Can't join remote room because no servers that are in the room have been provided." });
       const known = rooms.some((room) => room.id === id) || invites.some((entry) => entry.id === id);
       if (!known) return json(403, { errcode: 'M_FORBIDDEN', error: 'You are not invited to this room.' });
       joinedViaApi.push(id);
@@ -299,6 +303,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     rooms,
     invites,
     joinedViaApi,
+    goneRooms,
     created,
     get echoAsGhost() {
       return state.echoAsGhost;
@@ -347,6 +352,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
       requests.length = 0;
       typing.length = 0;
       joinedViaApi.length = 0;
+      goneRooms.length = 0;
       created.length = 0;
       state.echoAsGhost = false;
       state.botReplies = false;

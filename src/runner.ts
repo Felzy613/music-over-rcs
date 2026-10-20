@@ -855,7 +855,10 @@ export function createRunner(options: RunnerOptions): Runner {
         current = undefined;
       }
     })();
-    current = run;
+    // The job's failure belongs to whoever asked for it (announce's caller). A poll or stop() that finds the job running only waits for
+    // it: handed the rejection itself, the poll loop died of it, and on 2026-10-19 a daily message refused by a deleted room took the
+    // whole bot down with an unhandled rejection.
+    current = run.catch(() => {});
     return run;
   }
 

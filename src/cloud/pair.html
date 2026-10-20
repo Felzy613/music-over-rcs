@@ -58,6 +58,7 @@
 
   <section aria-labelledby="s-room">
     <h2 id="s-room">2. Choose your "message yourself" chat</h2>
+    <p class="warn" id="room-gone" role="alert" hidden></p>
     <p class="muted">Text yourself once from your phone so the bridge knows the chat, then enter your number and press Find.</p>
     <label for="phone" class="muted">Your phone number</label>
     <input id="phone" inputmode="tel" autocomplete="off" placeholder="5551234567">
@@ -89,7 +90,10 @@
       const s = await api('/status');
       const b = s.bridge || {};
       pill($('bridge'), b.state ? String(b.state) : (b.error || 'not logged in'), b.state === 'CONNECTED');
-      pill($('bot'), s.phase === 'running' ? 'running' : s.phase === 'setup' ? (s.botEnabled ? 'waiting for a chat to be chosen' : 'switched off (BOT_ENABLED)') : String(s.phase), s.phase === 'running');
+      pill($('bot'), s.phase === 'running' ? 'running' : s.phase === 'setup' ? (s.botEnabled ? 'waiting for a chat to be chosen' : 'switched off (BOT_ENABLED)') : s.phase === 'room-missing' ? 'its chat is gone: choose your chat again (step 2)' : String(s.phase), s.phase === 'running');
+      const gone = s.roomGone;
+      $('room-gone').hidden = !gone;
+      if (gone) $('room-gone').textContent = 'The chat the bot was answering in (' + gone.rooms.join(', ') + ') no longer exists. That usually means the chat was deleted on your phone and the bridge made a new one. Enter your number and press Find to choose it again: the bot starts by itself, nothing needs restarting.';
       $('problems').textContent = (s.problems || []).map((p) => p.message).join(' ');
     } catch (err) { pill($('bridge'), String(err.message), false); }
     try {
