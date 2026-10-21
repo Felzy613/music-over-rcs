@@ -25,7 +25,7 @@ phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse
 
 - **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42`, `album:<id>`, `tracks:<id>`, `post:<slug>` or `all:…`) and returns replies: `text` (optionally closing a list, with the list as its options, or standing for one song or album), `image` (a cover, with the song's name to draw on it), `collage` (covers, each standing for its song), `audio`, `album` (songs to send as one zip). A list is a heading, one text per entry, and a closing text with the options. Songs have no numbers (a 👍 picks); albums do (`number` on the line, `numbers` on the closing text), and texting an album's number (`tracks:<id>`) lists its songs, numbered as on the album.
 - **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵, 💿, 🎤, or the invisible mark a list's closing line starts with), handles 👍, `all` and numbers (an album's where a 👍 picks; every line's where a 👍 can't reach the bot), shows "typing…", prepares pictures and files (songs download ahead, at most three at once) and sends replies in order. A text answer goes out at once; an answer with a song, picture or album waits in a queue of such answers (one at a time, in the order asked) that the poll doesn't wait for, so a request made while a song or album is on its way is answered then and not after it. Where a 👍 can't reach the bot it numbers a list and folds it back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
-- **Transports** implement `ChatClient` (`listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `setTyping`): `src/matrix/` (the bridge route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`) is a webhook server that uses the bot directly.
+- **Transports** implement `ChatClient` (`listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `sendFile` (the album zip), `setTyping`): `src/matrix/` (the bridge route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`) is a webhook server that uses the bot directly.
 
 ## Code layout
 
@@ -39,10 +39,10 @@ src/extensions.ts       add-ons kept outside this repository (extensions/): load
 src/artists.ts          splits "A, B & C Ft. D" into artists
 src/query.ts            words of a request ("play", "send me", "by" dropped)
 src/audio-check.ts      checks a link: reachable, audio, within the size limit
-src/audio-fetch.ts      downloads a direct audio link into memory
+src/audio-fetch.ts      downloads a direct audio link as one Blob, gathered in pieces of about 4 MB (a Blob of Blobs shares their data), within the size limit
 src/image-fetch.ts      downloads album art (with a small memory)
 src/library/compose.ts  draws pictures with macOS's own graphics (AppKit through osascript): no dependencies; on the Linux host a card falls back to the plain cover and the daily collage is skipped
-src/library/zip.ts      writes a ZIP (files stored as they are, UTF-8 names) for albums: no dependencies
+src/library/zip.ts      writes a ZIP (files stored as they are, UTF-8 names) for albums: no dependencies; each song is written to disk with its checksum as it arrives and the zip is made of the files on disk
 src/library/images.ts   a song's card (cover + name) and the daily collage (the new covers in a grid)
 src/sources/            zemer.ts: Zemer's catalog (search.zemer.io: search, artists' pages, albums) and the bot's first place to look; music-table.com: the client, the lookup; relevance.ts: what fits a request, spelling, and English spellings read against Hebrew letters; youtube-music.ts: YouTube Music's app API (stream links, download, and its own search for when Zemer can't be reached); zemer-whitelist.ts: Zemer's artist list, kept current; songs.ts: puts the sources together the same way for every entry point
 src/library/            sync and full scan, songs kept ready, the daily message, lists, background jobs, and:
@@ -50,7 +50,7 @@ src/library/            sync and full scan, songs kept ready, the daily message,
   category-list.ts      which categories, and the words that ask for them
   follows.ts            following artists, and following them for you after three of their songs
   naming.ts             each song's name and place: Artist/Album/01 Title.mp3, and "Artist - Title.mp3" when sent
-  id3.ts                the tags inside an MP3 (ID3v2.3): written to match, the audio untouched, no dependencies
+  id3.ts                the tags inside an MP3 (ID3v2.3): written to match, the audio untouched, no dependencies; `writeTagsToBlob` puts the new tag in front of the original audio as a slice of the same Blob, so a song is never read or copied to be tagged
   mp4.ts                the tags inside an M4A (iTunes-style ilst), moving the index's pointers into the audio; a fragmented M4A (YouTube's) put back together first
   seasons.ts            Chanukah, Purim, Sefirah and the Three Weeks, from the Jewish calendar
 src/matrix/             Matrix client, and joining a pasted multi-line command for the console
@@ -63,7 +63,7 @@ src/main.ts, server.ts  the RCS for Business webhook server (npm start)
 src/simulate*.ts        the terminal and browser simulators
 scripts/                command-line tools: catalog, library, music-table, cloud-check, beeper-*, send-test, invite-tester
 src/cloud-main.ts      the cloud host's entry: the web door (/healthz, /ping, /status, /pair, /admin/*), signing in, then matrix-main.ts
-src/cloud/              the host's parts: boot (the start-up sequence), supervise (keeps the processes running; the lease client), lease and s3 (the lease in R2), provision (Synapse's and the bridge's settings), front-door (the web port, open from the first moment), web, pairing, memory, check
+src/cloud/              the host's parts: boot (the start-up sequence), supervise (keeps the processes running; the lease client), lease and s3 (the lease in R2), provision (Synapse's and the bridge's settings), front-door (the web port, open from the first moment), web, pairing, room (what to do when the chat's room is gone), memory (who holds the container's memory), youtube-relay (YouTube songs by way of the Worker, through the bucket), check
 src/alert.ts            problems left as files in the bucket's alerts/ folder, for the Worker to mail
 src/archive/            saving each sent song to OneDrive (onedrive.ts: Microsoft's device-code sign-in and upload sessions; archiver.ts: the queue, the memory guard, the monthly allowance)
 src/startup-message.ts  the one hello in the chat when the cloud bot first comes up
@@ -92,11 +92,11 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 
 `LibraryJobs` runs inside the bot, checking once a minute, one thing at a time: the sync every three hours, songs kept ready (after each sync and when the bot starts), a look at the RSS feed every 15 minutes while you follow anyone (a sync when it shows something new), the daily message when it's due, alerts for new songs by artists you follow (outside the quiet hours), and the one-time scan of the whole site, a few pages per round. Its state lives in the catalog, so a restart picks up where it was.
 
-`Health` collects problems and reports them, once when they start, every six hours while they last, and when they're fixed: on the cloud host as a file in the bucket's `alerts/` folder that the Worker mails (`src/alert.ts`), on a Mac as a notification (`osascript`). It's told about them by the runner (the homeserver, or Beeper, not answering), the jobs (the site failing twice in a row) and `BridgeWatch`, which asks the bridge's provisioning API every five minutes how the Google Messages login is doing.
+`Health` collects problems and reports them, once when they start, every six hours while they last, and when they're fixed: on the cloud host as a file in the bucket's `alerts/` folder that the Worker mails (`src/alert.ts`), on a Mac as a notification (`osascript`). It's told about them by the runner (the homeserver, or Beeper, not answering), the jobs (the site failing twice in a row), `BridgeWatch`, which asks the bridge's provisioning API every five minutes how the Google Messages login is doing, `RoomWatch` (`src/cloud/room.ts`), which treats a chat room the homeserver has forgotten as "waiting for a chat to be chosen" instead of a failed start, and the OneDrive archive (a sign-in lost). `watchJoinedRoom` (in `src/matrix-main.ts`) has the running bot check its room every five minutes and exit when it is gone, so the host's next start lands in that waiting state. `MemoryWatch` (`src/cloud/memory.ts`, started by `cloud-main.ts`) only logs and reports in `/status`; it raises no alert.
 
 ## Safety rails
 
-- Every bot message starts with 🎵; messages it sent itself, and anything starting with 🎵, are never answered.
+- Every bot message starts with 🎵, or 💿 (an album line) or 🎤 (an artist's name over a list); the one exception is a list's closing line ('Text "more" for more of …'), which starts with an invisible left-to-right mark (`HINT_MARK`) because it isn't a song. Add-on relays start with 🤖. The runner never answers a message that starts with any of these, or one it sent itself.
 - At most 30 answers a minute (a loop shows as answer after answer; a long list, like an album's 50 songs, is one answer and goes out whole, up to 200 messages); a word-for-word repeat within 20 seconds is answered once. The homeserver's own message limit is lifted (`rc_message` in `src/cloud/provision.ts`): its default, a message every 5 s after a burst of 10, made a long list arrive over minutes.
 - Downloads are refused unless they're audio and within the size limit; links to web pages are rejected.
 - The site client paces its requests and remembers answers; download hosts must be the site's own over HTTPS.
@@ -109,7 +109,7 @@ npm test
 npm run typecheck
 ```
 
-`node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search box and search page, release pages, lists by page, category and sort, feed, releases for sale, download links that redirect to storage), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's catalog (search sorted into kinds, artists' pages, albums, with the marks Hebrew titles carry), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
+About 900 tests (904 on 2026-10-20), `node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search box and search page, release pages, lists by page, category and sort, feed, releases for sale, download links that redirect to storage), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's catalog (search sorted into kinds, artists' pages, albums, with the marks Hebrew titles carry), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
 
 ## Extending
 

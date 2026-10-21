@@ -112,6 +112,8 @@ The bot keeps an eye on the pieces it depends on and reports a problem (an email
 | The host's internet (asked only when the bridge isn't connected: one small request to Google) | Every 5 minutes | After ten minutes without it. Then nothing else is blamed: not the bridge, the phone or the site |
 | The Matrix homeserver | Every check of the chat | After 20 failed checks in a row (about five minutes, as the checks slow down while it fails) |
 | music-table.com | Every sync | After two failed syncs in a row |
+| The bot's chat room | At every start, and every 5 minutes while the bot runs | The room is gone (the chat was deleted on the phone): the bot waits for the chat to be chosen again on `/pair` instead of crashing |
+| OneDrive | After every upload | An upload failed; the alert gives the reason, and says to sign in again when the sign-in was lost |
 
 Each problem is shown when it starts, again every six hours while it lasts, and once more when it's fixed ("Fixed: …"). What's wrong right now also shows in `/status` and `cloud:check`. See [Troubleshooting](troubleshooting.md#alerts).
 

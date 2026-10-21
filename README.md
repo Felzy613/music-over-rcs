@@ -42,10 +42,11 @@ Each morning (09:00 unless you change it) it sends a **daily new-music message**
 
 - **Zemer first, music-table.com behind it.** Zemer's catalog has whole albums as well as singles, so a search asks it first and takes what it finds there whenever it has the song; music-table.com, which mostly has new singles, answers only what Zemer doesn't have. Everything from Zemer is checked against Zemer's artist list again, on the bot's side, when it is found and again when it is sent.
 - **Knows the whole site.** On its first run it reads all of music-table.com (about 3,600 posts: 5,000+ songs by 1,000+ artists) into a local catalog, in the background, and then keeps it current every three hours, for its lists and the daily message.
-- **Saves what it sends.** With a OneDrive app set up ([How it runs](docs/cloud.md), step 5), every song it sends is also uploaded in the background to your OneDrive, sorted like a music library, `Artist/Album/01 Title.mp3` (a single goes in `Artist/Singles/`), with tags to match (artist, album, track number, title, cover); the file you get is named `Artist - Title.mp3`. The host has no disk to keep songs on, so without OneDrive nothing is saved. (A copy run on a computer with a disk can instead keep popular songs ready ahead of time and move them to an external drive: see [The library](docs/library.md).)
+- **Answers while it sends.** A request made while a song or album is on its way is answered at once if the answer is text (a list, an album's songs); any songs you ask for meanwhile come after the ones already on their way, in the order you asked.
+- **Saves what it sends.** Once a OneDrive app is set up ([How it runs](docs/cloud.md), step 5; it is on the live bot), every song it sends is also uploaded in the background to your OneDrive, sorted like a music library, `Artist/Album/01 Title.mp3` (a single goes in `Artist/Singles/`), with tags to match (artist, album, track number, title, cover); the file you get is named `Artist - Title.mp3`. The host has no disk to keep songs on, so without OneDrive nothing is saved. (A copy run on a computer with a disk can instead keep popular songs ready ahead of time and move them to an external drive: see [The library](docs/library.md).)
 - **Forgiving search.** Apostrophes are optional ("vnusni" finds "V’Nusni"), a longer word may be a letter or two off, part of the artist's name is enough, and a word typed in English letters matches a Hebrew or Yiddish title it can be read as. When a request doesn't match exactly on music-table.com, it tries the request with each word left out and learns how the site spells your words from the titles around them.
 - **Polite to the site.** It identifies itself, paces its requests, and remembers what it learned so it doesn't ask twice.
-- **Tells you when something breaks.** The chat can't carry news of its own breakdown, so an email says when Google Messages is logged out of the bridge, your phone can't be reached, RCS is off, or the bridge, the homeserver or the site stops answering, or the host itself stops, and again when it's fixed.
+- **Tells you when something breaks.** The chat can't carry news of its own breakdown, so an email says when Google Messages is logged out of the bridge, your phone can't be reached, RCS is off, or the bridge, the homeserver or the site stops answering, or the host itself stops, or your chat was deleted on the phone and the bot has no room to answer in (it waits for you to choose the chat again instead of crashing), and again when it's fixed.
 
 ## How it reaches your phone
 
@@ -92,7 +93,7 @@ There are three ways to run it:
 
 - **It's for personal use.** The songs are the files music-table.com offers for download and the audio YouTube Music streams to its app. Whether you may keep or share them is between you and the rights holders; this project only fetches what you ask for, into your own chat. YouTube's terms don't allow fetching its streams outside its own apps. The YouTube videos in music-table.com's posts are still ignored; YouTube Music is a separate source.
 - **Four unofficial pieces.** The bridge reverse-engineers Google Messages for web, the site lookups use music-table.com's own page API, the searches use the service the Zemer app searches with (search.zemer.io), and the audio comes from YouTube Music's app API. A change on any side can break things; the rest keeps working.
-- **Your phone must be on and online.** The bridge works through your phone's Google Messages. The bot itself runs on Render and doesn't need your computer; on the free plan it can be slow after a restart (about a minute and a half).
+- **Your phone must be on and online.** The bridge works through your phone's Google Messages. The bot itself runs on Render and doesn't need your computer; on the free plan a restart or a deploy takes it away for about a minute (texts sent meanwhile are answered when it is back).
 
 ## License
 
@@ -101,7 +102,7 @@ There are three ways to run it:
 ## Development
 
 ```bash
-npm test             # 770+ tests, no network: mocks of a Matrix homeserver, music-table.com, Beeper and Google's API
+npm test             # 900+ tests, no network: mocks of a Matrix homeserver, music-table.com, Beeper and Google's API
 npm run typecheck
 ```
 

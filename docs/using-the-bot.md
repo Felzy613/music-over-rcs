@@ -150,7 +150,7 @@ They're music-table.com's own categories, most popular first (by views), with th
 
 The first time you ask for one it reads the whole category from the site (a few seconds); after that the list comes from the catalog, refreshed at most once a day.
 
-**In season, the bot points you to them.** From 15 Kislev to 3 Tevet `trending`, `new` and the daily message carry a line like `🕎 Chanukah is here: text "chanukah" for Chanukah songs.`; the same for Purim (1 to 15 Adar). During Sefirah (16 Nisan to 5 Sivan) and the Three Weeks (17 Tamuz to 9 Av) the line points to `vocal`, and the daily message lists the new a cappella songs first, each marked "vocal". The dates come from the Jewish calendar built into your Mac.
+**In season, the bot points you to them.** From 15 Kislev to 3 Tevet `trending`, `new` and the daily message carry a line like `🕎 Chanukah is here: text "chanukah" for Chanukah songs.`; the same for Purim (1 to 15 Adar). During Sefirah (16 Nisan to 5 Sivan) and the Three Weeks (17 Tamuz to 9 Av) the line points to `vocal`, and the daily message lists the new a cappella songs first, each marked "vocal". The dates come from the Jewish calendar built into Node (`Intl`), in the host's time zone (`TZ`).
 
 ## Following artists
 
@@ -225,6 +225,7 @@ A thumbs up (any skin tone) on a message that stands for one song gets you that 
   Text "help" for the other commands.
   ```
 
+- **You can keep texting while songs are on their way.** A request made while a song or an album is being sent is read at once: if the answer is text (a list, an album's songs, `help`) it comes straight away, and "typing…" stays up until everything asked for has arrived. Songs, pictures and albums asked for meanwhile wait their turn and come after the ones already on their way, in the order you asked.
 - The same request repeated word for word within 20 seconds is answered once. In a chat with yourself a phone can show a text twice, and this keeps the bot from answering both. (So `all` twice in a row sends the songs once.)
 - As a safety net the bot answers at most 30 requests in a minute. A long list (an album's songs) is one answer and arrives whole, a line for each song, as fast as the phone takes them.
 - While it works it shows "typing…" in the chat. (The bridge passes it to Google Messages; whether a phone shows it in a chat with yourself depends on the phone.)

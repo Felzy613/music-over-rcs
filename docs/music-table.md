@@ -27,7 +27,7 @@ The bot uses the same public addresses the site's own pages use, identifying its
 
 ## How a request is matched
 
-(This is the order for music-table.com on its own. With YouTube Music on, which is first by default, a `search` asks YouTube Music before any of this, and gets here when YouTube Music has nothing that fits.)
+(This is the order for music-table.com on its own. With Zemer on, which is first by default, a `search` asks Zemer before any of this, and gets here when Zemer has nothing that fits every word; see [Zemer and YouTube Music](youtube-music.md).)
 
 1. **Your catalog first.** A request that names exactly one song it has (its whole title, alone or with some or all of the artist's name before or after it) is answered from the catalog at once. A request that's just an artist's name lists their releases. When no song in the catalog has every word as typed, the catalog looks again more loosely: apostrophes and hyphens left out or put in (`vnusni` for "V’Nusni", `yomtov` for "Yom Tov"), a letter or two off in a longer word (`shmeltzer` for "Schmeltzer"), and one word missing from a request of three or more. This matters because the site's own search can't find such songs at all: it finds nothing for `vnusni`, or even `nusni`.
 2. **Then the site, merged with the catalog.** Anything broader is also searched on the site, and the results are merged, so songs the catalog doesn't have yet are offered too.

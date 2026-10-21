@@ -7,10 +7,10 @@ The bot runs on Render, with a Cloudflare Worker and an R2 bucket beside it ([Ho
 | Where | What | Sensitivity |
 | --- | --- | --- |
 | The Render container (`/data`, wiped at every restart and restored from R2) | The bridge's database: your **Google Messages session** and every bridged conversation's metadata. Synapse's database: **copies of the messages of the chats the bridge relays** (see below), your account and signing key. The bot's catalog: songs, artists, site posts, your plays and follows, the bot's small state, and OneDrive's refresh token if you set that up. Logs (room ids, and the text of your requests) | **High**: the session is as good as a login |
-| The R2 bucket `mors-state` (private) | The same three databases, continuously backed up by Litestream; the lease file; alerts waiting to be mailed | **High**, for the same reason |
+| The R2 bucket `mors-state` (private) | The same three databases, continuously backed up by Litestream; **Synapse's signing key** (`keys/synapse-signing.key`, kept so a start doesn't have to make one); the lease file; alerts waiting to be mailed; a YouTube song for a few seconds while it passes through (`yt/`) | **High**, for the same reasons |
 | Render's environment | `SECRET_KEY`, `MATRIX_PASSWORD`, `ADMIN_TOKEN`, the R2 keys, `ONEDRIVE_CLIENT_ID` | **High** |
 | The Cloudflare Worker `mors-edge` | Secrets only: Render's address and `ADMIN_TOKEN`, the alert sender and recipient addresses. It stores no messages | Medium |
-| Your OneDrive (if set up) | Copies of the songs you asked for, in the app's own folder | Low |
+| Your OneDrive (set up on the live bot since 2026-10-18) | Copies of the songs you asked for, in the app's own folder | Low |
 | `.env` in this repository | Nothing the cloud needs; only for a local run (`npm run simulate:web`, tests) | Keep it private anyway |
 
 ## What the bridge copies

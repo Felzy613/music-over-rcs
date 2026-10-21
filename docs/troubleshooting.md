@@ -24,8 +24,9 @@ When something the bot depends on breaks, an email arrives within about five min
 | The bot can't reach the Matrix homeserver | The homeserver inside the container isn't answering. The host restarts it by itself; if this lasts, restart the service in Render. |
 | music-table.com isn't answering the bot | Usually the site is down or slow; songs already in the catalog still work. If it lasts, the reason in the alert helps. |
 | The host isn't answering (from the Worker) | Three checks in a row (15 minutes) got no answer from the service. The free plan restarts it at times and a restart takes a minute or so; if this lasts, look at Render's Events and Logs. |
-| The bot isn't running (from the Worker) | The host answers but the bot hasn't for 30 minutes. `cloud:check` says why: the bridge is unlinked, no chat is chosen, `BOT_ENABLED` is off, or the bot is crashing (see the logs). |
-| OneDrive sign-in lost | Microsoft revoked it (a password change can). Open `/pair` and press **Sign in to OneDrive** again. |
+| The bot isn't running (from the Worker) | The host answers but the bot hasn't for 30 minutes. `cloud:check` says why: the bridge is unlinked, no chat is chosen or its room is gone (`room-missing` in `/status`), `BOT_ENABLED` is off, or the bot is crashing (see the logs). |
+| The bot's chat room is gone | Your "message yourself" chat was deleted on the phone and the bridge deleted its room (it makes a new one, under another id, when you text yourself again). The bot is **waiting, not crashing**: open `/pair`, enter your number, press **Find** and choose the chat. It starts by itself, with no restart, and a "Fixed" alert follows. Said at once, and again every six hours while it lasts. |
+| Songs are not being saved to OneDrive | The reason is in the alert. If it says to sign in again, Microsoft revoked the sign-in (a password change can): open `/pair` and press **Sign in to OneDrive**. Songs are still sent meanwhile. |
 
 A problem that lasts is repeated every six hours. **No emails at all?** `cloud:check` with `--alert` leaves a test alert in the bucket; if it isn't mailed within about ten minutes, check the spam folder, then that the Worker has `ALERT_FROM` and `ALERT_TO` (`npx wrangler secret list` in `cloudflare/`) and that the sender address is on a domain set up for Email Service.
 
@@ -40,8 +41,11 @@ A problem that lasts is repeated every six hours. **No emails at all?** `cloud:c
 - **"Your message may not have been bridged":** the bot restarts the bridge after this terminal delivery error. Retry the request; the failed reply itself isn't replayed.
 - **Replies show up in Matrix but not on the phone:** check the phone is online and `cloud:check` says the bridge is connected. The host configures the bridge so that only the bot's account may use it.
 - **The bridge was logged out:** link it again on `/pair`.
+- **The bot stopped answering after you deleted or cleared the "message yourself" chat on the phone:** the bridge deleted that chat's room, and a new one is made when you text yourself again. Open `/pair` (the page says the chat is gone), enter your number, **Find**, choose the new room. Before 2026-10-20 the bot instead crashed and restarted in a loop with nobody told (it was silent for most of 2026-10-19 that way). If `MATRIX_ROOM_ID` is set in Render, a stale value is passed over for the page's choice.
+- **The service restarted by itself and Render's Events say `oomKilled`:** the container went past its 512 MB (seen once, 2026-10-18, after a 27 MB song). The host's log keeps what held the memory: `memory:` lines while it is above 85%, `memory (raised):` and `memory (settled):` when it goes well above its resting level, and `/status` shows `memory` with the highest reading. See "Memory" in [How it runs](cloud.md). A lower `MAX_DOWNLOAD_MB` in Render is the quick relief.
 - **Two answers to every message:** two bots are running: the cloud host and something else (a bot started with `npm run matrix` on a computer, or an old install). Stop the other one.
 - **The audio doesn't arrive:** check the file is under `MAX_DOWNLOAD_MB` (30 on Render; an album's zip under `MAX_ZIP_MB`, 100, the homeserver's and the bridge's limit), and that RCS chats are on: SMS/MMS can't carry files this size.
+- **An album says "coming as a zip" and the zip doesn't arrive:** look in the log for `YouTube Music turned Cloudflare away …` and `could not get <song> ready`: YouTube turned the Cloudflare relay away three times in a row, so the songs couldn't be fetched, and YouTube songs are left aside for a minute. Ask for the album again a minute or two later. (Seen 2026-10-19 04:11 UTC, when no zip followed in the log; what the chat itself showed is not known.)
 
 ## Songs and lists
 
