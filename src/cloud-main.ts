@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { Catalog } from './catalog.ts';
 import { ensureTokenPatiently, waitForHomeserver } from './cloud/bootstrap.ts';
-import { Pairing, selfChatRooms } from './cloud/pairing.ts';
+import { Pairing, chatNumber, ownChatRooms, selfChatRooms } from './cloud/pairing.ts';
 import { createCloudWeb } from './cloud/web.ts';
 import { Health, bridgeStatus, macNotify } from './health.ts';
 import { DEFAULT_HOMESERVER, MatrixClient } from './matrix/client.ts';
@@ -18,8 +18,8 @@ import { recentTimelines } from './timeline.ts';
 
 // The bot on a cloud host (Render): where matrix-main.ts assumes a Mac with the homeserver and bridge already set up and
 // signed in, this starts with nothing but the services running beside it. It opens the web door first (the host wants a
-// port at once), waits for the homeserver, signs the bot's account in, lets you pair the bridge with Google Messages and pick
-// your chat on the /pair page, and then starts the same bot as matrix-main.ts.
+// port at once), waits for the homeserver, signs the bot's account in, lets you pair the bridge with Google Messages on the
+// /pair page, finds your "message yourself" chat (or takes the one chosen there), and then starts the same bot as matrix-main.ts.
 const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 const env = process.env;
 const startedAt = Date.now();
@@ -101,7 +101,8 @@ const web = createCloudWeb({
       // The whole container: what it uses against its limit, who holds it, and the highest it has reached since the start.
       memory: memoryWatch.report() ?? null,
       node: process.version,
-      room: roomChosen() ?? null,
+      // The room the bot joined (given, or found by itself), or the one it was given while it waits.
+      room: room?.room ?? roomChosen() ?? null,
       // The rooms that could not be joined (the chat was deleted and the bridge made another), and since when.
       roomGone: room?.state === 'gone' ? { rooms: room.gone, since: room.since } : null,
       bridge,
@@ -168,11 +169,16 @@ try {
   phase = 'setup';
 
   if (!botEnabled) log('BOT_ENABLED is off: the setup page works, but the bot will not answer');
-  // Wait for a chat to be chosen (on the setup page, or MATRIX_ROOM_ID) and joined, and for the bot to be switched on. A chat that
-  // can't be joined any more (deleted on the phone; the bridge made another room) is waited on here with the web door up, so the
-  // setup page can say so and take the new one, instead of the bot starting and failing at every restart.
+  // Wait for the chat to be joined, and for the bot to be switched on. The chat is the one given (MATRIX_ROOM_ID, or chosen on the
+  // setup page) or, when there is none that can be joined, the one found: the bridge's chat with the phone's own number. A chat
+  // deleted on the phone (the bridge deletes its room) is waited on here with the web door up, and its new room is taken as soon
+  // as the bridge makes it (when the owner texts themself again), instead of the bot starting and failing at every restart.
   roomWatch = new RoomWatch({
     rooms: roomsChosen,
+    find: () => ownChatRooms(bridgeDb, { userId, known: [catalog.getState('matrix.phone')].filter((number): number is string => Boolean(number)) }),
+    found(room) {
+      catalog.setState('matrix.room', room);
+    },
     enabled: () => botEnabled,
     join: (room) => matrix.joinRoom(room),
     wait: () =>
@@ -190,6 +196,13 @@ try {
   });
   const room = await roomWatch.ready();
   if (!stopping && room) {
+    // The chat's number (the owner's own) is kept, so its next room is found even if the phone never says its number.
+    try {
+      const number = chatNumber(bridgeDb, room);
+      if (number) catalog.setState('matrix.phone', number);
+    } catch (err) {
+      log(`could not read the chat's number from the bridge's database: ${err instanceof Error ? err.message : String(err)}`);
+    }
     process.env.MATRIX_ACCESS_TOKEN = token;
     process.env.MATRIX_ROOM_ID = room;
     // The bridge was set up to say when Google Messages has each message (matrix.message_status_events, provision.ts).

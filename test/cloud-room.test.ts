@@ -26,8 +26,8 @@ describe('the bot’s chat room is gone', () => {
   }
 
   /** A watch over the mock homeserver whose waits the test lets go of by hand. */
-  function setup(rooms: string[], options: { enabled?: boolean } = {}) {
-    const state = { rooms, enabled: options.enabled ?? true, stopped: false };
+  function setup(rooms: string[], options: { enabled?: boolean; found?: string[] | (() => string[]) } = {}) {
+    const state = { rooms, enabled: options.enabled ?? true, stopped: false, found: options.found ?? [], finds: 0, kept: [] as string[] };
     const waits: Array<() => void> = [];
     const logs: string[] = [];
     const told: string[] = [];
@@ -35,6 +35,11 @@ describe('the bot’s chat room is gone', () => {
     const matrix = new MatrixClient({ token: mock.token, homeserver: mock.url });
     const watch = new RoomWatch({
       rooms: () => state.rooms,
+      find: () => {
+        state.finds++;
+        return typeof state.found === 'function' ? state.found() : state.found;
+      },
+      found: (room) => void state.kept.push(room),
       enabled: () => state.enabled,
       join: (room) => matrix.joinRoom(room),
       wait: () => new Promise<void>((resolve) => waits.push(resolve)),
@@ -60,7 +65,8 @@ describe('the bot’s chat room is gone', () => {
     assert.equal(told.length, 1);
     assert.match(told[0]!, /chat room is gone/);
     assert.match(told[0]!, /!old:localhost/);
-    assert.match(told[0]!, /\/pair/, 'it says where to choose the chat again');
+    assert.match(told[0]!, /text yourself once/, 'it says the bot finds the chat once the owner texts themself');
+    assert.match(told[0]!, /\/pair/, 'and where to choose the chat if it does not');
     // A few more minutes of the same: still waiting, still the one alert, one line in the log.
     for (let i = 0; i < 3; i++) await pass();
     await until(() => watch.report().state === 'gone', 'still gone');
@@ -151,6 +157,103 @@ describe('the bot’s chat room is gone', () => {
     await pass();
     await ready;
     assert.deepEqual(result(), { room: undefined });
+  });
+
+  describe('finding the owner’s own chat by itself (2026-10-22: deleted on the phone, and nobody chose it again)', () => {
+    test('the deleted chat’s new room is taken as soon as the bridge has it, with nobody choosing it', async () => {
+      mock.goneRooms.push(OLD, '!also-old:localhost');
+      const { state, watch, health, logs, told, ready, pass, result } = setup([OLD], { found: ['!also-old:localhost'] });
+      await until(() => watch.report().state === 'gone', 'the rooms to be found gone');
+      assert.deepEqual(watch.report().gone, [OLD, '!also-old:localhost'], 'a found room that is gone too is reported with the rest');
+      assert.equal(health.has('room'), true);
+
+      state.found = [mock.roomId, OLD]; // the owner texted themself, and the bridge made the chat's new room
+      await pass();
+      await ready;
+      assert.equal(result()?.room, mock.roomId);
+      assert.deepEqual(state.kept, [mock.roomId], 'kept as the chat chosen');
+      assert.equal(watch.report().room, mock.roomId);
+      assert.ok(logs.some((line) => line.startsWith(`found your chat by itself: ${mock.roomId}`) && line.includes(OLD)));
+      assert.equal(told.length, 2);
+      assert.match(told[1]!, /Fixed/);
+    });
+
+    test('with no chat chosen at all (a new pairing), the own chat is found and joined', async () => {
+      const { state, ready, result } = setup([], { found: [mock.roomId] });
+      await ready;
+      assert.equal(result()?.room, mock.roomId);
+      assert.deepEqual(state.kept, [mock.roomId]);
+      assert.deepEqual(mock.joinedViaApi, [mock.roomId]);
+    });
+
+    test('a chat that was given and still works is kept: nothing is looked for', async () => {
+      const { state, ready, result } = setup([mock.roomId], { found: ['!other:localhost'] });
+      await ready;
+      assert.equal(result()?.room, mock.roomId);
+      assert.equal(state.finds, 0);
+      assert.deepEqual(state.kept, [], 'a given room is not saved again');
+    });
+
+    test('nothing chosen and nothing found yet: waits, and takes the chat once the owner texts themself', async () => {
+      const { state, watch, logs, told, ready, pass, result } = setup([]);
+      await until(() => logs.some((line) => /no chat chosen yet: text yourself once/.test(line)), 'the note');
+      assert.equal(watch.report().state, 'unchosen');
+      state.found = [mock.roomId];
+      await pass();
+      await ready;
+      assert.equal(result()?.room, mock.roomId);
+      assert.deepEqual(told, [], 'no chat yet is not a problem to mail');
+    });
+
+    test('a bridge database that cannot be read yet is said once, and counts as nothing found', async () => {
+      let broken = true;
+      const { logs, ready, pass, result } = setup([], {
+        found: () => {
+          if (broken) throw new Error('no such table: gmessages_direct_conversation');
+          return [mock.roomId];
+        },
+      });
+      await pass();
+      await pass();
+      assert.equal(logs.filter((line) => /could not look for your chat in the bridge's database: no such table/.test(line)).length, 1);
+      broken = false;
+      await pass();
+      await ready;
+      assert.equal(result()?.room, mock.roomId);
+    });
+  });
+
+  test('the homeserver asking to slow down (HTTP 429) is waited out, not a crash (2026-10-25: it failed every start)', async () => {
+    const logs: string[] = [];
+    const waits: Array<() => void> = [];
+    let busy = 3;
+    const joins: string[] = [];
+    const told: string[] = [];
+    const health = new Health({ notify: async (_title, message) => void told.push(message) });
+    const watch = new RoomWatch({
+      rooms: () => [OLD, '!chosen:localhost'],
+      find: () => ['!found:localhost'],
+      enabled: () => true,
+      join: async (room) => {
+        joins.push(room);
+        if (busy-- > 0) throw new MatrixError('Too Many Requests', 429, 'M_LIMIT_EXCEEDED', '{"retry_after_ms":60000}');
+      },
+      wait: () => new Promise<void>((resolve) => waits.push(resolve)),
+      stopped: () => false,
+      health,
+      log: (line) => logs.push(line),
+    });
+    let room: string | undefined;
+    const ready = watch.ready().then((joined) => void (room = joined));
+    for (let i = 0; i < 3; i++) {
+      await until(() => waits.length > 0, 'the watch to wait');
+      waits.shift()!();
+    }
+    await ready;
+    assert.equal(room, OLD, 'the fourth try got through');
+    assert.deepEqual(joins, [OLD, OLD, OLD, OLD], 'one join per minute while the homeserver says no, and nothing looked for meanwhile');
+    assert.equal(logs.filter((line) => /slow down \(HTTP 429\)/.test(line)).length, 1, 'said once');
+    assert.deepEqual(told, [], 'a busy homeserver says nothing about the chat');
   });
 
   test('which failed joins mean the room is unusable', () => {

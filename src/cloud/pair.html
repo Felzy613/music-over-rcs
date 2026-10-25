@@ -57,9 +57,9 @@
   </section>
 
   <section aria-labelledby="s-room">
-    <h2 id="s-room">2. Choose your "message yourself" chat</h2>
+    <h2 id="s-room">2. Your "message yourself" chat</h2>
     <p class="warn" id="room-gone" role="alert" hidden></p>
-    <p class="muted">Text yourself once from your phone so the bridge knows the chat, then enter your number and press Find.</p>
+    <p class="muted">Text yourself once from your phone. The bot finds that chat by itself (the chat with your own number) and starts answering in it within a minute or two. Only if it doesn't, enter your number here and press Find.</p>
     <label for="phone" class="muted">Your phone number</label>
     <input id="phone" inputmode="tel" autocomplete="off" placeholder="5551234567">
     <button id="find" class="secondary" type="button">Find the chat</button>
@@ -90,10 +90,10 @@
       const s = await api('/status');
       const b = s.bridge || {};
       pill($('bridge'), b.state ? String(b.state) : (b.error || 'not logged in'), b.state === 'CONNECTED');
-      pill($('bot'), s.phase === 'running' ? 'running' : s.phase === 'setup' ? (s.botEnabled ? 'waiting for a chat to be chosen' : 'switched off (BOT_ENABLED)') : s.phase === 'room-missing' ? 'its chat is gone: choose your chat again (step 2)' : String(s.phase), s.phase === 'running');
+      pill($('bot'), s.phase === 'running' ? 'running' : s.phase === 'setup' ? (s.botEnabled ? 'waiting for your chat: text yourself once' : 'switched off (BOT_ENABLED)') : s.phase === 'room-missing' ? 'its chat is gone: text yourself once (step 2)' : String(s.phase), s.phase === 'running');
       const gone = s.roomGone;
       $('room-gone').hidden = !gone;
-      if (gone) $('room-gone').textContent = 'The chat the bot was answering in (' + gone.rooms.join(', ') + ') no longer exists. That usually means the chat was deleted on your phone and the bridge made a new one. Enter your number and press Find to choose it again: the bot starts by itself, nothing needs restarting.';
+      if (gone) $('room-gone').textContent = 'The chat the bot was answering in (' + gone.rooms.join(', ') + ') no longer exists. That usually means the chat was deleted on your phone. Text yourself once from your phone: the bot finds the new chat by itself within a minute or two. If this still shows after that, enter your number and press Find to choose it: nothing needs restarting.';
       $('problems').textContent = (s.problems || []).map((p) => p.message).join(' ');
     } catch (err) { pill($('bridge'), String(err.message), false); }
     try {

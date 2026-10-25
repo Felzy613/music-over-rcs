@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Catalog } from '../src/catalog.ts';
 import { ensureToken, ensureTokenPatiently, waitForHomeserver } from '../src/cloud/bootstrap.ts';
-import { Pairing, selfChatRooms } from '../src/cloud/pairing.ts';
+import { Pairing, chatNumber, ownChatRooms, sameNumber, selfChatRooms } from '../src/cloud/pairing.ts';
 import { createCloudWeb, passwordIn, sameSecret, type CloudDeps } from '../src/cloud/web.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
@@ -333,22 +333,93 @@ describe('pairing through the bridge bot', () => {
 });
 
 describe('finding the self-chat in the bridge database', () => {
-  test('lists the rooms of the chat with a phone number, by its last digits', () => {
+  const LOGIN = 'owner@gmail.com/1791693313956';
+
+  /** A bridge database with the tables (and columns) the finder reads, as mautrix-gmessages makes them. */
+  function bridgeDb(dir: string, options: { sims?: Record<string, unknown>; logins?: Array<{ id: string; user: string; metadata: string }> } = {}): string {
+    const path = join(dir, 'bridge.db');
+    const db = new DatabaseSync(path);
+    db.exec(`CREATE TABLE user_login (bridge_id TEXT, user_mxid TEXT, id TEXT, remote_name TEXT, metadata TEXT);
+      CREATE TABLE portal (bridge_id TEXT, id TEXT, receiver TEXT, mxid TEXT);
+      CREATE TABLE gmessages_direct_conversation (bridge_id TEXT, login_id TEXT, phone_number TEXT, portal_id TEXT, last_message_ts INTEGER)`);
+    const logins = options.logins ?? [{ id: LOGIN, user: '@me:localhost', metadata: JSON.stringify({ session: { secret: 'x' }, sim_metadata: options.sims ?? {} }) }];
+    for (const login of logins) db.prepare("INSERT INTO user_login VALUES ('gmessages', ?, ?, '', ?)").run(login.user, login.id, login.metadata);
+    db.exec(`INSERT INTO portal VALUES
+      ('gmessages', '1.1', '${LOGIN}', '!friend:localhost'),
+      ('gmessages', '1.166', '${LOGIN}', '!old-self:localhost'),
+      ('gmessages', '1.170', '${LOGIN}', '!self:localhost'),
+      ('gmessages', '1.180', '${LOGIN}', NULL),
+      ('gmessages', '1.190', '${LOGIN}', '!group:localhost')`);
+    db.exec(`INSERT INTO gmessages_direct_conversation VALUES
+      ('gmessages', '${LOGIN}', '+15559998888', '1.1', 300),
+      ('gmessages', '${LOGIN}', '+15551234567', '1.170', 200),
+      ('gmessages', '${LOGIN}', '+15551234567', '1.166', 100),
+      ('gmessages', '${LOGIN}', '+15551234567', '1.180', 400)`);
+    db.close();
+    return path;
+  }
+  const sim = (number: string) => ({ SIMData: { carrierName: 'Carrier', formattedPhoneNumber: number }, SIMParticipant: { ID: '1' } });
+
+  test('lists the rooms of the chat with a phone number', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bridge-db-'));
     try {
-      const path = join(dir, 'bridge.db');
-      const db = new DatabaseSync(path);
-      db.exec('CREATE TABLE portal (id TEXT, mxid TEXT); CREATE TABLE gmessages_direct_conversation (portal_id TEXT, phone_number TEXT)');
-      db.exec("INSERT INTO portal VALUES ('p1', '!mine:localhost'), ('p2', '!other:localhost'), ('p3', NULL)");
-      db.exec("INSERT INTO gmessages_direct_conversation VALUES ('p1', '+1 (555) 123-4567'), ('p2', '+15559998888'), ('p3', '+15551234567')");
-      db.close();
-      assert.deepEqual(selfChatRooms(path, '5551234567'), ['!mine:localhost']);
-      assert.deepEqual(selfChatRooms(path, '+1 555 123 4567'), ['!mine:localhost']);
+      const path = bridgeDb(dir);
+      assert.deepEqual(selfChatRooms(path, '5551234567'), ['!self:localhost', '!old-self:localhost'], 'newest first; a chat with no room yet is left out');
+      assert.deepEqual(selfChatRooms(path, '+1 555 123 4567'), ['!self:localhost', '!old-self:localhost']);
       assert.deepEqual(selfChatRooms(path, '5550000000'), []);
       assert.deepEqual(selfChatRooms(path, '123'), [], 'too short to be a number');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('finds your own chat with no number typed: the chat with the number Google Messages gives for the phone’s SIM', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bridge-db-'));
+    try {
+      const path = bridgeDb(dir, { sims: { '1': sim('(555) 123-4567') } });
+      assert.deepEqual(ownChatRooms(path), ['!self:localhost', '!old-self:localhost']);
+      assert.deepEqual(ownChatRooms(path, { userId: '@me:localhost' }), ['!self:localhost', '!old-self:localhost']);
+      assert.deepEqual(ownChatRooms(path, { userId: '@someone-else:localhost' }), [], 'only the logins of the bot’s own account');
+      assert.equal(chatNumber(path, '!self:localhost'), '+15551234567');
+      assert.equal(chatNumber(path, '!group:localhost'), undefined, 'not a one-to-one chat');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a SIM that does not say its number: the number of the chat used before finds it, and nothing else does', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bridge-db-'));
+    try {
+      const path = bridgeDb(dir, { sims: { '1': { SIMData: { carrierName: 'Carrier' } } } });
+      assert.deepEqual(ownChatRooms(path), [], 'no number, no guess');
+      assert.deepEqual(ownChatRooms(path, { known: ['+15551234567'] }), ['!self:localhost', '!old-self:localhost']);
+      assert.deepEqual(ownChatRooms(bridgeDb(mkdtempSync(join(dir, 'x-')), { logins: [{ id: LOGIN, user: '@me:localhost', metadata: 'not json' }] }), { known: ['5551234567'] }), [
+        '!self:localhost',
+        '!old-self:localhost',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a chat is only taken for a login that has it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bridge-db-'));
+    try {
+      const path = bridgeDb(dir, { logins: [{ id: 'another@gmail.com/1', user: '@me:localhost', metadata: JSON.stringify({ sim_metadata: { '1': sim('+1 555 123 4567') } }) }] });
+      assert.deepEqual(ownChatRooms(path), [], 'the chats belong to a login that is not there any more');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('the same number, however it is written', () => {
+    assert.equal(sameNumber('+1 (555) 123-4567', '5551234567'), true);
+    assert.equal(sameNumber('+15551234567', '+1 555 123 4567'), true);
+    assert.equal(sameNumber('+972 54-123-4567', '054-123-4567'), true, 'a trunk 0 is not part of the number');
+    assert.equal(sameNumber('00972541234567', '+972541234567'), true, 'nor an international 00');
+    assert.equal(sameNumber('+15551234567', '+15551234568'), false);
+    assert.equal(sameNumber('+15551234567', '1234567'), false, 'seven digits are too few to say');
+    assert.equal(sameNumber('', ''), false);
   });
 
   test('a bridge that has not made its database yet is an error the page can show', () => {

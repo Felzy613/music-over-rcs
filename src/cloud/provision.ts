@@ -121,6 +121,16 @@ presence:
 rc_message:
   per_second: 20
   burst_count: 200
+# The bot looks at its chat by joining it: once a minute while it waits for one, every five minutes while it runs. Synapse
+# counts a join to a room it no longer has (a chat deleted on the phone) as a join over federation, one per 100 s after a burst
+# of 10, and on 2026-10-25 the bot's two stale rooms used that up and every start failed with HTTP 429.
+rc_joins:
+  local:
+    per_second: 1
+    burst_count: 20
+  remote:
+    per_second: 1
+    burst_count: 20
 caches:
   global_factor: ${options.cacheFactor ?? 0.25}
 `;

@@ -198,6 +198,10 @@ describe('the homeserver config', () => {
     assert.match(text, /rc_message:\n {2}per_second: 20\n {2}burst_count: 200\n/);
   });
 
+  test('lets the bot look at a deleted chat\'s room every minute without being told to slow down (2026-10-25)', () => {
+    assert.match(text, /rc_joins:\n {2}local:\n {4}per_second: 1\n {4}burst_count: 20\n {2}remote:\n {4}per_second: 1\n {4}burst_count: 20\n/);
+  });
+
   test('has secrets derived from the master, the same each time', () => {
     assert.equal(text, synapseConfig({ serverName: 'localhost', paths, master: OPTIONS.master }));
     assert.notEqual(text, synapseConfig({ serverName: 'localhost', paths, master: 'another master' }));

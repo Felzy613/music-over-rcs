@@ -49,7 +49,7 @@ Pairing gives the bridge your whole Google Messages account, and the bridge acts
 
 ## The bridge and the bot act as you
 
-The bot sends as its Matrix account, and the bridge relays that as you on Google Messages. The bot only ever writes in the one room you chose on the `/pair` page, your chat with your own number; the bridge's other rooms are never joined or read by it. Check the choice is yours: the page finds the room by your phone number.
+The bot sends as its Matrix account, and the bridge relays that as you on Google Messages. The bot only ever writes in one room, your chat with your own number: the one it finds by itself (the bridge's chat with the number Google Messages gives for your SIM, read from the bridge's database without changing it) or the one you chose on the `/pair` page. The bridge's other rooms are never joined or read by it; with no number to go on it picks no chat at all.
 
 ## Removing everything
 
