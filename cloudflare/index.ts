@@ -146,8 +146,11 @@ export async function runQueue(
   doFetch: typeof fetch = (input, init) => fetch(input, init),
 ): Promise<void> {
   for (const message of batch.messages) {
-    const key = (message.body as { object?: { key?: unknown } } | null)?.object?.key;
-    if (typeof key === 'string') await handleRelayRequest(key, { bucket: env.STATE, fetch: doFetch, log: (line) => console.log(line) });
+    const body = message.body as { object?: { key?: unknown }; eventTime?: unknown } | null;
+    const key = body?.object?.key;
+    // When R2 says the request was left, so the Worker's log says how long it waited for R2's notice and the queue.
+    const createdAt = typeof body?.eventTime === 'string' ? Date.parse(body.eventTime) : undefined;
+    if (typeof key === 'string') await handleRelayRequest(key, { bucket: env.STATE, fetch: doFetch, log: (line) => console.log(line), createdAt });
     message.ack();
   }
 }

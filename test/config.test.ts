@@ -189,6 +189,13 @@ describe('loadMatrixConfig', () => {
     assert.throws(() => loadMatrixConfig({ ...matrix, MAX_ZIP_MB: '0' }), /MAX_ZIP_MB must be from 1 to 100/);
   });
 
+  test('an album’s songs download three at a time unless ALBUM_DOWNLOADS says (1 to 5), and the bridge’s word on messages is BRIDGE_STATUS_EVENTS', () => {
+    assert.equal(loadMatrixConfig({ ...matrix }).albumDownloads, undefined);
+    assert.equal(loadMatrixConfig({ ...matrix, ALBUM_DOWNLOADS: '1' }).albumDownloads, 1);
+    assert.throws(() => loadMatrixConfig({ ...matrix, ALBUM_DOWNLOADS: '9' }), /ALBUM_DOWNLOADS must be a whole number from 1 to 5/);
+    assert.equal(loadMatrixConfig({ ...matrix, BRIDGE_STATUS_EVENTS: '1' }).sendStatus, true);
+  });
+
   test('reports every problem at once, with the next step', () => {
     assert.throws(
       () => loadMatrixConfig({ MATRIX_HOMESERVER: 'nope', MATRIX_POLL_MS: '5' }),

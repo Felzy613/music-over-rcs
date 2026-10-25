@@ -41,6 +41,14 @@ const CATCH_UP_MS = 2 * 60 * 60_000;
 const REPEAT_WINDOW_MS = 20_000;
 /** Songs downloading at once, ahead of their turn to be sent (unless the runner is told another number). */
 const DOWNLOADS_AHEAD = 3;
+/** An album's songs downloading at once (unless the runner is told another number): each goes to disk as it arrives. */
+const ALBUM_DOWNLOADS = 3;
+/**
+ * The most an album's downloads may hold at once, at the size of the biggest of its songs seen so far (10 MB until one is):
+ * three ordinary songs, or one 27 MB one at a time.
+ */
+const ALBUM_IN_FLIGHT_BYTES = 40 * 1024 * 1024;
+const SONG_BYTES_GUESS = 10 * 1024 * 1024;
 /** Covers being drawn at once, ahead of their turn. Each is a separate drawing process, so only a couple. */
 const PICTURES_AHEAD = 2;
 const CHOICE_HINT = 'Reply with a number to choose.';
@@ -200,7 +208,8 @@ export interface RunnerOptions {
   chat: ChatClient;
   bot: Bot;
   chatID: string;
-  fetchAudio(url: string, title: string | undefined): Promise<DownloadedAudio>;
+  /** Gets a song ready to send; `after` is what must be done before its file is tagged (see the audio Reply). */
+  fetchAudio(url: string, title: string | undefined, extra?: { after?: Promise<unknown> }): Promise<DownloadedAudio>;
   /** Gets a picture ready to send (a song's card, the daily collage). Without it, pictures are skipped. */
   prepareImage?(picture: Picture): Promise<PreparedPicture>;
   pollMs?: number;
@@ -216,6 +225,14 @@ export interface RunnerOptions {
   catchUpMs?: number;
   /** Songs downloading at once, ahead of their turn (default 3). A small host holds each whole file in memory, so it sets fewer. */
   downloadsAhead?: number;
+  /**
+   * An album's songs downloading at once (default 3). Each is written to disk as soon as it arrives, so this is about the source
+   * and memory, not order; fewer start when `memoryRoom` says so, or the songs are big, and after YouTube has turned the relay
+   * away once, the rest of the album goes one at a time.
+   */
+  albumDownloads?: number;
+  /** Whether the host has memory to spare for another download now (the cloud host: under 380 of its 512 MB). Always, without it. */
+  memoryRoom?: () => boolean;
   /**
    * Circuit breaker: at most this many answers (and announcements) a minute; past it, a request gets no answer (default
    * 30). It counts answers, not messages: a loop (the bot answering itself) shows as answer after answer, while a long
@@ -260,6 +277,8 @@ export interface Runner {
   tick(): Promise<void>;
   /** Sends messages the bot starts itself (the daily new-music message), never in the middle of answering a request. */
   announce(replies: Reply[]): Promise<void>;
+  /** Whether a song, a picture or an album is on its way to the chat right now (other uploads wait for it to be over). */
+  busy(): boolean;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -282,6 +301,7 @@ export function createRunner(options: RunnerOptions): Runner {
   const songGapMs = options.songGapMs ?? 0;
   const catchUpMs = options.catchUpMs ?? CATCH_UP_MS;
   const downloadsAhead = Math.max(1, options.downloadsAhead ?? DOWNLOADS_AHEAD);
+  const albumDownloads = Math.max(1, options.albumDownloads ?? ALBUM_DOWNLOADS);
 
   const seen = new Set<string>();
   /** Messages that arrived while the bot was down, answered by the first tick. */
@@ -490,12 +510,67 @@ export function createRunner(options: RunnerOptions): Runner {
   }
 
   /**
+   * An album's songs, fetched up to albumDownloads at a time, each handed to `use` as soon as it is in hand (which writes it to disk,
+   * so it isn't held in memory): what `use` gave, in album order, a song that couldn't be had left out (and named in `missing`).
+   * Another download starts only while the host has memory to spare (`memoryRoom`) and the downloads in flight fit
+   * ALBUM_IN_FLIGHT_BYTES at the size of the biggest song so far; one always may, so an album never stalls. Once YouTube has turned
+   * the relay away (or a song failed), the rest go one at a time: asking for three at once is what its bot check would notice.
+   */
+  async function fetchAlbum<T>(songs: readonly AlbumSong[], missing: string[], use: (song: AlbumSong, file: DownloadedAudio, i: number) => Promise<T>): Promise<T[]> {
+    const results: Array<T | undefined> = Array.from({ length: songs.length }, () => undefined);
+    let width = albumDownloads;
+    let biggest = SONG_BYTES_GUESS;
+    let started = 0;
+    let inFlight = 0;
+    let finished = 0;
+    const room = (): boolean => inFlight === 0 || ((inFlight + 1) * biggest <= ALBUM_IN_FLIGHT_BYTES && (options.memoryRoom?.() ?? true));
+    await new Promise<void>((resolve) => {
+      const launch = (): void => {
+        while (started < songs.length && inFlight < width && room()) {
+          const i = started++;
+          const song = songs[i]!;
+          const start = now();
+          inFlight += 1;
+          options
+            .fetchAudio(song.url, song.title)
+            .then(
+              async (file) => {
+                biggest = Math.max(biggest, file.bytes);
+                if (file.timing?.turnedAway) width = 1;
+                note(songLine(song.title, file, now() - start, ''));
+                results[i] = await use(song, file, i);
+              },
+              (err: unknown) => {
+                log(`could not get ${song.title} ready: ${errorText(err)}`);
+                missing.push(song.title);
+                width = 1;
+              },
+            )
+            .catch((err: unknown) => {
+              log(`could not keep ${song.title}: ${errorText(err)}`);
+              missing.push(song.title);
+            })
+            .finally(() => {
+              inFlight -= 1;
+              finished += 1;
+              if (finished === songs.length) resolve();
+              else launch();
+            });
+        }
+      };
+      if (songs.length === 0) resolve();
+      else launch();
+    });
+    return results.filter((result): result is T => result !== undefined);
+  }
+
+  /**
    * An album, as one ZIP of its songs (named like the album, each song "01 Title.m4a"), or, when it is bigger than
    * maxFileBytes (100 MB: what the bridge and Google Messages take), as several, each saying which part it is. The songs
-   * are downloaded in album order (downloadsAhead at a time) and each is written to a folder on disk as soon as it is in
-   * hand, so the album is never held in memory: the ZIP is made of the files as they are on disk, and the chat streams it
-   * from there. A chat that can't take a file gets the songs one by one instead. A song that can't be had is left out,
-   * and the chat is told.
+   * are downloaded a few at a time (`fetchAlbum`) and each is written to a folder on disk as soon as it is in hand, so the
+   * album is never held in memory: the ZIP is made of the files as they are on disk, in album order, and the chat streams
+   * it from there. A chat that can't take a file gets the songs one by one instead, in order (downloadsAhead at a time). A
+   * song that can't be had is left out, and the chat is told.
    */
   async function sendAlbum(album: Extract<Reply, { kind: 'album' }>, timeline?: Timeline): Promise<void> {
     const missing: string[] = [];
@@ -503,7 +578,8 @@ export function createRunner(options: RunnerOptions): Runner {
       await timedSend(timeline, () => chat.sendText(chatID, markBotText(text)));
     };
     const began = now();
-    // The songs in album order, the next ones downloading while one is used, never more than downloadsAhead at once.
+    // For a chat that can't take a file: the songs in album order, the next ones downloading while one is sent, never more than
+    // downloadsAhead at once.
     const ahead: Array<Promise<{ file: DownloadedAudio; ms: number; title: string } | undefined>> = [];
     let started = 0;
     const next = async (): Promise<DownloadedAudio | undefined> => {
@@ -553,20 +629,18 @@ export function createRunner(options: RunnerOptions): Runner {
       const folder = await mkdtemp(join(options.spoolDir ?? tmpdir(), 'album-'));
       try {
         // Every song on disk first, with the checksum its place in the ZIP needs; then the parts are known exactly.
-        const songs: Array<{ name: string; data: Blob; crc: number }> = [];
-        for (const song of album.songs) {
-          const file = await next();
-          if (!file) continue;
-          had += 1;
+        const songs = await fetchAlbum(album.songs, missing, async (song, file, i) => {
           const extension = /\.[a-z0-9]{2,5}$/i.exec(file.fileName)?.[0].toLowerCase() ?? '.audio';
-          const path = join(folder, `${String(songs.length + 1).padStart(3, '0')}${extension}`);
+          const path = join(folder, `${String(i + 1).padStart(3, '0')}${extension}`);
           const written = now();
           const crc = await writeWithCrc32(file.data, path);
-          songs.push({ name: `${stem(song)}${extension}`, data: await openAsBlob(path, { type: file.mimeType }), crc });
+          const data = await openAsBlob(path, { type: file.mimeType });
           diskMs += now() - written;
           bytes += file.bytes;
           freeMemory(); // the song as it was downloaded, now that it is on disk
-        }
+          return { name: `${stem(song)}${extension}`, data, crc };
+        });
+        had = songs.length;
         const fetched = now() - began;
         const parts: Array<typeof songs> = [];
         let used = zipSize([]);
@@ -629,7 +703,7 @@ export function createRunner(options: RunnerOptions): Runner {
       while (started < songs.length && started - sentSongs < downloadsAhead) {
         const song = songs[started++]!;
         const start = now();
-        const file = options.fetchAudio(song.url, song.title).then((got) => {
+        const file = options.fetchAudio(song.url, song.title, song.after ? { after: song.after } : undefined).then((got) => {
           fetchMs.set(song, now() - start);
           return got;
         });
@@ -645,9 +719,17 @@ export function createRunner(options: RunnerOptions): Runner {
     let sentPictures = 0;
     const startPictures = (): void => {
       if (!chat.sendImage || !options.prepareImage) return;
+      const prepareImage = options.prepareImage;
       while (drawing < pictures.length && drawing - sentPictures < PICTURES_AHEAD) {
         const picture = pictures[drawing++]!;
-        const card = options.prepareImage(picture);
+        // A card whose better picture is on its way (the album's cover) is drawn with it once it comes: the song is downloading meanwhile.
+        const card =
+          picture.kind === 'image' && picture.better
+            ? picture.better.then(
+                (url) => prepareImage(url ? { ...picture, url } : picture),
+                () => prepareImage(picture),
+              )
+            : prepareImage(picture);
         card.catch(() => {}); // handled when it's sent
         drawn.set(picture, card);
       }
@@ -1069,6 +1151,7 @@ export function createRunner(options: RunnerOptions): Runner {
   return {
     prime,
     tick,
+    busy: () => delivering > 0,
     announce(replies) {
       return exclusive(async () => {
         log(`-> announcement (${replies.length} message${replies.length === 1 ? '' : 's'})`);

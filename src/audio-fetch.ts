@@ -5,8 +5,11 @@ export interface DownloadedAudio {
   fileName: string;
   mimeType: string;
   bytes: number;
-  /** How getting it went, for the host's `song:` line: what it came through (the relay's parts), and tagging it. */
-  timing?: { via?: string; tagMs?: number } | undefined;
+  /**
+   * How getting it went, for the host's `song:` line: what it came through (the relay's parts), tagging it, and how many times
+   * YouTube turned the relay away before it came (an album then asks for the rest one at a time).
+   */
+  timing?: { via?: string; tagMs?: number; turnedAway?: number } | undefined;
 }
 
 export interface FetchAudioOptions {

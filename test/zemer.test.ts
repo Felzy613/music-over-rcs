@@ -100,6 +100,27 @@ const texts = (replies: Reply[]): string[] => replies.flatMap((reply) => (reply.
 const picks = (replies: Reply[]): Array<[string, string]> => replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [[reply.text, reply.postback] as [string, string]] : []));
 /** The numbered lines of a list, with their numbers. */
 const numbersOf = (replies: Reply[]): Array<[number, string]> => replies.flatMap((reply) => (reply.kind === 'text' && reply.number !== undefined ? [[reply.number, reply.text] as [number, string]] : []));
+/**
+ * A song as it is sent, with its card's picture as it is drawn: the album's cover, looked up while the song downloads (the
+ * card's `better`), and the song's file waiting for that lookup before it is tagged (`after`).
+ */
+async function sent(replies: Reply[]): Promise<Reply[]> {
+  return Promise.all(
+    replies.map(async (reply) => {
+      if (reply.kind === 'image') {
+        const { better, ...card } = reply;
+        const url = await better;
+        return url ? { ...card, url } : card;
+      }
+      if (reply.kind === 'audio') {
+        const { after, ...audio } = reply;
+        assert.ok(after, 'its tags wait for its album to be looked up');
+        return audio;
+      }
+      return reply;
+    }),
+  );
+}
 const textOf = (reply: Reply | undefined): TextReply => {
   assert.ok(reply && reply.kind === 'text', `expected a text reply, got ${JSON.stringify(reply)}`);
   return reply;
@@ -276,7 +297,7 @@ describe('Zemer', () => {
       const menu = await say('search a poshiter yid');
       assert.deepEqual(numbered(menu), [`💿 1. A Poshiter Yid — ${LIPA} · 2008 · 4 songs`, `A Poshiter Yid — ${LIPA}`, "Text an album's number for its songs."]);
       assert.ok(!menu.some((reply) => reply.kind === 'audio'));
-      const replies = await tap(lineOf(menu, 'A Poshiter Yid —'));
+      const replies = await sent(await tap(lineOf(menu, 'A Poshiter Yid —')));
       assert.deepEqual(replies.slice(0, 2), [
         { kind: 'image', url: cover('MPREb_poshiteryid'), caption: { title: 'A Poshiter Yid', artist: LIPA } },
         { kind: 'audio', url: youTube.trackUrl('lipaposhite'), title: `${LIPA} — A Poshiter Yid` },
@@ -289,7 +310,7 @@ describe('Zemer', () => {
       const { say, tap, youTube } = setup();
       const menu = await say('search vnusni');
       assert.deepEqual(songLines(menu), [`ונתנו — ${LIPA}`]);
-      const replies = await tap(lineOf(menu, 'ונתנו'));
+      const replies = await sent(await tap(lineOf(menu, 'ונתנו')));
       assert.deepEqual(replies, [
         { kind: 'image', url: cover('vnusni'), caption: { title: 'ונתנו', artist: LIPA } },
         { kind: 'audio', url: youTube.trackUrl('lipavnusni0'), title: `${LIPA} — ונתנו` },

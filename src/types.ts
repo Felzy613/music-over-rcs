@@ -38,14 +38,16 @@ export interface NumberedChoice {
  * a `number` (the albums in a list, the songs of an album), shown before the line, and the text that closes the list
  * says what each number picks (`numbers`): texting one picks it. Elsewhere every line is numbered from the chips instead,
  * and the closing text is `numbered` when it says something else there ("reply with a number to pick one"). A reply with
- * chips and no words only changes what a number or "all" picks (a 👍 that went back to an earlier menu).
+ * chips and no words only changes what a number or "all" picks (a 👍 that went back to an earlier menu). A song's card may have
+ * a `better` picture on its way (its album's cover, looked up while the song downloads), and a song may have to wait `after`
+ * something before its file is tagged (its album's details, looked up the same way): neither holds up the download.
  */
 export type Reply =
   | { kind: 'text'; text: string; chips?: Chip[]; chipsValidMs?: number; postback?: string; number?: number; numbers?: NumberedChoice[]; numbered?: string }
   | { kind: 'album'; title: string; artist: string; songs: AlbumSong[] }
-  | { kind: 'image'; url: string; caption?: { title: string; artist: string }; postback?: string }
+  | { kind: 'image'; url: string; caption?: { title: string; artist: string }; postback?: string; better?: Promise<string | undefined> }
   | { kind: 'collage'; images: Array<{ url: string; label: string; postback: string; number?: number }> }
-  | { kind: 'audio'; url: string; title?: string };
+  | { kind: 'audio'; url: string; title?: string; after?: Promise<unknown> };
 
 /** A message from the user, independent of the transport it arrived on. */
 export interface Incoming {

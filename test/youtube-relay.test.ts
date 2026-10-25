@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { runQueue, type Env } from '../cloudflare/index.ts';
-import { handleRelayRequest, RELAY_MAX_AGE_MS, relaySong, sweepRelay } from '../cloudflare/youtube.ts';
+import { handleRelayRequest, RELAY_MAX_AGE_MS, relaySong, requestNamed, SESSION_MS, sweepRelay } from '../cloudflare/youtube.ts';
 import { createYouTubeRelay, relayTiming, youTubeRelayFromEnv } from '../src/cloud/youtube-relay.ts';
 import { FakeBucket } from './helpers/fake-bucket.ts';
 
@@ -59,7 +59,7 @@ describe('the Worker side of the YouTube relay', () => {
   test('gets the song as the first client, puts its audio in the bucket, and says what it is', async () => {
     const bucket = new FakeBucket();
     const yt = fakeYouTube();
-    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: bucket.binding, audioKey: 'yt/audio/x' });
+    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: bucket.binding, audioKey: 'yt/audio/x', session: {} });
     assert.deepEqual(result, { ok: true, type: 'audio/mp4', bytes: SONG.length });
     assert.deepEqual(bucket.objects.get('yt/audio/x')?.bytes, SONG);
     assert.deepEqual(yt.calls, ['visitor', 'player 1.02', 'media 1.02']);
@@ -67,14 +67,14 @@ describe('the Worker side of the YouTube relay', () => {
 
   test('a link that refuses the whole song is dropped for the next client’s', async () => {
     const yt = fakeYouTube({ byVersion: { '1.02': 'refuse-link' } });
-    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a' });
+    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} });
     assert.equal(result.ok, true);
     assert.deepEqual(yt.calls, ['visitor', 'player 1.02', 'media 1.02', 'player 1.03', 'media 1.03']);
   });
 
   test('after a whole round of refused links it tries once more with a new session', async () => {
     const yt = fakeYouTube({ refuseFirstRound: true });
-    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a' });
+    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} });
     assert.equal(result.ok, true);
     assert.equal(yt.calls.filter((call) => call === 'visitor').length, 2);
   });
@@ -82,7 +82,7 @@ describe('the Worker side of the YouTube relay', () => {
   test('a bot check everywhere is said as such, and nothing is downloaded', async () => {
     const bucket = new FakeBucket();
     const yt = fakeYouTube({ byVersion: { '1.02': 'bot', '1.03': 'bot', '1.01': 'bot' } });
-    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: bucket.binding, audioKey: 'a' });
+    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: bucket.binding, audioKey: 'a', session: {} });
     assert.deepEqual(result, { ok: false, error: 'Sign in to confirm you’re not a bot', turnedAway: true });
     assert.equal(bucket.objects.size, 0);
     assert.equal(yt.calls.filter((call) => call === 'visitor').length, 1, 'a new session does not get past a bot check');
@@ -90,14 +90,14 @@ describe('the Worker side of the YouTube relay', () => {
 
   test('HTTP 403 from YouTube Music, at the player or for a session, is being turned away too', async () => {
     const everywhere = fakeYouTube({ byVersion: { '1.02': 'http403', '1.03': 'http403', '1.01': 'http403' } });
-    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: everywhere.fetch, bucket: new FakeBucket().binding, audioKey: 'a' }), {
+    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: everywhere.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} }), {
       ok: false,
       error: 'YouTube Music answered HTTP 403',
       turnedAway: true,
     });
     assert.deepEqual(everywhere.calls, ['visitor', 'player 1.02'], 'it is the address that is refused, so no other version is asked');
     const session = fakeYouTube({ visitorStatus: 403 });
-    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: session.fetch, bucket: new FakeBucket().binding, audioKey: 'a' }), {
+    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: session.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} }), {
       ok: false,
       error: 'YouTube Music answered HTTP 403',
       turnedAway: true,
@@ -106,20 +106,48 @@ describe('the Worker side of the YouTube relay', () => {
 
   test('a retired client version (HTTP 400) is passed over for the next, and is not being turned away', async () => {
     const yt = fakeYouTube({ byVersion: { '1.02': 'http400' } });
-    assert.equal((await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a' })).ok, true);
+    assert.equal((await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} })).ok, true);
     assert.deepEqual(yt.calls, ['visitor', 'player 1.02', 'player 1.03', 'media 1.03']);
     const all = fakeYouTube({ byVersion: { '1.02': 'http400', '1.03': 'http400', '1.01': 'http400' } });
-    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: all.fetch, bucket: new FakeBucket().binding, audioKey: 'a' }), { ok: false, error: 'YouTube Music answered HTTP 400' });
+    assert.deepEqual(await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: all.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} }), { ok: false, error: 'YouTube Music answered HTTP 400' });
+  });
+
+  test('a session is kept for the songs of the next half hour, and a new one is had after that or after a bot check', async () => {
+    const session = {};
+    let clock = 0;
+    const yt = fakeYouTube();
+    const ask = () => relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session, now: () => clock });
+    await ask();
+    clock += SESSION_MS - 1;
+    await ask();
+    assert.equal(yt.calls.filter((call) => call === 'visitor').length, 1, 'one session for both songs');
+    clock += 2;
+    await ask();
+    assert.equal(yt.calls.filter((call) => call === 'visitor').length, 2, 'a new one once it is half an hour old');
+    const bot = fakeYouTube({ byVersion: { '1.02': 'bot', '1.03': 'bot', '1.01': 'bot' } });
+    await relaySong({ videoId: 'dX7fqa8Z2Gs' }, { fetch: bot.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session, now: () => clock });
+    assert.equal(bot.calls.filter((call) => call === 'visitor').length, 0, 'the kept session was used');
+    await ask();
+    assert.equal(yt.calls.filter((call) => call === 'visitor').length, 3, 'after a bot check, the next song starts a new session');
+  });
+
+  test('a request named by what it asks for is answered without reading it, and how long it waited comes from R2’s notice', async () => {
+    const bucket = new FakeBucket();
+    await bucket.binding.put('yt/req/dX7fqa8Z2Gs-ab12cd34-0.json', JSON.stringify({ videoId: 'dX7fqa8Z2Gs' }));
+    const result = await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12cd34-0.json', { bucket: bucket.binding, fetch: fakeYouTube().fetch, session: {}, createdAt: Date.now() - 1500 });
+    assert.equal(result?.ok, true);
+    assert.ok(result!.timing!.queuedMs! >= 1500);
+    assert.ok(bucket.objects.has('yt/req/dX7fqa8Z2Gs-ab12cd34-0.json'), 'left for the host to clear with the rest');
   });
 
   test('every request leaves one line in the log, saying whether YouTube turned Cloudflare away', async () => {
     const lines: string[] = [];
     const bucket = new FakeBucket();
     await bucket.binding.put('yt/req/dX7fqa8Z2Gs-ab12.json', JSON.stringify({ videoId: 'dX7fqa8Z2Gs' }));
-    await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12.json', { bucket: bucket.binding, fetch: fakeYouTube().fetch, log: (line) => lines.push(line) });
+    await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12.json', { bucket: bucket.binding, fetch: fakeYouTube().fetch, log: (line) => lines.push(line), session: {} });
     await bucket.binding.put('yt/req/dX7fqa8Z2Gs-cd34.json', JSON.stringify({ videoId: 'dX7fqa8Z2Gs' }));
     const bot = fakeYouTube({ byVersion: { '1.02': 'bot', '1.03': 'bot', '1.01': 'bot' } });
-    await handleRelayRequest('yt/req/dX7fqa8Z2Gs-cd34.json', { bucket: bucket.binding, fetch: bot.fetch, log: (line) => lines.push(line) });
+    await handleRelayRequest('yt/req/dX7fqa8Z2Gs-cd34.json', { bucket: bucket.binding, fetch: bot.fetch, log: (line) => lines.push(line), session: {} });
     assert.equal(lines.length, 2, lines.join('\n'));
     assert.match(lines[0]!, /^YouTube relay: dX7fqa8Z2Gs-ab12: 0\.0 MB in \d+\.\d s \(queued \d+ ms, session \d+, player \d+, link \d+, store \d+\)$/);
     assert.match(lines[1]!, /^YouTube relay: dX7fqa8Z2Gs-cd34: turned away: Sign in to confirm you’re not a bot \(\d+\.\d s; queued \d+ ms, session \d+, player \d+, link \d+, store \d+\)$/);
@@ -127,17 +155,17 @@ describe('the Worker side of the YouTube relay', () => {
 
   test('a song over the limit is refused before anything is downloaded; a bad id is refused at once', async () => {
     const yt = fakeYouTube({ sizeOf: 40 * 1_048_576 });
-    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs', maxBytes: 30 * 1_048_576 }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a' });
+    const result = await relaySong({ videoId: 'dX7fqa8Z2Gs', maxBytes: 30 * 1_048_576 }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} });
     assert.deepEqual(result, { ok: false, error: 'it is too big to send (40.0 MB, the limit is 30 MB)' });
     assert.ok(!yt.calls.some((call) => call.startsWith('media')));
-    assert.deepEqual(await relaySong({ videoId: '../etc' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a' }), { ok: false, error: "that isn't a YouTube song" });
+    assert.deepEqual(await relaySong({ videoId: '../etc' }, { fetch: yt.fetch, bucket: new FakeBucket().binding, audioKey: 'a', session: {} }), { ok: false, error: "that isn't a YouTube song" });
   });
 
   test('a request is answered once, its outcome left beside it; a repeated notice or a stray key does nothing', async () => {
     const bucket = new FakeBucket();
     const yt = fakeYouTube({ byVersion: { '1.02': 'unplayable', '1.03': 'unplayable', '1.01': 'unplayable' } });
     await bucket.binding.put('yt/req/dX7fqa8Z2Gs-ab12.json', JSON.stringify({ videoId: 'dX7fqa8Z2Gs' }));
-    const result = await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12.json', { bucket: bucket.binding, fetch: yt.fetch });
+    const result = await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12.json', { bucket: bucket.binding, fetch: yt.fetch, session: {} });
     const { timing, ...outcome } = result!;
     assert.deepEqual(outcome, { ok: false, error: 'This video is unavailable' });
     assert.ok(timing && timing.totalMs >= 0 && timing.doneAt > 0 && timing.queuedMs !== undefined, 'the outcome says where the Worker’s time went');
@@ -176,19 +204,29 @@ describe('the Worker side of the YouTube relay', () => {
 });
 
 describe('the host side of the YouTube relay', () => {
-  /** A relay whose waits run the Worker, the way R2's notice would, once the request is in the bucket. */
+  /**
+   * The Worker answering each request the host leaves, once, the way R2's notice brings it (with when the request was left), while
+   * the host waits.
+   */
+  const worker = (bucket: FakeBucket, yt: { fetch: typeof fetch }) => {
+    const answered = new Set<string>();
+    return async () => {
+      for (const key of [...bucket.objects.keys()].filter((k) => k.startsWith('yt/req/') && !answered.has(k))) {
+        answered.add(key);
+        await handleRelayRequest(key, { bucket: bucket.binding, fetch: yt.fetch, session: {}, createdAt: bucket.objects.get(key)?.uploaded?.getTime() });
+      }
+    };
+  };
   const wired = (bucket: FakeBucket, yt = fakeYouTube(), options: { worker?: boolean } = {}) => {
     let clock = 0;
+    const answer = worker(bucket, yt);
     return createYouTubeRelay(bucket.s3, {
       now: () => clock,
       timeoutMs: 5000,
       pollMs: 1000,
       sleep: async (ms) => {
         clock += ms;
-        if (options.worker === false) return;
-        for (const key of [...bucket.objects.keys()].filter((k) => k.startsWith('yt/req/'))) {
-          await handleRelayRequest(key, { bucket: bucket.binding, fetch: yt.fetch });
-        }
+        if (options.worker !== false) await answer();
       },
     });
   };
@@ -233,8 +271,9 @@ describe('the host side of the YouTube relay', () => {
     const lines: string[] = [];
     const waits: number[] = [];
     let clock = 0;
-    const relay = (yt: { fetch: typeof fetch }) =>
-      createYouTubeRelay(bucket.s3, {
+    const relay = (yt: { fetch: typeof fetch }) => {
+      const answer = worker(bucket, yt);
+      return createYouTubeRelay(bucket.s3, {
         now: () => clock,
         pollMs: 1000,
         log: (line) => lines.push(line),
@@ -242,10 +281,14 @@ describe('the host side of the YouTube relay', () => {
           clock += ms;
           // The relay's own waits between asks are the long ones; the looks for an answer are a second.
           if (ms > 1000) waits.push(ms);
-          for (const key of [...bucket.objects.keys()].filter((k) => k.startsWith('yt/req/'))) await handleRelayRequest(key, { bucket: bucket.binding, fetch: yt.fetch });
+          await answer();
         },
       });
-    assert.deepEqual((await relay({ fetch: flaky })('dX7fqa8Z2Gs')).bytes, SONG.length, 'the third ask comes through');
+    };
+    const third = await relay({ fetch: flaky })('dX7fqa8Z2Gs');
+    assert.deepEqual(third.bytes, SONG.length, 'the third ask comes through');
+    assert.equal(third.turnedAway, 2, 'and says how often it was turned away first');
+    assert.match(third.timing ?? '', /^turned away 2× first, put /);
     assert.deepEqual(waits, [5000, 15_000]);
     assert.ok(lines.includes('YouTube Music turned Cloudflare away for dX7fqa8Z2Gs (Sign in to confirm you’re not a bot); asking again in 5 s'), lines.join('\n'));
 
@@ -266,12 +309,24 @@ describe('the host side of the YouTube relay', () => {
     assert.equal(yt.calls.filter((call) => call === 'visitor').length, 1);
   });
 
-  test('looks for the answer less and less often while it waits, up to every 3 seconds', async () => {
+  test('looks for the answer every 400 ms while it waits: a song ready a moment ago is not left waiting', async () => {
     const waits: number[] = [];
     let clock = 0;
-    const relay = createYouTubeRelay(new FakeBucket().s3, { now: () => clock, timeoutMs: 20_000, pollMs: 750, sleep: async (ms) => void (waits.push(ms), (clock += ms)) });
-    await assert.rejects(relay('dX7fqa8Z2Gs'), /no answer within 20 seconds/);
-    assert.deepEqual(waits.slice(0, 6), [750, 1125, 1688, 2532, 3000, 3000]);
+    const relay = createYouTubeRelay(new FakeBucket().s3, { now: () => clock, timeoutMs: 2_000, sleep: async (ms) => void (waits.push(ms), (clock += ms)) });
+    await assert.rejects(relay('dX7fqa8Z2Gs'), /no answer within 2 seconds/);
+    assert.deepEqual(waits, [400, 400, 400, 400, 400]);
+  });
+
+  test('names a request by what it asks for, and the Worker answers it from the name alone, without reading it', async () => {
+    const bucket = new FakeBucket();
+    const reads: string[] = [];
+    const read = bucket.binding.get;
+    bucket.binding.get = async (key: string) => (reads.push(key), read(key));
+    await wired(bucket)('dX7fqa8Z2Gs', { maxBytes: 1_000_000 });
+    assert.deepEqual(reads, [], 'the request was never read');
+    assert.deepEqual(requestNamed('dX7fqa8Z2Gs-ab12cd34-1000000'), { videoId: 'dX7fqa8Z2Gs', maxBytes: 1_000_000 });
+    assert.deepEqual(requestNamed('dX7fqa8Z2Gs-ab12cd34-0'), { videoId: 'dX7fqa8Z2Gs' });
+    assert.equal(requestNamed('dX7fqa8Z2Gs-ab12'), undefined, 'a name from an older host: the request is read');
   });
 
   test('gives up when no answer comes in time, and cleans up its request', async () => {

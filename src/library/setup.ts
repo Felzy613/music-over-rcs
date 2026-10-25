@@ -45,6 +45,8 @@ export interface LibraryOptions {
   cloudMonthlyBytes?: number | undefined;
   /** Where the host's memory stands, for holding back a song that would not fit (see SongArchive). Undefined for no limit. */
   cloudMemory?: (() => { limit: number; used: number } | undefined) | undefined;
+  /** Whether a song or an album is on its way to the chat: a copy to the cloud folder waits until it isn't. */
+  cloudBusy?: (() => boolean) | undefined;
   /** Told when saving to it starts failing (with what is wrong) and when it works again (undefined). */
   onCloudFolder?: ((problem: string | undefined, needsLogin: boolean) => void) | undefined;
   log: (line: string) => void;
@@ -53,7 +55,8 @@ export interface LibraryOptions {
 /** What the chat routes need from the library: faster checks and downloads, pictures, and the background work. */
 export interface Library {
   checkAudio(url: string): Promise<AudioCheck>;
-  fetchAudio(url: string, title?: string): Promise<DownloadedAudio>;
+  /** A song ready to send, tagged once `after` (its album being looked up) is done. */
+  fetchAudio(url: string, title?: string, extra?: { after?: Promise<unknown> }): Promise<DownloadedAudio>;
   /** Album art ready to send: a song's card with its name drawn on, or the daily collage. */
   prepareImage(picture: Picture): Promise<PreparedPicture>;
   /** The background saving of sent songs to the cloud folder, when there is one. */
@@ -97,6 +100,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
         placeOf: naming.placeOf,
         monthlyBudgetBytes: options.cloudMonthlyBytes,
         memory: options.cloudMemory,
+        busy: options.cloudBusy,
         onProblem: options.onCloudFolder,
         log,
       })
@@ -120,8 +124,8 @@ export function setUpLibrary(options: LibraryOptions): Library {
     checkAudio: cache ? cachedCheck(cache, audio.checkAudio) : audio.checkAudio,
     // A song fetched to be sent is also offered to the cloud folder; that happens in the background, after this returns.
     fetchAudio: archive
-      ? async (url, title) => {
-          const song = await named(url, title);
+      ? async (url, title, extra) => {
+          const song = await named(url, title, extra);
           archive.offer(url, song);
           return song;
         }

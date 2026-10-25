@@ -10,7 +10,7 @@ import { loadExtensions, startExtensions, stopExtensions, type ExtensionChat } f
 import { loadMatrixConfig, parseCloudBudget } from './config.ts';
 import { describeMatrixError, MatrixClient } from './matrix/client.ts';
 import { setUpLibrary } from './library/setup.ts';
-import { addSent } from './usage.ts';
+import { addSent, trafficProblem } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { memoryCheck } from './cloud/memory.ts';
 import { watchJoinedRoom } from './cloud/room.ts';
@@ -25,6 +25,8 @@ import { zemerSearchFromEnv } from './sources/zemer.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat, through the mautrix-gmessages bridge and a Matrix room.
+/** The memory an album's next download needs free on the host: 132 MB, that is under 380 of a 512 MB container. */
+const ALBUM_MEMORY_SPARE = 132 * 1048576;
 const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 let homeserver: string | undefined;
 
@@ -78,6 +80,10 @@ try {
 
   // With ONEDRIVE_CLIENT_ID set, every song sent is also saved to the owner's OneDrive (signed in on the setup page).
   const oneDrive = oneDriveFromEnv(process.env, { state: catalog, log });
+  // Where the host's memory stands (a cloud host's container), for the OneDrive copies and an album's downloads.
+  const memory = memoryCheck();
+  // Whether a song or an album is on its way to the chat (the runner, once it exists): a OneDrive copy waits until it isn't.
+  let sending = (): boolean => false;
   const cloudBudget = parseCloudBudget(process.env.ONEDRIVE_MAX_MB_PER_MONTH);
   if (cloudBudget instanceof Error) throw cloudBudget;
   // Songs kept on disk (the most played, the newest, the most viewed), album art, and the daily new-music message.
@@ -91,7 +97,8 @@ try {
           cloudFolder: oneDrive,
           cloudMonthlyBytes: cloudBudget,
           // On a small cloud host the OneDrive copy of a big song waits for memory, or is skipped, rather than crowd out sending.
-          cloudMemory: memoryCheck(),
+          cloudMemory: memory,
+          cloudBusy: () => sending(),
           onCloudFolder: (problem: string | undefined, needsLogin: boolean) =>
             problem
               ? health.problem('onedrive', `Songs are not being saved to OneDrive: ${problem}${needsLogin ? ' Open the setup page and sign in to OneDrive again.' : ''}`)
@@ -147,6 +154,17 @@ try {
     pollMs: config.pollMs,
     songGapMs: config.songGapMs,
     ...(config.downloadsAhead ? { downloadsAhead: config.downloadsAhead } : {}),
+    // An album's songs come three at a time (ALBUM_DOWNLOADS), each to disk as it arrives; another starts only while the host has
+    // room: under 380 of its 512 MB, the most it reached with one at a time being 391 (2026-10-20).
+    ...(config.albumDownloads ? { albumDownloads: config.albumDownloads } : {}),
+    ...(memory
+      ? {
+          memoryRoom: () => {
+            const use = memory();
+            return !use || use.limit - use.used >= ALBUM_MEMORY_SPARE;
+          },
+        }
+      : {}),
     // An album's zip is written to disk and streamed from there, so it can be bigger than a song held in memory.
     maxFileBytes: config.maxZipMb * 1024 * 1024,
     onBridgeSendFailure: () => bridge.sendFailed(),
@@ -161,6 +179,7 @@ try {
       else if (failures >= 20) health.problem('homeserver', `The bot can't reach the Matrix homeserver (${error ?? 'no answer'}). It restarts on its own; if this lasts, restart the service in Render.`);
     },
   });
+  sending = () => runner.busy();
   await runner.start();
   // The daily message and the new-song alerts count as sent once the chat takes them, which it does even when the bridge
   // can't pass them on to Google Messages (unlinked, disconnected) and they would be lost. So they wait until it can;
@@ -177,8 +196,17 @@ try {
     unreact: (reactionId) => matrix.redact(config.roomID, reactionId),
   };
   startExtensions(extensions, chat, health);
-  // If the internet is back but Google Messages stays disconnected, restart its stale bridge session automatically.
-  const watching = setInterval(() => void bridge.check(), 60_000);
+  // If the internet is back but Google Messages stays disconnected, restart its stale bridge session automatically. And a month's
+  // outbound traffic near what Render's free plan includes is said, before it costs anything.
+  const checkTraffic = (): void => {
+    const problem = trafficProblem(catalog);
+    if (problem) health.problem('traffic', problem);
+    else health.ok('traffic', "Fixed: this month's outbound traffic is back under the limit (a new month).");
+  };
+  const watching = setInterval(() => {
+    void bridge.check();
+    checkTraffic();
+  }, 60_000);
   watching.unref();
   void bridge.check();
   // A word in the chat once the bot is up and the bridge can pass it on (the cloud host asks for it once, on its first start).

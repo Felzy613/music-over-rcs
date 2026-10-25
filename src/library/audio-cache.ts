@@ -502,9 +502,11 @@ export function taggedFetch(
     fetchCover?: ((url: string) => Promise<CoverPicture | undefined>) | undefined;
     log?: (line: string) => void;
   },
-): (url: string, title?: string) => Promise<DownloadedAudio> {
-  return async (url, title) => {
+): (url: string, title?: string, extra?: { after?: Promise<unknown> }) => Promise<DownloadedAudio> {
+  return async (url, title, extra) => {
     const audio = await fetchAudio(url, title);
+    // What the tags are read from (the song's album) may still be being looked up: it ran alongside the download.
+    await extra?.after?.catch(() => {});
     const start = performance.now();
     try {
       const tagged = await tagSongBlob(url, audio, options);

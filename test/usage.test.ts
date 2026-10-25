@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Catalog } from '../src/catalog.ts';
 import { MatrixClient } from '../src/matrix/client.ts';
-import { addSent, sentThisMonth } from '../src/usage.ts';
+import { addArchived, addSent, sentThisMonth, trafficProblem } from '../src/usage.ts';
 import { startMockMatrix } from './helpers/mock-matrix.ts';
 
 test('counts what is sent, month by month', () => {
@@ -15,6 +15,17 @@ test('counts what is sent, month by month', () => {
   addSent(catalog, 700, new Date('2026-11-01T00:00:00Z'));
   assert.equal(sentThisMonth(catalog, new Date('2026-10-20T00:00:00Z')), 1500);
   assert.equal(sentThisMonth(catalog, new Date('2026-11-02T00:00:00Z')), 700);
+});
+
+test('the month’s songs and OneDrive copies together past 4,000 MB are a problem to say, with what to do', () => {
+  const catalog = new Catalog(':memory:');
+  const at = new Date('2026-10-20T00:00:00Z');
+  addSent(catalog, 3000 * 1048576, at);
+  addArchived(catalog, 999 * 1048576, at);
+  assert.equal(trafficProblem(catalog, at), undefined);
+  addArchived(catalog, 1048576, at);
+  assert.match(trafficProblem(catalog, at) ?? '', /^The host has sent 4,000 MB this month \(3,000 MB of songs, 1,000 MB of OneDrive copies\); .*ONEDRIVE_MAX_MB_PER_MONTH/);
+  assert.equal(trafficProblem(catalog, new Date('2026-11-01T00:00:00Z')), undefined, 'a new month starts at nothing');
 });
 
 test('the Matrix client reports each file it uploads, and a broken counter does not stop the send', async () => {

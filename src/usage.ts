@@ -33,3 +33,23 @@ export function addArchived(state: StateStore, bytes: number, now: Date = new Da
 export function archivedThisMonth(state: StateStore, now: Date = new Date()): number {
   return Number(state.getState(archivedKey(now))) || 0;
 }
+
+/**
+ * Past this much sent and saved in a month the host says so (a problem, mailed): Render's free plan includes about 5,000 MB of
+ * outbound traffic and charges past it, or suspends a service with no card on file, and the owner spends no more (2026-10-20).
+ * ONEDRIVE_MAX_MB_PER_MONTH should stop the OneDrive copies well before this.
+ */
+export const TRAFFIC_ALERT_BYTES = 4000 * 1048576;
+
+/** What the bot sent out this month: songs and pictures sent, and copies saved to OneDrive. */
+export function trafficThisMonth(state: StateStore, now: Date = new Date()): number {
+  return sentThisMonth(state, now) + archivedThisMonth(state, now);
+}
+
+/** What to say about this month's traffic: a problem past TRAFFIC_ALERT_BYTES, nothing otherwise. */
+export function trafficProblem(state: StateStore, now: Date = new Date()): string | undefined {
+  const used = trafficThisMonth(state, now);
+  if (used < TRAFFIC_ALERT_BYTES) return undefined;
+  const mb = (bytes: number): string => `${Math.round(bytes / 1048576).toLocaleString('en-US')} MB`;
+  return `The host has sent ${mb(used)} this month (${mb(sentThisMonth(state, now))} of songs, ${mb(archivedThisMonth(state, now))} of OneDrive copies); Render's free plan includes about 5,000 MB and charges past it. Lower ONEDRIVE_MAX_MB_PER_MONTH in Render, or ask for fewer albums until the month is over.`;
+}

@@ -122,6 +122,17 @@ async function visitorId(doFetch: typeof fetch): Promise<string> {
   return /%[0-9A-Fa-f]{2}/.test(raw) ? decodeURIComponent(raw) : raw;
 }
 
+/** A session id kept between requests (in the Worker's isolate, for as long as it lives), and when it was had. */
+export interface RelaySession {
+  visitor?: string | undefined;
+  at?: number | undefined;
+}
+
+/** How long a session is used for the next songs: each new one is a round trip to YouTube before every song. */
+export const SESSION_MS = 30 * 60_000;
+/** This isolate's session. */
+const isolateSession: RelaySession = {};
+
 interface Format {
   url?: string;
   mimeType?: string;
@@ -152,7 +163,15 @@ function storable(res: Response, length: number): ReadableStream | Promise<Array
  */
 export async function relaySong(
   request: RelayRequest,
-  deps: { fetch: typeof fetch; bucket: Pick<RelayBucket, 'put'>; audioKey: string; timing?: Pick<RelayTiming, 'sessionMs' | 'playerMs' | 'linkMs' | 'storeMs'> },
+  deps: {
+    fetch: typeof fetch;
+    bucket: Pick<RelayBucket, 'put'>;
+    audioKey: string;
+    timing?: Pick<RelayTiming, 'sessionMs' | 'playerMs' | 'linkMs' | 'storeMs'>;
+    /** The session kept between songs (this isolate's unless given); a fresh one is had when it is older than SESSION_MS. */
+    session?: RelaySession;
+    now?: () => number;
+  },
 ): Promise<RelayResult> {
   if (!VIDEO_ID.test(request.videoId)) return { ok: false, error: "that isn't a YouTube song" };
   // Called on its own, never as `deps.fetch(…)`: the Workers runtime refuses a fetch called with another object as `this`.
@@ -170,14 +189,22 @@ export async function relaySong(
   };
   let problem = 'no client gave a link';
   let turnedAway = false;
+  const session = deps.session ?? isolateSession;
+  const now = deps.now ?? Date.now;
   for (let round = 0; round < 2; round += 1) {
     let visitor: string;
     step = 'sessionMs';
+    // The kept session, unless it is old, or this is the second round (a new session is what that round is for).
+    const kept = round === 0 && session.visitor && now() - (session.at ?? 0) < SESSION_MS ? session.visitor : undefined;
     try {
-      visitor = await visitorId(doFetch);
+      visitor = kept ?? (await visitorId(doFetch));
     } catch (err) {
       if (refusesAddress(err)) return { ok: false, error: err.message, turnedAway: true };
       throw err;
+    }
+    if (!kept) {
+      session.visitor = visitor;
+      session.at = now();
     }
     let refused = false;
     for (const client of STREAM_CLIENTS) {
@@ -186,8 +213,12 @@ export async function relaySong(
       try {
         answer = (await post(doFetch, 'player', client, { videoId: request.videoId, contentCheckOk: true, racyCheckOk: true }, visitor)) as typeof answer;
       } catch (err) {
-        // A refusal of the address won't change with the client version (and these were slow: about 8 seconds each).
-        if (refusesAddress(err)) return { ok: false, error: err.message, turnedAway: true };
+        // A refusal of the address won't change with the client version (and these were slow: about 8 seconds each). The session
+        // is not kept: the next song starts a new one.
+        if (refusesAddress(err)) {
+          session.visitor = undefined;
+          return { ok: false, error: err.message, turnedAway: true };
+        }
         if (!(err instanceof HttpError)) throw err;
         // A retired client version answers with an error, and the next one may still work, as on the host.
         problem = err.message;
@@ -196,7 +227,10 @@ export async function relaySong(
       const status = answer?.playabilityStatus?.status;
       if (status !== 'OK') {
         problem = answer?.playabilityStatus?.reason || status || 'no reason given';
-        if (/not a bot/i.test(problem)) turnedAway = true;
+        if (/not a bot/i.test(problem)) {
+          turnedAway = true;
+          session.visitor = undefined;
+        }
         continue;
       }
       const format = pickAudio(answer.streamingData?.adaptiveFormats ?? []);
@@ -243,27 +277,45 @@ export async function relaySong(
 const nameOf = (key: string): string => key.slice(RELAY_REQUESTS.length).replace(/\.json$/, '');
 
 /**
- * Answers one request the host left in yt/req/: reads it, removes it, gets the song, and leaves the outcome in yt/res/.
- * Never throws; whatever goes wrong becomes the outcome, so the host is never left waiting on a failure.
+ * What a request's name asks for, when the host wrote it there ("<video id>-<random>-<most bytes, 0 for no limit>"):
+ * then the request needn't be read. Undefined for a name from a host before that, whose request is read instead.
  */
-export async function handleRelayRequest(key: string, deps: { bucket: RelayBucket; fetch: typeof fetch; log?: (line: string) => void }): Promise<RelayResult | undefined> {
+export function requestNamed(name: string): RelayRequest | undefined {
+  const match = /^([\w-]{11})-[0-9a-f]{8}-(\d{1,12})$/.exec(name);
+  if (!match) return undefined;
+  const maxBytes = Number(match[2]);
+  return { videoId: match[1]!, ...(maxBytes > 0 ? { maxBytes } : {}) };
+}
+
+/**
+ * Answers one request the host left in yt/req/: gets the song, and leaves the outcome in yt/res/. A request whose name says
+ * what it asks for is not read (the host removes it, with the rest, once it has the song); an older one is read and removed.
+ * `createdAt` is when R2 says the request was left (its notice's eventTime), for how long it waited. Never throws; whatever
+ * goes wrong becomes the outcome, so the host is never left waiting on a failure.
+ */
+export async function handleRelayRequest(
+  key: string,
+  deps: { bucket: RelayBucket; fetch: typeof fetch; log?: (line: string) => void; createdAt?: number | undefined; session?: RelaySession },
+): Promise<RelayResult | undefined> {
   if (!key.startsWith(RELAY_REQUESTS) || !key.endsWith('.json')) return undefined;
   const name = nameOf(key);
   if (!/^[\w-]{1,80}$/.test(name)) return undefined;
   const started = Date.now();
-  const object = await deps.bucket.get(key);
-  if (!object) return undefined; // answered already (a repeated notification)
-  // R2's notice and the queue: from when the host left the request to when this started on it.
-  const queuedMs = object.uploaded instanceof Date ? Math.max(0, started - object.uploaded.getTime()) : undefined;
+  let request = requestNamed(name);
+  let queuedMs = deps.createdAt !== undefined && Number.isFinite(deps.createdAt) ? Math.max(0, started - deps.createdAt) : undefined;
   const steps = { sessionMs: 0, playerMs: 0, linkMs: 0, storeMs: 0 };
   let result: RelayResult;
   try {
-    const request = JSON.parse(await object.text()) as Partial<RelayRequest>;
-    await deps.bucket.delete(key);
-    result = await relaySong(
-      { videoId: String(request.videoId ?? ''), ...(typeof request.maxBytes === 'number' && request.maxBytes > 0 ? { maxBytes: request.maxBytes } : {}) },
-      { fetch: deps.fetch, bucket: deps.bucket, audioKey: `${RELAY_AUDIO}${name}`, timing: steps },
-    );
+    if (!request) {
+      const object = await deps.bucket.get(key);
+      if (!object) return undefined; // answered already (a repeated notification)
+      // R2's notice and the queue: from when the host left the request to when this started on it.
+      if (queuedMs === undefined && object.uploaded instanceof Date) queuedMs = Math.max(0, started - object.uploaded.getTime());
+      const body = JSON.parse(await object.text()) as Partial<RelayRequest>;
+      await deps.bucket.delete(key);
+      request = { videoId: String(body.videoId ?? ''), ...(typeof body.maxBytes === 'number' && body.maxBytes > 0 ? { maxBytes: body.maxBytes } : {}) };
+    }
+    result = await relaySong(request, { fetch: deps.fetch, bucket: deps.bucket, audioKey: `${RELAY_AUDIO}${name}`, timing: steps, ...(deps.session ? { session: deps.session } : {}) });
   } catch (err) {
     result = { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

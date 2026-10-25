@@ -392,7 +392,9 @@ describe('albums on YouTube Music', () => {
         const song = replies.find((reply) => reply.kind === 'text' && reply.postback?.startsWith('play:'));
         assert.ok(song?.kind === 'text' && song.text === `Blue Horizon — ${OWLS}`, text);
         const sent = await bot.handle({ from: 'u', messageId: 'm', postback: song.postback! });
-        assert.deepEqual(sent.at(-1), { kind: 'audio', url: youTube.trackUrl('aaaaaaaaaa1'), title: `${OWLS} — Blue Horizon` }, text);
+        const audio = sent.at(-1);
+        assert.ok(audio?.kind === 'audio');
+        assert.deepEqual([audio.url, audio.title], [youTube.trackUrl('aaaaaaaaaa1'), `${OWLS} — Blue Horizon`], text);
       }
     });
 
@@ -433,7 +435,9 @@ describe('sending an album as a zip', () => {
   let inFlight = 0;
   let mostInFlight = 0;
 
-  function makeRunner(options: { maxFileBytes?: number; noFiles?: boolean; failSong?: string; downloadsAhead?: number; spoolDir?: string } = {}) {
+  function makeRunner(
+    options: { maxFileBytes?: number; noFiles?: boolean; failSong?: string; downloadsAhead?: number; albumDownloads?: number; spoolDir?: string; memoryRoom?: () => boolean; turnedAway?: string } = {},
+  ) {
     events = [];
     inFlight = 0;
     mostInFlight = 0;
@@ -479,7 +483,8 @@ describe('sending an album as a zip', () => {
         mostInFlight = Math.max(mostInFlight, inFlight);
         try {
           if (options.failSong && url.endsWith(options.failSong)) throw new Error('boom');
-          return await audio.fetchAudio(url, title);
+          const file = await audio.fetchAudio(url, title);
+          return options.turnedAway && url.endsWith(options.turnedAway) ? { ...file, timing: { turnedAway: 1 } } : file;
         } finally {
           inFlight -= 1;
           events.push(`got ${name}`);
@@ -489,6 +494,8 @@ describe('sending an album as a zip', () => {
       log: () => {},
       ...(options.maxFileBytes !== undefined ? { maxFileBytes: options.maxFileBytes } : {}),
       ...(options.downloadsAhead !== undefined ? { downloadsAhead: options.downloadsAhead } : {}),
+      ...(options.albumDownloads !== undefined ? { albumDownloads: options.albumDownloads } : {}),
+      ...(options.memoryRoom ? { memoryRoom: options.memoryRoom } : {}),
       ...(options.spoolDir !== undefined ? { spoolDir: options.spoolDir } : {}),
     });
   }
@@ -541,7 +548,7 @@ describe('sending an album as a zip', () => {
     // Render's settings, scaled down: one download at a time, and two of these songs to a zip.
     const spoolDir = mkdtempSync(join(tmpdir(), 'album-spool-test-'));
     try {
-      const runner = makeRunner({ maxFileBytes: 8_700, downloadsAhead: 1, spoolDir });
+      const runner = makeRunner({ maxFileBytes: 8_700, albumDownloads: 1, spoolDir });
       await ask(runner, 'album shabbuson');
       assert.deepEqual(events, [
         'get Opening',
@@ -560,11 +567,52 @@ describe('sending an album as a zip', () => {
     }
   });
 
-  test('a bigger host downloads a few ahead, but never more than it is told', async () => {
-    const runner = makeRunner({ downloadsAhead: 2 });
-    await ask(runner, 'album shabbuson');
-    assert.equal(mostInFlight, 2);
-    assert.deepEqual(readZip(matrix.uploads[0]!.bytes).map((entry) => entry.name), ['01 Opening.m4a', '02 הנחת תפילין.m4a', '05 Closing.m4a']);
+  test('an album’s songs download a few at a time (three unless told), each to disk as it comes, and the zip is still in album order', async () => {
+    for (const [told, most] of [
+      [undefined, 3],
+      [2, 2],
+    ] as const) {
+      const runner = makeRunner(told === undefined ? {} : { albumDownloads: told });
+      await ask(runner, 'album shabbuson');
+      assert.equal(mostInFlight, most);
+      assert.deepEqual(readZip(matrix.uploads.at(-1)!.bytes).map((entry) => entry.name), ['01 Opening.m4a', '02 הנחת תפילין.m4a', '05 Closing.m4a']);
+    }
+  });
+
+  test('with no memory to spare, or once YouTube has turned the relay away, the rest of an album comes one at a time', async () => {
+    const tight = makeRunner({ memoryRoom: () => false });
+    await ask(tight, 'album shabbuson');
+    assert.equal(mostInFlight, 1, 'one download always goes, so the album never stalls');
+    assert.equal(readZip(matrix.uploads.at(-1)!.bytes).length, 3);
+
+    // Six songs, three at a time; the first comes quickly, after YouTube turned the relay away once.
+    const songs = Array.from({ length: 6 }, (_, i) => ({ number: i + 1, title: `Song ${i + 1}`, url: `https://x.test/${i + 1}` }));
+    let inFlight = 0;
+    let firstIn = false;
+    let mostAfter = 0;
+    const matrixClient = new MatrixClient({ token: matrix.token, homeserver: matrix.url });
+    const runner = createRunner({
+      chat: matrixClient,
+      bot: { handle: async () => [{ kind: 'album', title: 'Six', artist: 'Band', songs }] },
+      chatID: matrix.roomId,
+      albumDownloads: 3,
+      fetchAudio: async (url) => {
+        inFlight += 1;
+        if (firstIn) mostAfter = Math.max(mostAfter, inFlight);
+        const first = url.endsWith('/1');
+        await new Promise((resolve) => setTimeout(resolve, first ? 5 : 30));
+        inFlight -= 1;
+        firstIn ||= first;
+        return { data: new Blob(['x']), fileName: 'x.m4a', mimeType: 'audio/mp4', bytes: 1, ...(first ? { timing: { turnedAway: 1 } } : {}) };
+      },
+      pollMs: 20,
+      log: () => {},
+    });
+    await runner.prime();
+    matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'six' });
+    await runner.tick();
+    assert.equal(mostAfter, 1, 'after the turn-away, a new download starts only once the others are in');
+    assert.equal(readZip(matrix.uploads.at(-1)!.bytes).length, 6);
   });
 
   test('a song that cannot be had is left out of the zip, and the chat is told', async () => {

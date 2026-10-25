@@ -119,7 +119,13 @@ export async function checkCloud(options: CheckOptions): Promise<CheckResult[]> 
   if (Array.isArray(s.problems) && s.problems.length > 0) add('No problems reported', false, s.problems.map((p: { message: string }) => p.message).join(' | '), 'These are the same problems the bot emails you about.');
   else add('No problems reported', true, 'none');
   if (s.oneDrive) add('Songs are saved to OneDrive', s.oneDrive.connected === true, s.oneDrive.connected ? `${s.oneDrive.savedThisMonthMb} MB saved this month${s.oneDrive.monthlyLimitMb ? ` of ${s.oneDrive.monthlyLimitMb} MB allowed` : ''}` : 'not signed in', `Open ${base}/pair and press Sign in to OneDrive (step 5).`);
-  add('Outbound traffic this month', (s.sentThisMonthMb ?? 0) < 3500, `${s.sentThisMonthMb ?? 0} MB of songs sent (Render's free plan includes about 5,000 MB in total)`, 'Close to the monthly limit: lower ONEDRIVE_MAX_MB_PER_MONTH, or move to a paid plan.');
+  const traffic = (s.sentThisMonthMb ?? 0) + (s.oneDrive?.savedThisMonthMb ?? 0);
+  add(
+    'Outbound traffic this month',
+    traffic < 3500,
+    `${traffic} MB: ${s.sentThisMonthMb ?? 0} MB of songs sent${s.oneDrive ? ` and ${s.oneDrive.savedThisMonthMb ?? 0} MB saved to OneDrive` : ''} (Render's free plan includes about 5,000 MB in total)`,
+    'Close to the monthly limit: lower ONEDRIVE_MAX_MB_PER_MONTH, or send fewer albums until the month is over.',
+  );
 
   if (options.sendTestAlert) {
     const alert = await ask(`${base}/admin/test-alert`, { method: 'POST', headers: auth });

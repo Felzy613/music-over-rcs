@@ -7,7 +7,8 @@ import { s3FromEnv, type S3 } from './s3.ts';
 // automated client is challenged on workers.dev), so the request goes through the bucket: this leaves yt/req/<key>.json,
 // the Worker (told by R2 through the mors-yt queue; cloudflare/youtube.ts) downloads the song into yt/audio/<key> and
 // leaves the outcome in yt/res/<key>.json, and this collects the audio and cleans up. Search, albums and the whitelist
-// stay on the host; only the audio comes this way.
+// stay on the host; only the audio comes this way. A request's name says what it asks for ("<video id>-<random>-<most
+// bytes>"), so the Worker needn't read it first; its body says the same, for a Worker from before that (deployed apart).
 
 export interface RelayedAudio {
   data: Uint8Array;
@@ -16,6 +17,8 @@ export interface RelayedAudio {
   bytes: number;
   /** Where the time went, for the host's `song:` line (see `relayTiming`). */
   timing?: string;
+  /** How many times YouTube turned Cloudflare away before the song came. */
+  turnedAway?: number;
 }
 
 /** The Worker's own account of a request (cloudflare/youtube.ts `RelayTiming`), as far as it is there. */
@@ -64,7 +67,7 @@ export type YouTubeRelay = (videoId: string, options?: { maxBytes?: number }) =>
 export interface YouTubeRelayOptions {
   /** How long to wait for the Worker's answer before giving up (default 90 s). */
   timeoutMs?: number;
-  /** How soon to look for it first (default 750 ms); each later look waits half as long again, up to 3 s. */
+  /** How often to look for the Worker's answer (default 400 ms): a song is usually ready within a few seconds. */
   pollMs?: number;
   /** How long to wait before each new ask when YouTube turned Cloudflare away (default RETRY_WAITS_MS). */
   retryWaitsMs?: number[];
@@ -88,15 +91,14 @@ class TurnedAway extends Error {}
 
 export function createYouTubeRelay(bucket: Pick<S3, 'put' | 'get' | 'getBytes' | 'delete'>, options: YouTubeRelayOptions = {}): YouTubeRelay {
   const timeout = options.timeoutMs ?? 90_000;
-  const pollMs = options.pollMs ?? 750;
+  const pollMs = options.pollMs ?? 400;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const once = async (videoId: string, maxBytes: number | undefined): Promise<RelayedAudio> => {
     if (!/^[\w-]{11}$/.test(videoId)) throw new Error("that isn't a YouTube song");
-    const name = `${videoId}-${randomBytes(4).toString('hex')}`;
+    const name = `${videoId}-${randomBytes(4).toString('hex')}-${maxBytes ?? 0}`;
     const keys = { request: `${REQUESTS}${name}.json`, result: `${RESULTS}${name}.json`, audio: `${AUDIO}${name}` };
     const started = now();
-    let wait = pollMs;
     try {
       await bucket.put(keys.request, JSON.stringify({ videoId, ...(maxBytes !== undefined ? { maxBytes } : {}) }));
       const put = now();
@@ -121,20 +123,21 @@ export function createYouTubeRelay(bucket: Pick<S3, 'put' | 'get' | 'getBytes' |
           return { data: audio.data, type: typeof result.type === 'string' && result.type ? result.type : 'audio/mp4', bytes: audio.data.length, timing };
         }
         if (now() - started >= timeout) throw new Error(`the relay gave no answer within ${Math.round(timeout / 1000)} seconds`);
-        await sleep(wait);
-        // An album's songs come one after another, so a slow answer is looked for less often (fewer reads of the bucket).
-        wait = Math.min(Math.max(pollMs, 3000), Math.round(wait * 1.5));
+        // Every look is a read of the bucket, far inside R2's free ten million a month, and a song found sooner is sent sooner.
+        await sleep(pollMs);
       }
     } finally {
-      // Whatever happened, nothing of this request stays in the bucket (the Worker sweeps anything missed after an hour).
-      await Promise.all(Object.values(keys).map((key) => bucket.delete(key).catch(() => {})));
+      // Whatever happened, nothing of this request stays in the bucket (the Worker sweeps anything missed after an hour). The song
+      // doesn't wait for the cleaning up.
+      void Promise.all(Object.values(keys).map((key) => bucket.delete(key).catch(() => {})));
     }
   };
   const waits = options.retryWaitsMs ?? RETRY_WAITS_MS;
   return async (videoId, { maxBytes } = {}) => {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await once(videoId, maxBytes);
+        const audio = await once(videoId, maxBytes);
+        return attempt > 0 ? { ...audio, turnedAway: attempt, timing: `turned away ${attempt}× first, ${audio.timing ?? ''}` } : audio;
       } catch (err) {
         if (!(err instanceof TurnedAway)) throw err;
         const wait = waits[attempt];

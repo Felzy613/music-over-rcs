@@ -841,10 +841,12 @@ export function createBot(deps: BotDeps): Bot {
 
   // --- sending ---
 
-  async function play(found: Track): Promise<Reply[]> {
-    const [check, filled] = await Promise.all([step('check', deps.checkAudio(found.url)), deps.finder?.fillIn ? step('fill-in', deps.finder.fillIn(found).catch(() => undefined)) : undefined]);
-    if (!check.ok) return [say(`I can't send "${describe(found)}": ${check.reason}.`)];
-    const track = filled ?? found;
+  async function play(track: Track): Promise<Reply[]> {
+    // The song's album is looked up (its number on it, its cover) while the song downloads, not before: the card waits for the
+    // cover, and the file's tags for the album, but the download starts at once.
+    const filling = deps.finder?.fillIn ? step('fill-in', deps.finder.fillIn(track).catch(() => undefined)) : undefined;
+    const check = await step('check', deps.checkAudio(track.url));
+    if (!check.ok) return [say(`I can't send "${describe(track)}": ${check.reason}.`)];
     try {
       deps.onPlay?.(track);
     } catch {
@@ -852,8 +854,10 @@ export function createBot(deps: BotDeps): Bot {
     }
     // Two messages: the cover with the song's name on it, then the song. Without a cover, the name as text.
     const replies: Reply[] = [
-      track.cover ? { kind: 'image', url: track.cover, caption: { title: track.title, artist: track.artist } } : say(`🎵 ${describe(track)}`),
-      { kind: 'audio', url: track.url, title: describe(track) },
+      track.cover
+        ? { kind: 'image', url: track.cover, caption: { title: track.title, artist: track.artist }, ...(filling ? { better: filling.then((filled) => filled?.cover) } : {}) }
+        : say(`🎵 ${describe(track)}`),
+      { kind: 'audio', url: track.url, title: describe(track), ...(filling ? { after: filling } : {}) },
     ];
     let followed: string[] = [];
     try {

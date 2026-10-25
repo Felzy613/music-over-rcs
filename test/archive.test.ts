@@ -140,6 +140,23 @@ describe('saving sent songs to the cloud folder', () => {
     assert.equal(drive.uploads.length, 1);
   });
 
+  test('a copy waits while a song or an album is on its way to the chat, and goes once nothing is; never more than ten minutes', async () => {
+    const drive = new FakeDrive();
+    const waits: number[] = [];
+    let sending = 3;
+    const archive = new SongArchive({ drive, state: new Catalog(':memory:'), placeOf: (_u, a) => `A/B/${a.fileName}`, delayMs: 0, busy: () => sending-- > 0, sleep: async (ms) => void waits.push(ms) });
+    archive.offer('https://x.test/1', song('A - one.mp3'));
+    await archive.idle();
+    assert.deepEqual(waits, [0, 2000, 2000, 2000]);
+    assert.equal(drive.uploads.length, 1);
+    const stuck = new SongArchive({ drive, state: new Catalog(':memory:'), placeOf: (_u, a) => `A/C/${a.fileName}`, delayMs: 0, busy: () => true, sleep: async (ms) => void waits.push(ms) });
+    waits.length = 0;
+    stuck.offer('https://x.test/2', song('A - two.mp3'));
+    await stuck.idle();
+    assert.equal(waits.filter((ms) => ms === 2000).length, 300, 'ten minutes of looks, then it goes anyway');
+    assert.equal(drive.uploads.length, 2);
+  });
+
   test('a big song waits longer: half a second more for each MB, up to 30 s, while the bridge and the homeserver hand it on to Google', async () => {
     const MB = 1048576;
     const delayFor = async (songMb: number): Promise<number> => {

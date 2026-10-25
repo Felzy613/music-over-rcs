@@ -34,6 +34,11 @@ export interface SongArchiveOptions {
    * was being relayed by them at the very moment its copy to OneDrive began, and the host ran out of memory).
    */
   delayMs?: number | undefined;
+  /**
+   * Whether a song or an album is on its way to the chat right now: a copy waits until it isn't (up to BUSY_WAIT_MS), so the upload
+   * never competes with the songs being sent for the host's bandwidth and memory.
+   */
+  busy?: (() => boolean) | undefined;
   /** Test hook: a wait. */
   sleep?: ((ms: number) => Promise<void>) | undefined;
   /** Told when saving songs starts failing (with what is wrong) and when it works again (undefined). */
@@ -52,6 +57,9 @@ const MEMORY_HEADROOM = 80 * 1048576;
 const SETTLE_MS = 5000;
 /** Failed saves in a row before it is called a problem. */
 const FAILURES_BEFORE_PROBLEM = 3;
+/** The longest a copy waits for the chat's sending to be over before it goes anyway, and how often it looks. */
+const BUSY_WAIT_MS = 10 * 60_000;
+const BUSY_CHECK_MS = 2000;
 
 /**
  * Saves each song the bot sends to a cloud folder, tagged and sorted like a music library, without making the person who
@@ -103,8 +111,10 @@ export class SongArchive {
   async #work(): Promise<void> {
     for (let item = this.#queue.shift(); item; item = this.#queue.shift()) {
       try {
+        const sleep = this.#options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
         const settle = this.#options.delayMs ?? Math.min(30_000, SETTLE_MS + Math.round(item.audio.bytes / 1048576) * 500);
-        await (this.#options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(settle);
+        await sleep(settle);
+        for (let waited = 0; waited < BUSY_WAIT_MS && this.#options.busy?.(); waited += BUSY_CHECK_MS) await sleep(BUSY_CHECK_MS);
         await this.#save(item.url, item.audio);
         this.#failures = 0;
         if (this.#told) {

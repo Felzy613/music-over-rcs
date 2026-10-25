@@ -122,6 +122,8 @@ export interface RelayedSong {
   bytes: number;
   /** Where the time went (the relay's parts), for the host's `song:` line. */
   timing?: string | undefined;
+  /** How many times YouTube turned the relay away before the song came. */
+  turnedAway?: number | undefined;
 }
 
 /**
@@ -597,7 +599,8 @@ export class YouTubeMusic {
       this.#turnedAwayUntil = 0;
       this.#log('YouTube Music lets the relay through again; YouTube songs are back');
     }
-    return { data, fileName: fileNameFor(title, new URL(this.trackUrl(videoId)), type), mimeType: type, bytes, ...(song.timing ? { timing: { via: song.timing } } : {}) };
+    const timing = { ...(song.timing ? { via: song.timing } : {}), ...(song.turnedAway ? { turnedAway: song.turnedAway } : {}) };
+    return { data, fileName: fileNameFor(title, new URL(this.trackUrl(videoId)), type), mimeType: type, bytes, ...(Object.keys(timing).length > 0 ? { timing } : {}) };
   }
 
   /**

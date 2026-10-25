@@ -107,6 +107,8 @@ interface ChatSettings {
   songGapMs: number;
   /** Songs downloading at once, ahead of their turn. Left out for the runner's own default. */
   downloadsAhead?: number;
+  /** An album's songs downloading at once (ALBUM_DOWNLOADS, 1 to 5). Left out for the runner's own default, 3. */
+  albumDownloads?: number;
   /**
    * The bridge says when Google Messages has each message the bot sent (BRIDGE_STATUS_EVENTS=1, which the cloud host sets
    * because it sets the bridge up that way), so the bot's timelines can say when that was.
@@ -142,6 +144,10 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
   if (downloadsAhead !== undefined && !(Number.isInteger(downloadsAhead) && downloadsAhead >= 1 && downloadsAhead <= 10)) {
     problems.push(`DOWNLOADS_AHEAD must be a whole number from 1 to 10 (got "${aheadText}")`);
   }
+  const albumText = env.ALBUM_DOWNLOADS?.trim();
+  const albumDownloads = albumText ? Number(albumText) : undefined;
+  const albumOk = albumDownloads !== undefined && Number.isInteger(albumDownloads) && albumDownloads >= 1 && albumDownloads <= 5;
+  if (albumDownloads !== undefined && !albumOk) problems.push(`ALBUM_DOWNLOADS must be a whole number from 1 to 5 (got "${albumText}")`);
   return {
     pollMs,
     maxDownloadMb,
@@ -153,6 +159,7 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
     quiet: quiet instanceof Error ? undefined : quiet,
     songGapMs: songGapMs instanceof Error ? 0 : songGapMs,
     ...(downloadsAhead !== undefined && downloadsAhead >= 1 && downloadsAhead <= 10 ? { downloadsAhead } : {}),
+    ...(albumOk ? { albumDownloads } : {}),
     sendStatus: /^(1|on|true|yes)$/i.test(env.BRIDGE_STATUS_EVENTS?.trim() ?? ''),
   };
 }

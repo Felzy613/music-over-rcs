@@ -767,6 +767,37 @@ describe('runner over Matrix (the bridge case)', () => {
     });
   });
 
+  test('a song’s card is drawn with its album’s cover once that is looked up, while the song is already downloading', async () => {
+    const blue = catalog.search('blue horizon', 1)[0]!;
+    const steps: string[] = [];
+    let found!: (url: string) => void;
+    const cover = new Promise<string>((resolve) => (found = resolve));
+    const runner = createRunner({
+      chat: new MatrixClient({ token: mock.token, homeserver: mock.url }),
+      bot: {
+        handle: async (): Promise<Reply[]> => [
+          { kind: 'image', url: 'https://img.test/video.jpg', caption: { title: 'Blue Horizon', artist: 'The Night Owls' }, better: cover },
+          { kind: 'audio', url: blue.url, title: 'The Night Owls — Blue Horizon', after: cover },
+        ],
+      },
+      chatID: mock.roomId,
+      fetchAudio: async (url, title, extra) => {
+        steps.push(`download (waits for the album: ${Boolean(extra?.after)})`);
+        setTimeout(() => found('https://img.test/album.jpg'), 10);
+        return fetchAudio(url, title);
+      },
+      prepareImage: async (picture: Picture): Promise<PreparedPicture> => {
+        steps.push(`card ${picture.kind === 'image' ? picture.url : ''}`);
+        return { image: { data: new Blob(['jpeg']), fileName: 'card.jpg', mimeType: 'image/jpeg', bytes: 4, sourceUrl: picture.kind === 'image' ? picture.url : '' }, captioned: true };
+      },
+      pollMs: 20,
+    });
+    await runner.prime();
+    typedOnPhone('go');
+    await runner.tick();
+    assert.deepEqual(steps, ['download (waits for the album: true)', 'card https://img.test/album.jpg']);
+  });
+
   test('a menu’s 📦 line (or 💿, 🎤) coming back from the phone is not taken for a request', async () => {
     const { runner } = makeRunner();
     await runner.prime();
