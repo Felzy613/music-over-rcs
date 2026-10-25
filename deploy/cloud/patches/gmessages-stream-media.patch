@@ -1,5 +1,5 @@
 diff --git a/pkg/connector/handlematrix.go b/pkg/connector/handlematrix.go
-index e33fe9a..b61f327 100644
+index e33fe9a..bc42219 100644
 --- a/pkg/connector/handlematrix.go
 +++ b/pkg/connector/handlematrix.go
 @@ -20,7 +20,9 @@ import (
@@ -12,7 +12,7 @@ index e33fe9a..b61f327 100644
  	"time"
  
  	"github.com/rs/zerolog"
-@@ -239,6 +241,42 @@ func (gc *GMClient) ConvertMatrixMessage(ctx context.Context, msg *bridgev2.Matr
+@@ -239,6 +241,48 @@ func (gc *GMClient) ConvertMatrixMessage(ctx context.Context, msg *bridgev2.Matr
  }
  
  func (gc *GMClient) reuploadMedia(ctx context.Context, content *event.MessageEventContent) (*gmproto.MediaContent, error) {
@@ -27,6 +27,9 @@ index e33fe9a..b61f327 100644
 +	}
 +	var resp *gmproto.MediaContent
 +	var uploadErr error
++	// Where a big file's time goes (the bot's timelines read this line): reading it from the homeserver, then
++	// encrypting it and sending it to Google.
++	start := time.Now()
 +	err := gc.Main.br.Bot.DownloadMediaToFile(ctx, content.URL, content.File, false, func(file *os.File) error {
 +		info, err := file.Stat()
 +		if err != nil {
@@ -40,7 +43,10 @@ index e33fe9a..b61f327 100644
 +				return err
 +			}
 +		}
++		fetched := time.Now()
 +		resp, uploadErr = gc.Client.UploadMediaStream(file, info.Size(), fileName, content.Info.MimeType)
++		zerolog.Ctx(ctx).Info().Msgf("media to Google: %.1f MB, homeserver %.1fs, encrypt+upload %.1fs",
++			float64(info.Size())/(1<<20), fetched.Sub(start).Seconds(), time.Since(fetched).Seconds())
 +		return uploadErr
 +	})
 +	if uploadErr != nil {

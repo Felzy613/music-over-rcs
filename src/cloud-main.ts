@@ -14,6 +14,7 @@ import { archivedThisMonth, sentThisMonth } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { parseCloudBudget } from './config.ts';
 import { MemoryWatch } from './cloud/memory.ts';
+import { recentTimelines } from './timeline.ts';
 
 // The bot on a cloud host (Render): where matrix-main.ts assumes a Mac with the homeserver and bridge already set up and
 // signed in, this starts with nothing but the services running beside it. It opens the web door first (the host wants a
@@ -107,6 +108,8 @@ const web = createCloudWeb({
       problems,
       tracks: catalog.count(),
       sentThisMonthMb: Math.round(sentThisMonth(catalog) / 1048576),
+      // The last few requests' timelines (and songs' and albums'), so a check doesn't need a log search.
+      timings: recentTimelines.list(),
       ...(oneDrive ? { oneDrive: oneDriveReport() } : {}),
       ...(bucket ? { edge: await edgeReport() } : {}),
     };
@@ -189,6 +192,8 @@ try {
   if (!stopping && room) {
     process.env.MATRIX_ACCESS_TOKEN = token;
     process.env.MATRIX_ROOM_ID = room;
+    // The bridge was set up to say when Google Messages has each message (matrix.message_status_events, provision.ts).
+    process.env.BRIDGE_STATUS_EVENTS = '1';
     phase = 'bot-starting';
     // The bot proper: this returns once it is up (it signs in, joins the chat and starts answering), and it runs until the process ends.
     await import('./matrix-main.ts');

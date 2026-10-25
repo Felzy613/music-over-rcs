@@ -120,6 +120,8 @@ export interface RelayedSong {
   /** "audio/mp4" */
   type: string;
   bytes: number;
+  /** Where the time went (the relay's parts), for the host's `song:` line. */
+  timing?: string | undefined;
 }
 
 /**
@@ -595,7 +597,7 @@ export class YouTubeMusic {
       this.#turnedAwayUntil = 0;
       this.#log('YouTube Music lets the relay through again; YouTube songs are back');
     }
-    return { data, fileName: fileNameFor(title, new URL(this.trackUrl(videoId)), type), mimeType: type, bytes };
+    return { data, fileName: fileNameFor(title, new URL(this.trackUrl(videoId)), type), mimeType: type, bytes, ...(song.timing ? { timing: { via: song.timing } } : {}) };
   }
 
   /**

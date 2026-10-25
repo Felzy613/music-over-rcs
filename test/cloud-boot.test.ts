@@ -17,7 +17,7 @@ const ENV = {
   HOME: '/root',
   TZ: 'America/New_York',
 };
-const EXAMPLE = `homeserver:\n    address: https://example.com\n    domain: example.com\nappservice:\n    address: http://localhost:29336\n    hostname: 0.0.0.0\n    port: 29336\n    as_token: "x"\n    hs_token: "y"\ndatabase:\n    type: "postgres"\n    uri: postgres://x\nprovisioning:\n    allow_matrix_auth: false\nnetwork:\n    initial_chat_sync_count: 25\nbackfill:\n    enabled: true\nlogging:\n    min_level: debug\n    writers:\n        - type: stdout\nbridge:\n    permissions:\n        "*": relay\n`;
+const EXAMPLE = `homeserver:\n    address: https://example.com\n    domain: example.com\nappservice:\n    address: http://localhost:29336\n    hostname: 0.0.0.0\n    port: 29336\n    as_token: "x"\n    hs_token: "y"\ndatabase:\n    type: "postgres"\n    uri: postgres://x\nprovisioning:\n    allow_matrix_auth: false\nnetwork:\n    initial_chat_sync_count: 25\nbackfill:\n    enabled: true\nmatrix:\n    message_status_events: false\nlogging:\n    min_level: debug\n    writers:\n        - type: stdout\nbridge:\n    permissions:\n        "*": relay\n`;
 
 /** A signing key as Synapse writes it: algorithm, version, base64 seed. */
 const MADE_KEY = 'ed25519 a_MADE c2VlZHNlZWRzZWVkc2VlZHNlZWRzZWVkc2Vl\n';

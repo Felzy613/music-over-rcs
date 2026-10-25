@@ -505,8 +505,10 @@ export function taggedFetch(
 ): (url: string, title?: string) => Promise<DownloadedAudio> {
   return async (url, title) => {
     const audio = await fetchAudio(url, title);
+    const start = performance.now();
     try {
-      return await tagSongBlob(url, audio, options);
+      const tagged = await tagSongBlob(url, audio, options);
+      return tagged === audio ? audio : { ...tagged, timing: { ...audio.timing, tagMs: performance.now() - start } };
     } catch (err) {
       options.log?.(`could not write the tags into ${audio.fileName}: ${err instanceof Error ? err.message : String(err)}`);
       return audio;

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { artistKey, splitArtists } from './artists.ts';
 import type { AudioCheck } from './audio-check.ts';
 import type { ListedTrack } from './catalog.ts';
@@ -8,6 +9,7 @@ import { seasonOn } from './library/seasons.ts';
 import { parseQuery, tokenize } from './query.ts';
 import { editDistance, fitsAll, namesSong, rankSongs, touchesTitle, wordMatches } from './sources/relevance.ts';
 import { splitTitle } from './sources/titles.ts';
+import { timed, type Trace } from './timeline.ts';
 import type { Chip, Incoming, Reply, Track } from './types.ts';
 
 /** A problem with an outside source whose message is fit to show to the user. */
@@ -162,7 +164,8 @@ export interface Assistant {
 }
 
 export interface Bot {
-  handle(msg: Incoming): Promise<Reply[]>;
+  /** The answer to one message. `trace` hears how long the slow steps took (a search, opening an album), for the host's timeline. */
+  handle(msg: Incoming, trace?: Trace): Promise<Reply[]>;
 }
 
 const MAX_CHOICES = 5;
@@ -471,6 +474,11 @@ function editions(albums: Album[]): Album[] {
   return albums.filter((album) => kept.get(baseTitle(album.title)) === album);
 }
 
+/** The trace of the message being answered (`Bot.handle`), for the steps it takes, wherever they are. */
+const tracing = new AsyncLocalStorage<Trace>();
+/** One slow step of an answer, timed for its trace when it has one. */
+const step = <T>(name: string, work: Promise<T>): Promise<T> => timed(tracing.getStore(), name, work);
+
 export function createBot(deps: BotDeps): Bot {
   const now = deps.now ?? (() => new Date());
   /**
@@ -646,7 +654,7 @@ export function createBot(deps: BotDeps): Bot {
   }
 
   async function play(found: Track): Promise<Reply[]> {
-    const [check, filled] = await Promise.all([deps.checkAudio(found.url), deps.finder?.fillIn?.(found).catch(() => undefined)]);
+    const [check, filled] = await Promise.all([step('check', deps.checkAudio(found.url)), deps.finder?.fillIn ? step('fill-in', deps.finder.fillIn(found).catch(() => undefined)) : undefined]);
     if (!check.ok) return [say(`I can't send "${describe(found)}": ${check.reason}.`)];
     const track = filled ?? found;
     try {
@@ -682,7 +690,7 @@ export function createBot(deps: BotDeps): Bot {
   async function artistView(artistId: string): Promise<Reply[] | undefined> {
     let page: ArtistPage | undefined;
     try {
-      page = await deps.finder?.artist(artistId);
+      page = deps.finder && (await step('artist', deps.finder.artist(artistId)));
     } catch (err) {
       if (!(err instanceof SourceError)) throw err;
       return undefined;
@@ -721,7 +729,7 @@ export function createBot(deps: BotDeps): Bot {
   async function artistAlbums(artistId: string): Promise<Reply[] | undefined> {
     let page: ArtistPage | undefined;
     try {
-      page = await deps.finder?.artist(artistId);
+      page = deps.finder && (await step('artist', deps.finder.artist(artistId)));
     } catch (err) {
       if (!(err instanceof SourceError)) throw err;
       return undefined;
@@ -753,7 +761,7 @@ export function createBot(deps: BotDeps): Bot {
     if (!finder) return undefined;
     let found: Findings;
     try {
-      found = await finder.find(raw);
+      found = await step('zemer', finder.find(raw));
     } catch (err) {
       if (!(err instanceof SourceError)) throw err;
       failures.push({ name: finder.name, message: err.message });
@@ -810,7 +818,7 @@ export function createBot(deps: BotDeps): Bot {
     let found = local;
     if (deps.source) {
       try {
-        found = merge(await deps.source.lookup(raw, MAX_CHOICES), local, MAX_CHOICES);
+        found = merge(await step('music-table', deps.source.lookup(raw, MAX_CHOICES)), local, MAX_CHOICES);
       } catch (err) {
         if (!(err instanceof SourceError)) throw err;
         failures.push({ name: deps.source.name, message: err.message });
@@ -867,11 +875,11 @@ export function createBot(deps: BotDeps): Bot {
     let artist: { artist: ArtistRef; full: boolean } | undefined;
     try {
       if (deps.finder) {
-        const found = await deps.finder.find(raw);
+        const found = await step('zemer', deps.finder.find(raw));
         albums = found.albums;
         artist = namedArtist(found.artists, tokens);
       } else {
-        albums = await deps.albums!.search(raw, MAX_CHOICES);
+        albums = await step('albums', deps.albums!.search(raw, MAX_CHOICES));
       }
     } catch (err) {
       if (!(err instanceof SourceError)) throw err;
@@ -897,7 +905,7 @@ export function createBot(deps: BotDeps): Bot {
     if (!albums) return [say('Albums come from Zemer, which is turned off (YOUTUBE_MUSIC=off).')];
     let opened: Awaited<ReturnType<AlbumSource['open']>>;
     try {
-      opened = await albums.open(id);
+      opened = await step('album', albums.open(id));
     } catch (err) {
       if (!(err instanceof SourceError)) throw err;
       return [say(`I can't send that album: ${err.message}.`)];
@@ -905,7 +913,7 @@ export function createBot(deps: BotDeps): Bot {
     const { album, songs, leftOut } = opened;
     const name = `${album.artist ? `${album.artist} — ` : ''}${album.title}${album.year ? ` (${album.year})` : ''}`;
     // Every song is checked the way a single song is (the list it must be on, its size), so nothing goes that couldn't alone.
-    const checks = await inBatches(songs, ALBUM_CHECKS_AT_ONCE, (song) => deps.checkAudio(song.track.url));
+    const checks = await step('check', inBatches(songs, ALBUM_CHECKS_AT_ONCE, (song) => deps.checkAudio(song.track.url)));
     const sendable = songs.filter((_, i) => checks[i]!.ok);
     const refused = checks.flatMap((check) => (check.ok ? [] : [check.reason]));
     if (sendable.length === 0) {
@@ -937,7 +945,7 @@ export function createBot(deps: BotDeps): Bot {
     if (!albums) return [say('Albums come from Zemer, which is turned off (YOUTUBE_MUSIC=off).')];
     let opened: Awaited<ReturnType<AlbumSource['open']>>;
     try {
-      opened = await albums.open(id);
+      opened = await step('album', albums.open(id));
     } catch (err) {
       if (!(err instanceof SourceError)) throw err;
       return [say(`I can't open that album: ${err.message}.`)];
@@ -977,64 +985,68 @@ export function createBot(deps: BotDeps): Bot {
   };
 
   return {
-    async handle(msg) {
-      if (msg.postback !== undefined) {
-        const all = /^all:(.+)$/s.exec(msg.postback)?.[1];
-        // "all" on a list of albums: one album is a whole zip, so they are not all sent at once.
-        if (all !== undefined && all.split('|').every((item) => item.startsWith('album:'))) return [say('That list is albums; tap 👍 on the one you want and I\'ll send all of it as a zip.')];
-        if (all !== undefined) return playAll(all.split('|'));
-        const albumId = /^album:(.+)$/.exec(msg.postback)?.[1];
-        if (albumId !== undefined) return sendAlbum(albumId);
-        const tracksOf = /^tracks:(.+)$/.exec(msg.postback)?.[1];
-        if (tracksOf !== undefined) return albumSongs(tracksOf);
-        const album = /^post:(.+)$/.exec(msg.postback)?.[1];
-        if (album !== undefined) {
-          const tracks = deps.catalog.postTracks?.(album) ?? [];
-          if (tracks.length === 0) return [say('That album is no longer in the catalog.')];
-          if (tracks.length === 1) return play(tracks[0]!);
-          const shown = tracks.slice(0, 30);
-          // In album order, with the album's own numbers ("01 Intro").
-          const heading = shown[0]!.artist ? `${shortCredit(shown[0]!.artist)} · ${plural(tracks.length, 'song')}` : plural(tracks.length, 'song');
-          return listReplies(
-            heading,
-            shown.map((track) => ({ line: track.title, postback: `play:${track.id}` })),
-            'Tap 👍 on one to get it.',
-            shown.map((track, i) => ({ label: chipLabel(i + 1, track.title), postback: `play:${track.id}` })),
-            LIST_VALID_MS,
-          );
-        }
-        const id = /^play:(\d+)$/.exec(msg.postback)?.[1];
-        if (id === undefined) return [say(HELP_TEXT)];
-        const track = deps.catalog.get(Number(id));
-        return track ? play(track) : [say('That track is no longer in the catalog.')];
-      }
-
-      const whole = (msg.text ?? '').trim();
-      // "jarvis …" goes on whole, however long; it's for the assistant, not a search.
-      const forAssistant = deps.assistant ? afterWord(whole, deps.assistant.word) : undefined;
-      if (forAssistant !== undefined) return ask(forAssistant, msg.messageId);
-      const raw = whole.slice(0, MAX_QUERY_CHARS);
-      const words = tokenize(raw);
-      // Nothing to answer: no words, a greeting or "help", or only single characters (a stray "a", or a "2" with no list to pick from).
-      if (words.every((word) => word.length < 2) || GREETINGS.has(words[0]!)) {
-        return [say(helpText())];
-      }
-      // A new request ends the list "more" was going on with; "more" itself goes on with it.
-      if (!MORE.has(words.join(' '))) more = undefined;
-      const first = FIRST_WORD.exec(raw);
-      if (first && isSearch(first[1]!)) return search(raw.slice(first[0].length).trim());
-      if (first && isZemerOnly(first[1]!)) return searchZemer(raw.slice(first[0].length).trim());
-      if (first && isAlbum(first[1]!)) return albumSearch(raw.slice(first[0].length).trim());
-      // "all" with no list open (the runner answers it when one is).
-      if (ALL_WORDS.has(words.join(' '))) {
-        return [say(`Text ${deps.browse ? '"trending", "new" or ' : ''}"search" and a song first; then "all" sends every song on the list.`)];
-      }
-      const following = followFor(words);
-      if (following) return following;
-      const listed = await browseFor(words);
-      if (listed) return listed;
-      // Not a command: most likely a song's name without "search" in front.
-      return [say(`To look for a song, start with "search":\nsearch ${raw}\n\nText "help" for the other commands.`)];
+    handle(msg, trace) {
+      return trace ? tracing.run(trace, () => answer(msg)) : answer(msg);
     },
   };
+
+  async function answer(msg: Incoming): Promise<Reply[]> {
+    if (msg.postback !== undefined) {
+      const all = /^all:(.+)$/s.exec(msg.postback)?.[1];
+      // "all" on a list of albums: one album is a whole zip, so they are not all sent at once.
+      if (all !== undefined && all.split('|').every((item) => item.startsWith('album:'))) return [say('That list is albums; tap 👍 on the one you want and I\'ll send all of it as a zip.')];
+      if (all !== undefined) return playAll(all.split('|'));
+      const albumId = /^album:(.+)$/.exec(msg.postback)?.[1];
+      if (albumId !== undefined) return sendAlbum(albumId);
+      const tracksOf = /^tracks:(.+)$/.exec(msg.postback)?.[1];
+      if (tracksOf !== undefined) return albumSongs(tracksOf);
+      const album = /^post:(.+)$/.exec(msg.postback)?.[1];
+      if (album !== undefined) {
+        const tracks = deps.catalog.postTracks?.(album) ?? [];
+        if (tracks.length === 0) return [say('That album is no longer in the catalog.')];
+        if (tracks.length === 1) return play(tracks[0]!);
+        const shown = tracks.slice(0, 30);
+        // In album order, with the album's own numbers ("01 Intro").
+        const heading = shown[0]!.artist ? `${shortCredit(shown[0]!.artist)} · ${plural(tracks.length, 'song')}` : plural(tracks.length, 'song');
+        return listReplies(
+          heading,
+          shown.map((track) => ({ line: track.title, postback: `play:${track.id}` })),
+          'Tap 👍 on one to get it.',
+          shown.map((track, i) => ({ label: chipLabel(i + 1, track.title), postback: `play:${track.id}` })),
+          LIST_VALID_MS,
+        );
+      }
+      const id = /^play:(\d+)$/.exec(msg.postback)?.[1];
+      if (id === undefined) return [say(HELP_TEXT)];
+      const track = deps.catalog.get(Number(id));
+      return track ? play(track) : [say('That track is no longer in the catalog.')];
+    }
+
+    const whole = (msg.text ?? '').trim();
+    // "jarvis …" goes on whole, however long; it's for the assistant, not a search.
+    const forAssistant = deps.assistant ? afterWord(whole, deps.assistant.word) : undefined;
+    if (forAssistant !== undefined) return ask(forAssistant, msg.messageId);
+    const raw = whole.slice(0, MAX_QUERY_CHARS);
+    const words = tokenize(raw);
+    // Nothing to answer: no words, a greeting or "help", or only single characters (a stray "a", or a "2" with no list to pick from).
+    if (words.every((word) => word.length < 2) || GREETINGS.has(words[0]!)) {
+      return [say(helpText())];
+    }
+    // A new request ends the list "more" was going on with; "more" itself goes on with it.
+    if (!MORE.has(words.join(' '))) more = undefined;
+    const first = FIRST_WORD.exec(raw);
+    if (first && isSearch(first[1]!)) return search(raw.slice(first[0].length).trim());
+    if (first && isZemerOnly(first[1]!)) return searchZemer(raw.slice(first[0].length).trim());
+    if (first && isAlbum(first[1]!)) return albumSearch(raw.slice(first[0].length).trim());
+    // "all" with no list open (the runner answers it when one is).
+    if (ALL_WORDS.has(words.join(' '))) {
+      return [say(`Text ${deps.browse ? '"trending", "new" or ' : ''}"search" and a song first; then "all" sends every song on the list.`)];
+    }
+    const following = followFor(words);
+    if (following) return following;
+    const listed = await browseFor(words);
+    if (listed) return listed;
+    // Not a command: most likely a song's name without "search" in front.
+    return [say(`To look for a song, start with "search":\nsearch ${raw}\n\nText "help" for the other commands.`)];
+  }
 }

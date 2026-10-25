@@ -1,0 +1,167 @@
+Upstream commit dbbd04de7ec48f8aa9311d32ecd557ce44c630af (mautrix/gmessages main, 2026-10-17, not in v0.2610.0):
+"chatsync: run DM dedup row delete inside its transaction (#103)", by Gerardo Rodriguez, applied to 186284e,
+with a regression test of ours (pkg/connector/chatsync_dedup_test.go).
+
+Why: deduplicateDM's delete ran on the outer context, so on SQLite with _txlock=immediate it waited on another
+connection for the write lock its own transaction held, failed after the 5 s busy timeout, rolled the change back,
+and the error was swallowed, so the same change was tried again on every conversation event. On the cloud host
+(2026-10-20 logs) that held the bridge's write lock about 5 s out of every 5: every other write waited too, and a
+10-line reply reached Google one line per stall. The test takes 5.3 s and fails without the fix, 0.2 s with it.
+
+diff --git a/pkg/connector/chatsync.go b/pkg/connector/chatsync.go
+index 4d59e7c..ee4a5ba 100644
+--- a/pkg/connector/chatsync.go
++++ b/pkg/connector/chatsync.go
+@@ -420,7 +420,7 @@ func (gc *GMClient) deduplicateDM(ctx context.Context, evt *gmproto.Conversation
+ 	ctx = log.WithContext(ctx)
+ 	gc.dmsLock.Lock()
+ 	defer gc.dmsLock.Unlock()
+-	insertNewConv := func(extraTasks func() error, cacheClear func()) error {
++	insertNewConv := func(extraTasks func(ctx context.Context) error, cacheClear func()) error {
+ 		conv := &gmdb.DirectConversation{
+ 			LoginID:       gc.UserLogin.ID,
+ 			PhoneNumber:   phoneNumber,
+@@ -429,7 +429,7 @@ func (gc *GMClient) deduplicateDM(ctx context.Context, evt *gmproto.Conversation
+ 		}
+ 		err := gc.Main.br.DB.DoTxn(ctx, nil, func(ctx context.Context) error {
+ 			if extraTasks != nil {
+-				err := extraTasks()
++				err := extraTasks(ctx)
+ 				if err != nil {
+ 					return err
+ 				}
+@@ -441,7 +441,7 @@ func (gc *GMClient) deduplicateDM(ctx context.Context, evt *gmproto.Conversation
+ 			return nil
+ 		})
+ 		if err != nil {
+-			return nil
++			return err
+ 		}
+ 		if cacheClear != nil {
+ 			cacheClear()
+@@ -488,7 +488,7 @@ func (gc *GMClient) deduplicateDM(ctx context.Context, evt *gmproto.Conversation
+ 				Time("old_last_message_ts", byPhone.LastMessageTS.Time).
+ 				Stringer("result", res).
+ 				Msg("Re-ID'd DM portal to match new conversation ID")
+-			return insertNewConv(func() error {
++			return insertNewConv(func(ctx context.Context) error {
+ 				err = gc.Main.DB.DirectConversation.Delete(ctx, byPhone)
+ 				if err != nil {
+ 					return fmt.Errorf("failed to delete old DM conversation row after conversation ID change: %w", err)
+@@ -508,7 +508,7 @@ func (gc *GMClient) deduplicateDM(ctx context.Context, evt *gmproto.Conversation
+ 		log.Warn().
+ 			Str("old_phone_number", byID.PhoneNumber).
+ 			Msg("Phone number of DM conversation changed")
+-		return insertNewConv(func() error {
++		return insertNewConv(func(ctx context.Context) error {
+ 			err := gc.Main.DB.DirectConversation.Delete(ctx, byID)
+ 			if err != nil {
+ 				return fmt.Errorf("failed to delete old DM conversation row after phone number change: %w", err)
+@@ -523,7 +523,7 @@ func (gc *GMClient) deduplicateDM(ctx context.Context, evt *gmproto.Conversation
+ 			Str("old_phone_number", byID.PhoneNumber).
+ 			Str("old_portal_id_of_new_phone", string(byPhone.PortalID)).
+ 			Msg("Phone number of DM conversation changed and a conflicting conversation already exists")
+-		return insertNewConv(func() error {
++		return insertNewConv(func(ctx context.Context) error {
+ 			err := gc.Main.DB.DirectConversation.Delete(ctx, byID)
+ 			if err != nil {
+ 				return fmt.Errorf("failed to delete old DM conversation row after phone number change with conflict: %w", err)
+diff --git a/pkg/connector/chatsync_dedup_test.go b/pkg/connector/chatsync_dedup_test.go
+new file mode 100644
+index 0000000..6d6f020
+--- /dev/null
++++ b/pkg/connector/chatsync_dedup_test.go
+@@ -0,0 +1,93 @@
++package connector
++
++import (
++	"context"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/rs/zerolog"
++	"go.mau.fi/util/dbutil"
++	_ "go.mau.fi/util/dbutil/litestream"
++	"go.mau.fi/util/jsontime"
++	"maunium.net/go/mautrix/bridgev2"
++	"maunium.net/go/mautrix/bridgev2/database"
++	"maunium.net/go/mautrix/bridgev2/networkid"
++
++	"go.mau.fi/mautrix-gmessages/pkg/connector/gmdb"
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
++)
++
++// The DM dedup's delete has to run in its own transaction: on SQLite with _txlock=immediate the transaction holds the
++// write lock, so a delete on another connection waits out the 5 s busy timeout and fails, the whole change is rolled
++// back, and the same change is tried again on every conversation event (seen on Music over RCS's host, 2026-10-20:
++// every bridge write waited behind it). Upstream fixed it in dbbd04de; this keeps it fixed in our build.
++func TestDeduplicateDMChangesItsRowsInOneTransaction(t *testing.T) {
++	ctx := context.Background()
++	raw, err := dbutil.NewWithDialect("file:"+filepath.Join(t.TempDir(), "bridge.db")+"?_txlock=immediate", "sqlite3-fk-wal")
++	if err != nil {
++		t.Fatal(err)
++	}
++	// As the bridge's config has it (database.max_open_conns, max_idle_conns).
++	raw.RawDB.SetMaxOpenConns(5)
++	raw.RawDB.SetMaxIdleConns(1)
++	defer raw.Close()
++	bridgeDB := database.New("gmessages", database.MetaTypes{}, raw)
++	if err = bridgeDB.Upgrade(ctx); err != nil {
++		t.Fatal(err)
++	}
++	gmDB := gmdb.New("gmessages", raw, zerolog.Nop())
++	if err = gmDB.Upgrade(ctx); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = raw.Exec(ctx, `INSERT INTO "user" (bridge_id, mxid) VALUES ('gmessages', '@me:localhost')`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = raw.Exec(ctx, `INSERT INTO user_login (bridge_id, user_mxid, id, remote_name, metadata) VALUES ('gmessages', '@me:localhost', 'login', '', '{}')`); err != nil {
++		t.Fatal(err)
++	}
++
++	gc := &GMClient{
++		Main:       &GMConnector{br: &bridgev2.Bridge{DB: bridgeDB}, DB: gmDB},
++		UserLogin:  &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "login"}},
++		Meta:       &UserLoginMetadata{IDPrefix: "1"},
++		dmsByPhone: make(map[string]*gmdb.DirectConversation),
++		dmsByConv:  make(map[networkid.PortalID]*gmdb.DirectConversation),
++	}
++	// The conversation is known under an old number; it now comes with another (the "phone number changed" case, which
++	// deletes the old row and inserts the new one in one transaction, as the conversation-id change does).
++	old := &gmdb.DirectConversation{LoginID: "login", PhoneNumber: "+15550000001", PortalID: gc.MakePortalID("42"), LastMessageTS: jsontime.UMicroInt(1_000_000)}
++	if err = gmDB.DirectConversation.Insert(ctx, old); err != nil {
++		t.Fatal(err)
++	}
++	gc.dmsByConv[old.PortalID] = old
++	gc.dmsByPhone[old.PhoneNumber] = old
++	other := &gmproto.SmallInfo{Number: "+15550000002"}
++	conv := &gmproto.Conversation{
++		ConversationID:       "42",
++		LastMessageTimestamp: 2_000_000,
++		Participants:         []*gmproto.Participant{{ID: other, IsVisible: true}, {ID: &gmproto.SmallInfo{Number: "+15559999999"}, IsMe: true, IsVisible: true}},
++	}
++	delete(gc.dmsByPhone, old.PhoneNumber)
++
++	start := time.Now()
++	err = gc.deduplicateDM(ctx, conv)
++	took := time.Since(start)
++	if err != nil {
++		t.Fatalf("deduplicateDM: %v", err)
++	}
++	if took > time.Second {
++		t.Fatalf("deduplicateDM took %s: its delete waited on the transaction's own lock", took)
++	}
++	rows, err := gmDB.DirectConversation.GetAll(ctx, "login")
++	if err != nil {
++		t.Fatal(err)
++	}
++	newNumber := normalizeIdentifier(other)
++	if len(rows) != 1 || rows[0].PhoneNumber != newNumber || rows[0].PortalID != old.PortalID {
++		t.Fatalf("want one row for %s, got %+v", newNumber, rows)
++	}
++	if gc.dmsByPhone[newNumber] == nil || gc.dmsByConv[old.PortalID].PhoneNumber != newNumber {
++		t.Fatal("the in-memory DM cache was not updated, so the same change would be tried again on the next event")
++	}
++}

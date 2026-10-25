@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { runQueue, type Env } from '../cloudflare/index.ts';
 import { handleRelayRequest, RELAY_MAX_AGE_MS, relaySong, sweepRelay } from '../cloudflare/youtube.ts';
-import { createYouTubeRelay, youTubeRelayFromEnv } from '../src/cloud/youtube-relay.ts';
+import { createYouTubeRelay, relayTiming, youTubeRelayFromEnv } from '../src/cloud/youtube-relay.ts';
 import { FakeBucket } from './helpers/fake-bucket.ts';
 
 const SONG = Uint8Array.from({ length: 64 }, (_, i) => i);
@@ -121,8 +121,8 @@ describe('the Worker side of the YouTube relay', () => {
     const bot = fakeYouTube({ byVersion: { '1.02': 'bot', '1.03': 'bot', '1.01': 'bot' } });
     await handleRelayRequest('yt/req/dX7fqa8Z2Gs-cd34.json', { bucket: bucket.binding, fetch: bot.fetch, log: (line) => lines.push(line) });
     assert.equal(lines.length, 2, lines.join('\n'));
-    assert.match(lines[0]!, /^YouTube relay: dX7fqa8Z2Gs-ab12: 0\.0 MB in \d+\.\d s$/);
-    assert.match(lines[1]!, /^YouTube relay: dX7fqa8Z2Gs-cd34: turned away: Sign in to confirm you’re not a bot \(\d+\.\d s\)$/);
+    assert.match(lines[0]!, /^YouTube relay: dX7fqa8Z2Gs-ab12: 0\.0 MB in \d+\.\d s \(queued \d+ ms, session \d+, player \d+, link \d+, store \d+\)$/);
+    assert.match(lines[1]!, /^YouTube relay: dX7fqa8Z2Gs-cd34: turned away: Sign in to confirm you’re not a bot \(\d+\.\d s; queued \d+ ms, session \d+, player \d+, link \d+, store \d+\)$/);
   });
 
   test('a song over the limit is refused before anything is downloaded; a bad id is refused at once', async () => {
@@ -138,7 +138,9 @@ describe('the Worker side of the YouTube relay', () => {
     const yt = fakeYouTube({ byVersion: { '1.02': 'unplayable', '1.03': 'unplayable', '1.01': 'unplayable' } });
     await bucket.binding.put('yt/req/dX7fqa8Z2Gs-ab12.json', JSON.stringify({ videoId: 'dX7fqa8Z2Gs' }));
     const result = await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12.json', { bucket: bucket.binding, fetch: yt.fetch });
-    assert.deepEqual(result, { ok: false, error: 'This video is unavailable' });
+    const { timing, ...outcome } = result!;
+    assert.deepEqual(outcome, { ok: false, error: 'This video is unavailable' });
+    assert.ok(timing && timing.totalMs >= 0 && timing.doneAt > 0 && timing.queuedMs !== undefined, 'the outcome says where the Worker’s time went');
     assert.equal(bucket.objects.has('yt/req/dX7fqa8Z2Gs-ab12.json'), false);
     assert.deepEqual(JSON.parse(bucket.objects.get('yt/res/dX7fqa8Z2Gs-ab12.json')!.body), result);
     assert.equal(await handleRelayRequest('yt/req/dX7fqa8Z2Gs-ab12.json', { bucket: bucket.binding, fetch: yt.fetch }), undefined);
@@ -194,8 +196,20 @@ describe('the host side of the YouTube relay', () => {
   test('leaves the request, waits for the Worker, takes the audio, and leaves nothing behind', async () => {
     const bucket = new FakeBucket();
     const audio = await wired(bucket)('dX7fqa8Z2Gs', { maxBytes: 1_000_000 });
-    assert.deepEqual(audio, { data: SONG, type: 'audio/mp4', bytes: SONG.length });
+    const { timing, ...song } = audio;
+    assert.deepEqual(song, { data: SONG, type: 'audio/mp4', bytes: SONG.length });
+    assert.match(timing ?? '', /^put [\d.]+s, queue [\d.]+s, worker [\d.]+s \[session [\d.]+s, player [\d.]+s, link [\d.]+s, store [\d.]+s\], seen \+[\d.]+s, get [\d.]+s$/);
     assert.equal(bucket.objects.size, 0);
+  });
+
+  test('says where a song’s time went: the host’s part, and the Worker’s from its answer (or the whole wait, from an older Worker)', () => {
+    const host = { putMs: 120, waitMs: 4100, getMs: 400, foundAt: 10_600 };
+    assert.equal(
+      relayTiming(host, { queuedMs: 1400, sessionMs: 300, playerMs: 600, linkMs: 200, storeMs: 1900, totalMs: 3100, doneAt: 10_000 }),
+      'put 0.12s, queue 1.4s, worker 3.1s [session 0.30s, player 0.60s, link 0.20s, store 1.9s], seen +0.60s, get 0.40s',
+    );
+    assert.equal(relayTiming(host, undefined), 'put 0.12s, wait 4.1s, get 0.40s');
+    assert.equal(relayTiming(host, { totalMs: 'x', sessionMs: -1 }), 'put 0.12s, wait 4.1s, get 0.40s', 'what is not a time is left out');
   });
 
   test('passes the size limit on, and says why the Worker could not get the song', async () => {

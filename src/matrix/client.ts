@@ -17,6 +17,8 @@ const MAX_RATE_LIMIT_WAIT_MS = 10_000;
 /** The largest file from the phone that is downloaded (a picture for an add-on, say). */
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
 const MEDIA_TYPES = new Set(['m.image', 'm.video', 'm.audio', 'm.file', 'm.sticker']);
+/** What the bridge says about each message sent to it, when it is set to (the cloud host sets matrix.message_status_events). */
+const MESSAGE_STATUS = 'com.beeper.message_send_status';
 
 export class MatrixError extends Error {
   status: number;
@@ -196,6 +198,20 @@ function pictureIn(event: MatrixEvent, self: string | undefined): IncomingPictur
 
 /** A room message event as a ChatMessage; edits are not new messages, so they are skipped (unless they bring a picture). */
 function toChatMessage(event: MatrixEvent, self?: string): ChatMessage | undefined {
+  if (event.type === MESSAGE_STATUS && event.eventId) {
+    // The bridge's word on a message sent to it (matrix.message_status_events): SUCCESS once Google Messages has it.
+    const of = asString(dig(event.content, 'm.relates_to', 'event_id'));
+    const status = asString(event.content.status);
+    if (!of || !status || status === 'PENDING') return undefined;
+    return {
+      id: event.eventId,
+      timestamp: new Date(event.timestamp).toISOString(),
+      type: 'STATUS',
+      status: { of, ok: status === 'SUCCESS', at: event.timestamp },
+      hasAttachments: false,
+      isDeleted: false,
+    };
+  }
   if (event.type === 'm.reaction' && event.eventId) {
     // A reaction tapped in Google Messages arrives from the bridge as an annotation on the message it's on.
     const relation = asRecord(event.content['m.relates_to']);
@@ -245,7 +261,7 @@ const timelineFilter = (roomID: string): string =>
     account_data: { types: [] },
     room: {
       rooms: [roomID],
-      timeline: { limit: 50, types: ['m.room.message', 'm.reaction'] },
+      timeline: { limit: 50, types: ['m.room.message', 'm.reaction', MESSAGE_STATUS] },
       state: { types: [] },
       ephemeral: { types: [] },
       account_data: { types: [] },

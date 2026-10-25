@@ -79,6 +79,7 @@ describe('loadBeeperConfig', () => {
       archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
       songGapMs: 5_000,
+      sendStatus: false,
     });
   });
 
@@ -164,6 +165,7 @@ describe('loadMatrixConfig', () => {
       archiveDir: undefined,
       quiet: { from: { hour: 22, minute: 0 }, to: { hour: 7, minute: 0 } },
       songGapMs: 5_000,
+      sendStatus: false,
     });
   });
 

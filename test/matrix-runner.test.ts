@@ -32,8 +32,9 @@ describe('runner over Matrix (the bridge case)', () => {
 
   beforeEach(() => mock.reset());
 
-  function makeRunner(options: { now?: () => number; typingRefreshMs?: number; fetchDelayMs?: number; resume?: ResumeStore; catchUpMs?: number } = {}) {
+  function makeRunner(options: { now?: () => number; typingRefreshMs?: number; fetchDelayMs?: number; resume?: ResumeStore; catchUpMs?: number; sendStatus?: boolean } = {}) {
     const logs: string[] = [];
+    const timelines: string[] = [];
     const matrix = new MatrixClient({ token: mock.token, homeserver: mock.url });
     const bot = createBot({
       catalog,
@@ -53,8 +54,10 @@ describe('runner over Matrix (the bridge case)', () => {
       ...(options.typingRefreshMs ? { typingRefreshMs: options.typingRefreshMs } : {}),
       ...(options.resume ? { resume: options.resume } : {}),
       ...(options.catchUpMs ? { catchUpMs: options.catchUpMs } : {}),
+      ...(options.sendStatus ? { sendStatus: true } : {}),
+      onTimeline: (line) => timelines.push(line),
     });
-    return { runner, logs };
+    return { runner, logs, timelines };
   }
 
   const typedOnPhone = (body: string) => mock.addMessage(mock.ghost, { msgtype: 'm.text', body });
@@ -737,6 +740,41 @@ describe('runner over Matrix (the bridge case)', () => {
       release();
       await Promise.all([answering, announcing]);
       assert.deepEqual(mock.sent.map((s) => s.content.body), ['🎵 the answer', '🎵 daily message']);
+    });
+  });
+
+  describe('timelines', () => {
+    test('each request leaves one line, and each song one, in the log and for /status', async () => {
+      const { runner, logs, timelines } = makeRunner();
+      await runner.prime();
+      typedOnPhone('search paper planes');
+      await runner.tick();
+      const line = timelines.find((entry) => entry.startsWith('timeline:'));
+      assert.match(line ?? '', /^timeline: "search paper planes" phone→seen [\d.]+s · bot [\d.]+s \(check [\d.]+s\) · song \+[\d.]+s · \d+ msgs first \+[\d.]+s last \+[\d.]+s \([\d.]+s each\)$/);
+      assert.match(timelines.find((entry) => entry.startsWith('song:')) ?? '', /^song: "Mira Vale — Paper Planes at Dawn" [\d.]+ MB fetch [\d.]+s upload [\d.]+s$/);
+      assert.ok(logs.includes(line!), 'the same line is in the log');
+      assert.equal(timelines.filter((entry) => entry.startsWith('timeline:')).length, 1);
+    });
+
+    test('with the bridge’s word on each message, the line waits for it and says when Google had the last one', async () => {
+      mock.sendStatus = true;
+      const { runner, timelines } = makeRunner({ sendStatus: true });
+      await runner.prime();
+      typedOnPhone('help');
+      await runner.tick();
+      assert.equal(timelines.length, 0, 'still waiting for the bridge to say Google has the answer');
+      await runner.tick();
+      assert.match(timelines[0] ?? '', /^timeline: "help" phone→seen [\d.]+s · bot [\d.]+s · 1 msg first \+[\d.]+s last \+[\d.]+s \([\d.]+s each\) · at Google \+[\d.]+s$/);
+      assert.equal(mock.sent.length, 1, 'the bridge’s word is not answered');
+    });
+
+    test('a line still waiting when the bot stops is written as it stands', async () => {
+      const { runner, timelines } = makeRunner({ sendStatus: true });
+      await runner.prime();
+      typedOnPhone('help');
+      await runner.tick();
+      await runner.stop();
+      assert.match(timelines[0] ?? '', / · at Google: no word on 1$/);
     });
   });
 

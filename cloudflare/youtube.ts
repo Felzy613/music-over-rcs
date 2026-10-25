@@ -18,11 +18,27 @@ export interface RelayRequest {
   maxBytes?: number;
 }
 
-export type RelayResult = { ok: true; type: string; bytes: number } | { ok: false; error: string; turnedAway?: true };
+/**
+ * Where the Worker's time on one request went, in ms, for the host's `song:` line: how long the request waited for the
+ * Worker (R2's notice and the queue: from when the host left it to when the Worker started on it), YouTube's session,
+ * player and the song's link, storing the song in the bucket (the download streams into it), and the whole. `doneAt` is
+ * when the result was written (Unix ms), so the host can tell how long it took to notice.
+ */
+export interface RelayTiming {
+  queuedMs?: number;
+  sessionMs: number;
+  playerMs: number;
+  linkMs: number;
+  storeMs: number;
+  totalMs: number;
+  doneAt: number;
+}
+
+export type RelayResult = ({ ok: true; type: string; bytes: number } | { ok: false; error: string; turnedAway?: true }) & { timing?: RelayTiming };
 
 /** The part of the R2 binding the relay uses. */
 export interface RelayBucket {
-  get(key: string): Promise<{ text(): Promise<string> } | null>;
+  get(key: string): Promise<{ text(): Promise<string>; uploaded?: Date } | null>;
   put(key: string, value: string | ReadableStream | ArrayBuffer): Promise<unknown>;
   delete(key: string): Promise<void>;
   list(options: { prefix: string; limit?: number }): Promise<{ objects: Array<{ key: string; uploaded?: Date }> }>;
@@ -134,14 +150,29 @@ function storable(res: Response, length: number): ReadableStream | Promise<Array
  * once more with a new session. A song over `maxBytes` is refused before anything is downloaded. The bot check, or
  * HTTP 403 or 429 from YouTube Music, makes the answer `turnedAway`, which the host asks again about later.
  */
-export async function relaySong(request: RelayRequest, deps: { fetch: typeof fetch; bucket: Pick<RelayBucket, 'put'>; audioKey: string }): Promise<RelayResult> {
+export async function relaySong(
+  request: RelayRequest,
+  deps: { fetch: typeof fetch; bucket: Pick<RelayBucket, 'put'>; audioKey: string; timing?: Pick<RelayTiming, 'sessionMs' | 'playerMs' | 'linkMs' | 'storeMs'> },
+): Promise<RelayResult> {
   if (!VIDEO_ID.test(request.videoId)) return { ok: false, error: "that isn't a YouTube song" };
   // Called on its own, never as `deps.fetch(…)`: the Workers runtime refuses a fetch called with another object as `this`.
-  const doFetch = deps.fetch;
+  const fetchOnly = deps.fetch;
+  // Each call is timed into the step it belongs to (`deps.timing`), so the host can see where a slow song's time went.
+  const timing = deps.timing;
+  let step: keyof NonNullable<typeof timing> = 'sessionMs';
+  const doFetch: typeof fetch = async (input, init) => {
+    const start = Date.now();
+    try {
+      return await fetchOnly(input, init);
+    } finally {
+      if (timing) timing[step] += Date.now() - start;
+    }
+  };
   let problem = 'no client gave a link';
   let turnedAway = false;
   for (let round = 0; round < 2; round += 1) {
     let visitor: string;
+    step = 'sessionMs';
     try {
       visitor = await visitorId(doFetch);
     } catch (err) {
@@ -151,6 +182,7 @@ export async function relaySong(request: RelayRequest, deps: { fetch: typeof fet
     let refused = false;
     for (const client of STREAM_CLIENTS) {
       let answer: { playabilityStatus?: { status?: string; reason?: string }; streamingData?: { adaptiveFormats?: Format[] } };
+      step = 'playerMs';
       try {
         answer = (await post(doFetch, 'player', client, { videoId: request.videoId, contentCheckOk: true, racyCheckOk: true }, visitor)) as typeof answer;
       } catch (err) {
@@ -176,6 +208,7 @@ export async function relaySong(request: RelayRequest, deps: { fetch: typeof fet
       if (request.maxBytes !== undefined && length > request.maxBytes) {
         return { ok: false, error: `it is too big to send (${(length / 1_048_576).toFixed(1)} MB, the limit is ${(request.maxBytes / 1_048_576).toFixed(0)} MB)` };
       }
+      step = 'linkMs';
       const res = await doFetch(format.url, { headers: { 'User-Agent': client.userAgent, Range: 'bytes=0-' } });
       if (res.status === 403 || res.status === 410) {
         await res.body?.cancel().catch(() => {});
@@ -194,7 +227,9 @@ export async function relaySong(request: RelayRequest, deps: { fetch: typeof fet
         await res.body?.cancel().catch(() => {});
         return { ok: false, error: `it is too big to send (${(size / 1_048_576).toFixed(1)} MB, the limit is ${(request.maxBytes / 1_048_576).toFixed(0)} MB)` };
       }
+      const storing = Date.now();
       await deps.bucket.put(deps.audioKey, await storable(res, size));
+      if (timing) timing.storeMs += Date.now() - storing;
       return { ok: true, type, bytes: size };
     }
     // A new session only helps with refused links; a bot check or a missing song won't change with one (asked straight
@@ -215,26 +250,33 @@ export async function handleRelayRequest(key: string, deps: { bucket: RelayBucke
   if (!key.startsWith(RELAY_REQUESTS) || !key.endsWith('.json')) return undefined;
   const name = nameOf(key);
   if (!/^[\w-]{1,80}$/.test(name)) return undefined;
+  const started = Date.now();
   const object = await deps.bucket.get(key);
   if (!object) return undefined; // answered already (a repeated notification)
-  const started = Date.now();
+  // R2's notice and the queue: from when the host left the request to when this started on it.
+  const queuedMs = object.uploaded instanceof Date ? Math.max(0, started - object.uploaded.getTime()) : undefined;
+  const steps = { sessionMs: 0, playerMs: 0, linkMs: 0, storeMs: 0 };
   let result: RelayResult;
   try {
     const request = JSON.parse(await object.text()) as Partial<RelayRequest>;
     await deps.bucket.delete(key);
     result = await relaySong(
       { videoId: String(request.videoId ?? ''), ...(typeof request.maxBytes === 'number' && request.maxBytes > 0 ? { maxBytes: request.maxBytes } : {}) },
-      { fetch: deps.fetch, bucket: deps.bucket, audioKey: `${RELAY_AUDIO}${name}` },
+      { fetch: deps.fetch, bucket: deps.bucket, audioKey: `${RELAY_AUDIO}${name}`, timing: steps },
     );
   } catch (err) {
     result = { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  // One line for every request, so the Worker's logs show how often YouTube turns Cloudflare away.
-  const took = `${((Date.now() - started) / 1000).toFixed(1)} s`;
+  const doneAt = Date.now();
+  const timing: RelayTiming = { ...(queuedMs !== undefined ? { queuedMs } : {}), ...steps, totalMs: doneAt - started, doneAt };
+  result = { ...result, timing };
+  // One line for every request, so the Worker's logs show how often YouTube turns Cloudflare away, and where the time went.
+  const took = `${((doneAt - started) / 1000).toFixed(1)} s`;
+  const split = `queued ${queuedMs ?? '?'} ms, session ${steps.sessionMs}, player ${steps.playerMs}, link ${steps.linkMs}, store ${steps.storeMs}`;
   deps.log?.(
     result.ok
-      ? `YouTube relay: ${name}: ${(result.bytes / 1_048_576).toFixed(1)} MB in ${took}`
-      : `YouTube relay: ${name}: ${result.turnedAway ? 'turned away: ' : ''}${result.error} (${took})`,
+      ? `YouTube relay: ${name}: ${(result.bytes / 1_048_576).toFixed(1)} MB in ${took} (${split})`
+      : `YouTube relay: ${name}: ${result.turnedAway ? 'turned away: ' : ''}${result.error} (${took}; ${split})`,
   );
   await deps.bucket.put(`${RELAY_RESULTS}${name}.json`, JSON.stringify(result));
   return result;

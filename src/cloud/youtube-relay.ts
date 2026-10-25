@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { seconds } from '../timeline.ts';
 import { s3FromEnv, type S3 } from './s3.ts';
 
 // Getting a YouTube Music song by way of Cloudflare. YouTube asks the cloud host's datacenter address to "confirm you're
@@ -13,6 +14,44 @@ export interface RelayedAudio {
   /** "audio/mp4" */
   type: string;
   bytes: number;
+  /** Where the time went, for the host's `song:` line (see `relayTiming`). */
+  timing?: string;
+}
+
+/** The Worker's own account of a request (cloudflare/youtube.ts `RelayTiming`), as far as it is there. */
+interface WorkerTiming {
+  queuedMs?: number;
+  sessionMs?: number;
+  playerMs?: number;
+  linkMs?: number;
+  storeMs?: number;
+  totalMs?: number;
+  doneAt?: number;
+}
+
+const ms = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined);
+
+/**
+ * Where one song's time went, in a few words: "put 0.12s, queue 1.4s, worker 3.1s [session 0.30s, player 0.60s, link
+ * 0.20s, store 1.9s], seen +0.60s, get 0.40s". The host's part (leaving the request, collecting the song) is timed here; the
+ * Worker's comes in its answer, and an older Worker that doesn't say leaves "wait" (the whole wait for its answer) instead.
+ */
+export function relayTiming(host: { putMs: number; waitMs: number; getMs: number; foundAt: number }, worker: unknown): string {
+  const raw = (worker && typeof worker === 'object' ? worker : {}) as Record<string, unknown>;
+  const timing: WorkerTiming = Object.fromEntries(Object.entries(raw).flatMap(([key, value]) => (ms(value) !== undefined ? [[key, value]] : [])));
+  const parts = [`put ${seconds(host.putMs)}`];
+  if (timing.totalMs === undefined) parts.push(`wait ${seconds(host.waitMs)}`);
+  else {
+    if (timing.queuedMs !== undefined) parts.push(`queue ${seconds(timing.queuedMs)}`);
+    const steps = (['session', 'player', 'link', 'store'] as const).flatMap((step) => {
+      const value = timing[`${step}Ms`];
+      return value === undefined ? [] : [`${step} ${seconds(value)}`];
+    });
+    parts.push(`worker ${seconds(timing.totalMs)}${steps.length > 0 ? ` [${steps.join(', ')}]` : ''}`);
+    if (timing.doneAt !== undefined) parts.push(`seen +${seconds(host.foundAt - timing.doneAt)}`);
+  }
+  parts.push(`get ${seconds(host.getMs)}`);
+  return parts.join(', ');
 }
 
 /**
@@ -60,10 +99,12 @@ export function createYouTubeRelay(bucket: Pick<S3, 'put' | 'get' | 'getBytes' |
     let wait = pollMs;
     try {
       await bucket.put(keys.request, JSON.stringify({ videoId, ...(maxBytes !== undefined ? { maxBytes } : {}) }));
+      const put = now();
       for (;;) {
         const found = await bucket.get(keys.result);
         if (found) {
-          let result: { ok?: unknown; type?: unknown; bytes?: unknown; error?: unknown; turnedAway?: unknown };
+          const foundAt = now();
+          let result: { ok?: unknown; type?: unknown; bytes?: unknown; error?: unknown; turnedAway?: unknown; timing?: unknown };
           try {
             result = JSON.parse(found.text) as typeof result;
           } catch {
@@ -75,8 +116,9 @@ export function createYouTubeRelay(bucket: Pick<S3, 'put' | 'get' | 'getBytes' |
           }
           const audio = await bucket.getBytes(keys.audio);
           if (!audio) throw new Error('the song went missing on its way from YouTube Music');
-          options.log?.(`YouTube Music: ${videoId} came by way of Cloudflare in ${((now() - started) / 1000).toFixed(1)} s (${audio.data.length} bytes)`);
-          return { data: audio.data, type: typeof result.type === 'string' && result.type ? result.type : 'audio/mp4', bytes: audio.data.length };
+          const timing = relayTiming({ putMs: put - started, waitMs: foundAt - put, getMs: now() - foundAt, foundAt }, result.timing);
+          options.log?.(`YouTube Music: ${videoId} came by way of Cloudflare in ${((now() - started) / 1000).toFixed(1)} s (${audio.data.length} bytes; ${timing})`);
+          return { data: audio.data, type: typeof result.type === 'string' && result.type ? result.type : 'audio/mp4', bytes: audio.data.length, timing };
         }
         if (now() - started >= timeout) throw new Error(`the relay gave no answer within ${Math.round(timeout / 1000)} seconds`);
         await sleep(wait);

@@ -107,6 +107,11 @@ interface ChatSettings {
   songGapMs: number;
   /** Songs downloading at once, ahead of their turn. Left out for the runner's own default. */
   downloadsAhead?: number;
+  /**
+   * The bridge says when Google Messages has each message the bot sent (BRIDGE_STATUS_EVENTS=1, which the cloud host sets
+   * because it sets the bridge up that way), so the bot's timelines can say when that was.
+   */
+  sendStatus: boolean;
 }
 
 function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: string[]): ChatSettings {
@@ -148,6 +153,7 @@ function readChatSettings(env: NodeJS.ProcessEnv, pollName: string, problems: st
     quiet: quiet instanceof Error ? undefined : quiet,
     songGapMs: songGapMs instanceof Error ? 0 : songGapMs,
     ...(downloadsAhead !== undefined && downloadsAhead >= 1 && downloadsAhead <= 10 ? { downloadsAhead } : {}),
+    sendStatus: /^(1|on|true|yes)$/i.test(env.BRIDGE_STATUS_EVENTS?.trim() ?? ''),
   };
 }
 

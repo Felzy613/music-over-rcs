@@ -67,6 +67,11 @@ encryption:
     allow: false
     default: false
 
+matrix:
+    # Whether the bridge should send the message status as a custom com.beeper.message_send_status event.
+    message_status_events: false
+    delivery_receipts: false
+
 logging:
     min_level: debug
     writers:
@@ -125,6 +130,10 @@ describe('patching the bridge config', () => {
     assert.match(patched, /backfill:\n {4}# Whether to do backfilling at all\.\n {4}enabled: false/);
     assert.ok(patched.includes('        max_initial_messages: 50'), 'a nested key of the same name is left alone');
     assert.ok(patched.includes('        enabled: false'), 'nested enabled keys are left alone');
+  });
+
+  test('says in the room when each message reached Google Messages, for the bot’s timelines', () => {
+    assert.match(patched, /matrix:\n {4}# Whether[^\n]*\n {4}message_status_events: true\n {4}delivery_receipts: false/);
   });
 
   test('lets only the bot’s account administer the bridge, and logs to the console only', () => {

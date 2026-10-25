@@ -182,6 +182,8 @@ export function patchBridgeConfig(text: string, options: BridgeOptions): string 
     'provisioning.allow_matrix_auth': true,
     'network.initial_chat_sync_count': options.initialChats ?? 0,
     'backfill.enabled': false,
+    // A word in the room on each message the bot sends once Google Messages has it: the bot's timelines say when that was.
+    'matrix.message_status_events': true,
     'logging.min_level': 'info',
   };
   const blocks: Record<string, (indent: string) => string[]> = {

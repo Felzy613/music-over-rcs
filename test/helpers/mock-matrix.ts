@@ -52,6 +52,11 @@ export interface MockMatrix extends Listening {
   echoAsGhost: boolean;
   /** The bridge bot answers every message sent to its room with a notice: "You said: ...". */
   botReplies: boolean;
+  /**
+   * Act like a bridge set to say when Google Messages has each message (matrix.message_status_events): every message the
+   * client posts to the watched room is followed by a com.beeper.message_send_status event on it, SUCCESS, from the bridge bot.
+   */
+  sendStatus: boolean;
   failSync: boolean;
   /** Typing calls are answered with a server error. */
   failTyping: boolean;
@@ -100,7 +105,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     { id: botRoomId, name: '', members: 2, heroes: [botUser] },
   ];
   const invites: MockInvite[] = [{ id: '!invited:localhost', name: 'Alex', inviter: '@gmessages_alex:localhost' }];
-  const state = { echoAsGhost: false, botReplies: false, failSync: false, failTyping: false, rateLimited: 0 };
+  const state = { echoAsGhost: false, botReplies: false, sendStatus: false, failSync: false, failTyping: false, rateLimited: 0 };
   let counter = 0;
 
   const push = (sender: string, content: Record<string, unknown>, timeline: MockEvent[] = events, type = 'm.room.message'): MockEvent => {
@@ -147,8 +152,11 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     if (req.method === 'GET' && url.pathname === '/_matrix/client/v3/sync') {
       if (state.failSync) return json(500, { errcode: 'M_UNKNOWN', error: 'sync is broken' });
       const filter = JSON.parse(url.searchParams.get('filter') ?? '{}') as {
-        room?: { rooms?: string[]; timeline?: { limit?: number } };
+        room?: { rooms?: string[]; timeline?: { limit?: number; types?: string[] } };
       };
+      // As a homeserver does: only the event types the filter asks for.
+      const types = filter.room?.timeline?.types;
+      const wanted = (event: MockEvent): boolean => !types || types.includes(event.type);
       const watched = filter.room?.rooms;
       if (watched) {
         // The sync token is "<primary room length>.<bot room length>", so each room has its own cursor.
@@ -160,7 +168,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
           const timeline = timelines.get(id);
           if (!timeline) continue;
           const offset = id === roomId ? sincePrimary : sinceBot;
-          join[id] = { timeline: { events: since === null ? timeline.slice(-limit) : timeline.slice(offset), limited: false } };
+          join[id] = { timeline: { events: (since === null ? timeline.slice(-limit) : timeline.slice(offset)).filter(wanted), limited: false } };
         }
         return json(200, { next_batch: `${events.length}.${botEvents.length}`, rooms: { join } });
       }
@@ -206,6 +214,9 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
       const event = push(userId, content, target);
       sent.push({ eventId: event.event_id, content });
       if (state.echoAsGhost && target === events && content.msgtype === 'm.text') push(ghost, content);
+      if (state.sendStatus && target === events) {
+        push(botUser, { 'm.relates_to': { rel_type: 'm.reference', event_id: event.event_id }, network: 'gmessages', status: 'SUCCESS' }, events, 'com.beeper.message_send_status');
+      }
       if (state.botReplies && target === botEvents) {
         push(botUser, { msgtype: 'm.notice', body: `You said: ${String(content.body)}` }, botEvents);
       }
@@ -305,6 +316,12 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     joinedViaApi,
     goneRooms,
     created,
+    get sendStatus() {
+      return state.sendStatus;
+    },
+    set sendStatus(value: boolean) {
+      state.sendStatus = value;
+    },
     get echoAsGhost() {
       return state.echoAsGhost;
     },
@@ -355,6 +372,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
       goneRooms.length = 0;
       created.length = 0;
       state.echoAsGhost = false;
+      state.sendStatus = false;
       state.botReplies = false;
       state.failSync = false;
       state.failTyping = false;

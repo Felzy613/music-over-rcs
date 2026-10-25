@@ -34,7 +34,7 @@ export class FakeBucket {
   binding = {
     get: async (key: string) => {
       const o = this.objects.get(key);
-      return o ? { etag: o.etag, text: async () => o.body } : null;
+      return o ? { etag: o.etag, text: async () => o.body, uploaded: o.uploaded ?? new Date(0) } : null;
     },
     put: async (key: string, value: string | Uint8Array | ArrayBuffer | ReadableStream) => {
       if (typeof value === 'string' || value instanceof Uint8Array) return this.#put(key, value);

@@ -7,6 +7,7 @@ import { ALL_WORDS, joinLists, type Bot } from './bot.ts';
 import type { DownloadedImage } from './image-fetch.ts';
 import type { Picture, PreparedPicture } from './library/images.ts';
 import { writeWithCrc32, zipBlob, zipEntryOverhead, zipName, zipSize } from './library/zip.ts';
+import { seconds, Timeline } from './timeline.ts';
 import type { AlbumSong, Chip, Incoming, NumberedChoice, Reply } from './types.ts';
 
 /**
@@ -54,6 +55,8 @@ const MAX_ANSWERS_PER_MINUTE = 30;
 /** The most messages one answer may have; the rest is dropped. The longest real one, an album's songs, is about 50. */
 const MAX_MESSAGES_PER_ANSWER = 200;
 const ERROR_NOTICE = 'Something went wrong on my side. Please try again in a moment.';
+/** How long a request's timeline waits for the bridge's word that Google Messages has its messages. */
+const STATUS_WAIT_MS = 120_000;
 
 /** Hebrew words (with the spaces between them) followed by something that isn't Hebrew. */
 const HEBREW_THEN_MORE = /[\u0590-\u05ff](?:[\u0590-\u05ff\s]*[\u0590-\u05ff])?(?=\s*[^\s\u0590-\u05ff])/gu;
@@ -107,6 +110,11 @@ export interface ChatMessage {
   reaction?: { to: string; key: string } | undefined;
   /** A picture sent from the phone (not one the bot sent), when the platform passes those on. */
   picture?: IncomingPicture | undefined;
+  /**
+   * The bridge's word on a message the bot sent (`of`): whether it reached Google Messages, and when (Unix ms). Not a
+   * message of its own; the runner only uses it to time its answers.
+   */
+  status?: { of: string; ok: boolean; at: number } | undefined;
 }
 
 /** A picture sent from the phone: where to download it, and the text sent with it. */
@@ -233,6 +241,13 @@ export interface RunnerOptions {
   onPicture?: (picture: IncomingPicture) => void;
   /** Restarts the Google Messages bridge after it reports that a message could not be delivered. */
   onBridgeSendFailure?: () => void | Promise<void>;
+  /**
+   * The chat says when each message the bot sent reached the phone's network (the bridge's status events): a request's
+   * timeline then waits for that word (up to two minutes) and says when Google had its last message.
+   */
+  sendStatus?: boolean;
+  /** Gets each timeline line (`timeline:`, `song:`, `album:`), which also go to the log: /status keeps the last few. */
+  onTimeline?: (line: string) => void;
 }
 
 export interface Runner {
@@ -301,11 +316,71 @@ export function createRunner(options: RunnerOptions): Runner {
    */
   const textKey = (text: string): string => `text:${text.trim().replace(/\s+/g, ' ')}`;
 
+  /** Sends one message of an answer, and puts it on the answer's timeline (how long the send took, and its id). */
+  async function timedSend(timeline: Timeline | undefined, send: () => Promise<string | void>): Promise<string | void> {
+    const start = now();
+    const id = await send();
+    timeline?.sent(now() - start, id);
+    return id;
+  }
+
   /** Sends a text that may stand for a song, and remembers which. */
-  async function sendLinkedText(text: string, postback: string | undefined): Promise<void> {
-    const id = await chat.sendText(chatID, text);
+  async function sendLinkedText(text: string, postback: string | undefined, timeline?: Timeline): Promise<void> {
+    const id = await timedSend(timeline, () => chat.sendText(chatID, text));
     rememberLink(id, postback);
     rememberLink(textKey(text), postback);
+  }
+
+  /** A timeline line: in the log, and to whoever keeps the last few. */
+  function note(line: string): void {
+    log(line);
+    try {
+      options.onTimeline?.(line);
+    } catch {
+      // keeping lines is a nicety
+    }
+  }
+
+  /** Requests whose messages are still being sent or waited on, so the bridge's word on a message finds its request. */
+  const live = new Set<Timeline>();
+  /** The ones waiting for that word, and when to stop waiting. */
+  const waitingFor = new Map<Timeline, NodeJS.Timeout>();
+
+  /** Everything for this request has been sent: its line is logged now, or once Google has had its messages. */
+  function finished(timeline: Timeline): void {
+    timeline.finish();
+    if (options.sendStatus && timeline.waiting > 0) {
+      const timer = setTimeout(() => flush(timeline), STATUS_WAIT_MS);
+      timer.unref?.();
+      waitingFor.set(timeline, timer);
+      return;
+    }
+    flush(timeline);
+  }
+
+  function flush(timeline: Timeline): void {
+    clearTimeout(waitingFor.get(timeline));
+    waitingFor.delete(timeline);
+    if (!live.delete(timeline)) return;
+    note(timeline.line(Boolean(options.sendStatus)));
+  }
+
+  /** The bridge's word that Google Messages has one of the bot's messages (or couldn't take it). */
+  function heard(status: NonNullable<ChatMessage['status']>): void {
+    if (!status.ok) log(`the bridge says a message did not reach Google Messages (${status.of})`);
+    for (const timeline of live) {
+      if (!timeline.has(status.of)) continue;
+      timeline.reached(status.of, status.at);
+      if (timeline.finished && timeline.waiting === 0) flush(timeline);
+    }
+  }
+
+  /** How a song came, for its `song:` line: how long getting it took, and what that was made of. */
+  function songLine(title: string, file: DownloadedAudio, fetchMs: number, extra: string): string {
+    const timing = file.timing;
+    const via = timing?.via ? ` (${timing.via})` : '';
+    const tag = timing?.tagMs !== undefined ? ` tag ${seconds(timing.tagMs)}` : '';
+    return `song: ${JSON.stringify(title)} ${(file.bytes / 1_048_576).toFixed(1)} MB fetch ${seconds(fetchMs)}${via}${tag}${extra}`;
   }
 
   /** The song a 👍 on this message asks for: the message itself, or else a copy of one that stood for a song. */
@@ -419,28 +494,37 @@ export function createRunner(options: RunnerOptions): Runner {
    * from there. A chat that can't take a file gets the songs one by one instead. A song that can't be had is left out,
    * and the chat is told.
    */
-  async function sendAlbum(album: Extract<Reply, { kind: 'album' }>): Promise<void> {
+  async function sendAlbum(album: Extract<Reply, { kind: 'album' }>, timeline?: Timeline): Promise<void> {
     const missing: string[] = [];
     const said = async (text: string): Promise<void> => {
-      await chat.sendText(chatID, markBotText(text));
+      await timedSend(timeline, () => chat.sendText(chatID, markBotText(text)));
     };
+    const began = now();
     // The songs in album order, the next ones downloading while one is used, never more than downloadsAhead at once.
-    const ahead: Array<Promise<DownloadedAudio | undefined>> = [];
+    const ahead: Array<Promise<{ file: DownloadedAudio; ms: number; title: string } | undefined>> = [];
     let started = 0;
-    const next = (): Promise<DownloadedAudio | undefined> => {
+    const next = async (): Promise<DownloadedAudio | undefined> => {
       while (started < album.songs.length && ahead.length < downloadsAhead) {
         const song = album.songs[started++]!;
+        const start = now();
         ahead.push(
-          options.fetchAudio(song.url, song.title).catch((err: unknown) => {
-            log(`could not get ${song.title} ready: ${errorText(err)}`);
-            missing.push(song.title);
-            return undefined;
-          }),
+          options.fetchAudio(song.url, song.title).then(
+            (file) => ({ file, ms: now() - start, title: song.title }),
+            (err: unknown) => {
+              log(`could not get ${song.title} ready: ${errorText(err)}`);
+              missing.push(song.title);
+              return undefined;
+            },
+          ),
         );
       }
-      return ahead.shift()!;
+      const got = await ahead.shift()!;
+      if (got) note(songLine(got.title, got.file, got.ms, ''));
+      return got?.file;
     };
     let had = 0;
+    let bytes = 0;
+    let diskMs = 0;
 
     if (!chat.sendFile) {
       for (const song of album.songs) {
@@ -449,7 +533,7 @@ export function createRunner(options: RunnerOptions): Runner {
         had += 1;
         await songTurn();
         try {
-          await chat.sendAudio(chatID, file);
+          await timedSend(timeline, () => chat.sendAudio(chatID, file));
           lastSongAt = now();
           log(`-> audio ${song.title}`);
         } catch (err) {
@@ -473,10 +557,14 @@ export function createRunner(options: RunnerOptions): Runner {
           had += 1;
           const extension = /\.[a-z0-9]{2,5}$/i.exec(file.fileName)?.[0].toLowerCase() ?? '.audio';
           const path = join(folder, `${String(songs.length + 1).padStart(3, '0')}${extension}`);
+          const written = now();
           const crc = await writeWithCrc32(file.data, path);
           songs.push({ name: `${stem(song)}${extension}`, data: await openAsBlob(path, { type: file.mimeType }), crc });
+          diskMs += now() - written;
+          bytes += file.bytes;
           freeMemory(); // the song as it was downloaded, now that it is on disk
         }
+        const fetched = now() - began;
         const parts: Array<typeof songs> = [];
         let used = zipSize([]);
         for (const song of songs) {
@@ -491,10 +579,13 @@ export function createRunner(options: RunnerOptions): Runner {
         const base = zipName(`${album.artist ? `${album.artist} - ` : ''}${album.title}`);
         for (const [i, part] of parts.entries()) {
           const fileName = `${base}${parts.length > 1 ? ` (part ${i + 1} of ${parts.length})` : ''}.zip`;
+          const zipping = now();
           const zip = zipBlob(part);
-            await songTurn();
+          const zipMs = now() - zipping;
+          await songTurn();
+          const uploading = now();
           try {
-            await sendFile(chatID, { data: zip, fileName, mimeType: 'application/zip', bytes: zip.size });
+            await timedSend(timeline, () => sendFile(chatID, { data: zip, fileName, mimeType: 'application/zip', bytes: zip.size }));
           } catch (err) {
             log(`could not send the zip: ${errorText(err)}`);
             return said(`I couldn't send "${album.title}" as a zip.`);
@@ -503,7 +594,11 @@ export function createRunner(options: RunnerOptions): Runner {
           }
           lastSongAt = now();
           log(`-> zip ${fileName} (${part.length} songs, ${zip.size} bytes)`);
+          note(
+            `album: ${JSON.stringify(album.title)} ${part.length} songs ${(zip.size / 1_048_576).toFixed(1)} MB${parts.length > 1 ? ` (part ${i + 1} of ${parts.length})` : ''} fetch ${seconds(fetched)} (disk ${seconds(diskMs)}, ${(bytes / 1_048_576).toFixed(1)} MB) zip ${seconds(zipMs)} upload ${seconds(now() - uploading)}`,
+          );
         }
+        timeline?.mark('zip');
       } finally {
         await rm(folder, { recursive: true, force: true }).catch((err: unknown) => log(`could not clear ${folder}: ${errorText(err)}`));
       }
@@ -512,7 +607,7 @@ export function createRunner(options: RunnerOptions): Runner {
     if (missing.length > 0) await said(`I couldn't get ${missing.length === 1 ? 'one song' : `${missing.length} songs`} of "${album.title}": ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}.`);
   }
 
-  async function respond(answer: Reply[]): Promise<void> {
+  async function respond(answer: Reply[], timeline?: Timeline): Promise<void> {
     if (answer.length === 0) return;
     if (!allowAnswer()) {
       log(`answer limit reached (${maxAnswers} a minute); not sending this answer`);
@@ -523,12 +618,18 @@ export function createRunner(options: RunnerOptions): Runner {
     // DOWNLOADS_AHEAD at a time, so "all" doesn't fetch twenty files at once.
     const songs = replies.filter((reply): reply is Extract<Reply, { kind: 'audio' }> => reply.kind === 'audio');
     const files = new Map<Reply, Promise<DownloadedAudio>>();
+    /** How long each song took to get ready, for its `song:` line. */
+    const fetchMs = new Map<Reply, number>();
     let started = 0;
     let sentSongs = 0;
     const startDownloads = (): void => {
       while (started < songs.length && started - sentSongs < downloadsAhead) {
         const song = songs[started++]!;
-        const file = options.fetchAudio(song.url, song.title);
+        const start = now();
+        const file = options.fetchAudio(song.url, song.title).then((got) => {
+          fetchMs.set(song, now() - start);
+          return got;
+        });
         file.catch(() => {}); // handled when it's sent
         files.set(song, file);
       }
@@ -569,7 +670,7 @@ export function createRunner(options: RunnerOptions): Runner {
         } catch (err) {
           log(`could not get ${reply.title ?? reply.url} ready: ${errorText(err)}`);
           const why = err instanceof AudioFetchError ? `: ${err.message}` : '';
-          await chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}${why}.`));
+          await timedSend(timeline, () => chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}${why}.`)));
         } finally {
           // This one is in hand (or failed), so the next can start: never more than DOWNLOADS_AHEAD at once.
           sentSongs += 1;
@@ -577,12 +678,15 @@ export function createRunner(options: RunnerOptions): Runner {
         }
         if (!file) continue; // one song that can't be sent doesn't stop the others
         try {
-          await chat.sendAudio(chatID, file);
+          const uploading = now();
+          await timedSend(timeline, () => chat.sendAudio(chatID, file));
           lastSongAt = now();
           log(`-> audio ${reply.title ?? reply.url}`);
+          note(songLine(reply.title ?? reply.url, file, fetchMs.get(reply) ?? 0, ` upload ${seconds(now() - uploading)}`));
+          timeline?.mark('song');
         } catch (err) {
           log(`could not send audio: ${errorText(err)}`);
-          await chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}.`));
+          await timedSend(timeline, () => chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}.`)));
         } finally {
           // What downloading, tagging and uploading the song left behind is given back now: on 2026-10-19 a 27 MB song's buffers
           // kept the host near 470 of 512 MB for two minutes after it was sent, until a collection happened to run.
@@ -592,7 +696,7 @@ export function createRunner(options: RunnerOptions): Runner {
         // A picture is a nicety: when it can't be shown, the answer goes on without it, and a song's name goes as text.
         const caption = reply.kind === 'image' && reply.caption ? markBotText(`${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}`) : undefined;
         const sendCaption = async () => {
-          if (caption) await sendLinkedText(caption, reply.kind === 'image' ? reply.postback : undefined);
+          if (caption) await sendLinkedText(caption, reply.kind === 'image' ? reply.postback : undefined, timeline);
         };
         if (!chat.sendImage || !options.prepareImage) {
           await sendCaption();
@@ -600,7 +704,8 @@ export function createRunner(options: RunnerOptions): Runner {
         }
         try {
           const prepared = await (drawn.get(reply) ?? options.prepareImage(reply));
-          rememberLink(await chat.sendImage(chatID, prepared.image), reply.kind === 'image' ? reply.postback : undefined);
+          const sendImage = chat.sendImage.bind(chat);
+          rememberLink(await timedSend(timeline, () => sendImage(chatID, prepared.image)), reply.kind === 'image' ? reply.postback : undefined);
           if (!prepared.captioned) await sendCaption();
         } catch (err) {
           log(`could not send a picture: ${errorText(err)}`);
@@ -610,7 +715,7 @@ export function createRunner(options: RunnerOptions): Runner {
           startPictures();
         }
       } else if (reply.kind === 'album') {
-        await sendAlbum(reply);
+        await sendAlbum(reply, timeline);
       } else {
         if (reply.chips) {
           setChoices({ chips: reply.chips, ...(reply.numbers ? { numbers: reply.numbers } : {}), at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
@@ -623,7 +728,7 @@ export function createRunner(options: RunnerOptions): Runner {
         // A message with no words only carries its list's chips: where a 👍 picks, nothing more is said.
         if (!text.trim()) continue;
         // A list's closing line says how to pick from it; where a 👍 picks, it is not one of the list's 🎵 lines.
-        await sendLinkedText(chat.reactions && reply.chips ? markHint(text) : markBotText(text), reply.postback);
+        await sendLinkedText(chat.reactions && reply.chips ? markHint(text) : markBotText(text), reply.postback, timeline);
         // What the bot said, in the host's log too: an answer that explains a failure is otherwise invisible there.
         log(`-> ${JSON.stringify(text.length > 160 ? `${text.slice(0, 160)}…` : text)}`);
       }
@@ -681,11 +786,12 @@ export function createRunner(options: RunnerOptions): Runner {
    * song. They go one at a time because the songs have to arrive in the order they were asked for, and a small host
    * can't hold two downloads' worth of memory.
    */
-  async function send(replies: Reply[], done: () => Promise<void>): Promise<void> {
+  async function send(replies: Reply[], done: () => Promise<void>, timeline?: Timeline): Promise<void> {
     const run = async (): Promise<void> => {
       try {
-        await respond(replies);
+        await respond(replies, timeline);
       } finally {
+        if (timeline) finished(timeline);
         await done();
       }
     };
@@ -732,6 +838,8 @@ export function createRunner(options: RunnerOptions): Runner {
     const outOfRange = isNumber && listed.length > 0 && !choice;
     if (!(isNumber || all) || listed.length === 0) setChoices(undefined);
     log(`<- ${choice ? `choice ${text}` : JSON.stringify(text)}`);
+    const timeline = new Timeline(text, { phoneAt: Date.parse(message.timestamp), now });
+    live.add(timeline);
 
     const stopTyping = startTyping();
     try {
@@ -756,14 +864,16 @@ export function createRunner(options: RunnerOptions): Runner {
         ];
       } else {
         try {
-          replies = await bot.handle(incoming);
+          replies = await bot.handle(incoming, (step, ms) => timeline.span(step, ms));
         } catch (err) {
           log(`bot error: ${errorText(err)}`);
           replies = [{ kind: 'text', text: ERROR_NOTICE }];
         }
       }
-      await send(replies, stopTyping);
+      timeline.mark('bot');
+      await send(replies, stopTyping, timeline);
     } catch (err) {
+      live.delete(timeline);
       await stopTyping();
       throw err;
     }
@@ -781,13 +891,15 @@ export function createRunner(options: RunnerOptions): Runner {
     if (asked.length < reactions.length) log('ignoring a 👍 on a message that does not stand for a song');
     if (asked.length === 0) return;
     for (const { postback } of asked) log(`<- 👍 ${postback}`);
+    const timeline = new Timeline(`👍 ${asked.map(({ postback }) => postback).join(' ')}`, { phoneAt: Date.parse(asked[0]!.reaction.timestamp), now });
+    live.add(timeline);
     const stopTyping = startTyping();
     try {
       let failed = false;
       const answers = await Promise.all(
         asked.map(async ({ reaction, postback }): Promise<Reply[]> => {
           try {
-            return await bot.handle({ from: chatID, messageId: reaction.id, postback });
+            return await bot.handle({ from: chatID, messageId: reaction.id, postback }, (step, ms) => timeline.span(step, ms));
           } catch (err) {
             log(`bot error: ${errorText(err)}`);
             // One apology for the lot, however many songs failed.
@@ -797,8 +909,10 @@ export function createRunner(options: RunnerOptions): Runner {
           }
         }),
       );
-      await send(answers.flat(), stopTyping);
+      timeline.mark('bot');
+      await send(answers.flat(), stopTyping, timeline);
     } catch (err) {
+      live.delete(timeline);
       await stopTyping();
       throw err;
     }
@@ -885,6 +999,10 @@ export function createRunner(options: RunnerOptions): Runner {
           const at = Date.parse(message.timestamp);
           if (at > lastAt) lastAt = at;
           unsaved = true;
+          if (message.status) {
+            heard(message.status);
+            continue;
+          }
           if (message.bridgeSendFailure) {
             log('the Google Messages bridge reported a message delivery failure');
             await options.onBridgeSendFailure?.();
@@ -956,6 +1074,8 @@ export function createRunner(options: RunnerOptions): Runner {
       wake?.(); // a song waiting its turn goes now
       await current;
       await idle();
+      // Lines still waiting for Google's word are written as they stand.
+      for (const timeline of [...waitingFor.keys()]) flush(timeline);
     },
   };
 }

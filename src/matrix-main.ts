@@ -16,6 +16,7 @@ import { memoryCheck } from './cloud/memory.ts';
 import { watchJoinedRoom } from './cloud/room.ts';
 import { youTubeRelayFromEnv } from './cloud/youtube-relay.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
+import { recentTimelines } from './timeline.ts';
 import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
 import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { songSources } from './sources/songs.ts';
@@ -147,6 +148,9 @@ try {
     // An album's zip is written to disk and streamed from there, so it can be bigger than a song held in memory.
     maxFileBytes: config.maxZipMb * 1024 * 1024,
     onBridgeSendFailure: () => bridge.sendFailed(),
+    // Where each request's time goes, one line each in the log; the last few are in the cloud host's /status too.
+    sendStatus: config.sendStatus,
+    onTimeline: (line) => recentTimelines.add(line),
     ...(pictureTakers.length > 0 ? { onPicture: (picture: IncomingPicture) => pictureTakers.forEach((extension) => extension.onPicture!(picture)) } : {}),
     log,
     // Half a minute without the homeserver is worth a word; it comes back on its own when it's restarted.
