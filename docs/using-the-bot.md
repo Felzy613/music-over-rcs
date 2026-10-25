@@ -1,107 +1,98 @@
 # Using the bot
 
-Everything happens in your chat with your own number in Google Messages. Every text the bot writes starts with 🎵 (or 💿 for an album, 🎤 for an artist's name over a list), except the line that closes a list and says how to pick from it ('Text "more" for more of …'), which isn't a song and has no mark. Because it writes as you, its messages look like ones you sent yourself.
+Everything happens in your chat with your own number in Google Messages. Every text the bot writes starts with a mark: 🎵 (a song, or anything else it says), 💿 an album, 🎤 an artist, 📦 an album's zip. The line that closes a menu and says what more you can do ('Text "songs more" for 8 more songs…') isn't a song and has no visible mark. Because the bot writes as you, its messages look like ones you sent yourself.
 
-**Every message starts with a command**: `search`, `album`, `zemer`, `trending`, `new`, `more`, `all`, a holiday list, `follow`, `unfollow`, `following` or `help`. To pick a song from a list, tap 👍 on it; the albums in a list have numbers, and texting one lists that album's songs. Anything else isn't searched for: the bot answers with the line to send instead (`search lipa vnusni`), so a song's name is never taken for a command, or the other way round.
+**Every message starts with a command**: `search`, `artist`, `album`, `song`, `zemer`, `songs more` (`albums more`, `artists more`), `more`, `zip`, `all`, `trending`, `new`, a holiday list, `follow`, `unfollow`, `following` or `help`. Anything else isn't searched for: the bot answers with the line to send instead (`search lipa vnusni`), so a song's name is never taken for a command, or the other way round.
 
-## Asking for a song
+It works like a streaming app (the owner's design, 2026-10-20): a search gives a **menu**, nothing is sent or opened on its own, and a 👍 opens or sends what you choose.
 
-Text `search`, then the artist and the song, the way you'd say it:
+## A search's menu
+
+Text `search` and what you're looking for: a song, an album, an artist, or some of each.
 
 ```text
-search yoely weiss shabbos
+search achas
 ```
 
-You get two messages:
+You get a menu, one message per line so each can be 👍'd: up to 5 artists (🎤), 5 albums (💿, numbered) and 5 songs, best first, then a line saying what else you can do.
 
-1. the song's **card**: its cover (with the title and artist under it)
-2. the audio file itself, which plays in the chat
+```text
+🎤 Nachas
+🎤 Yiddish Nachas
+🎤 Shlepping Nachas
+💿 1. Achas — Mordechai Shapiro · 2022 · 12 songs
+💿 2. Achas - A Freilach Medley — Zanvil Weinberger · 2024 · 8 songs
+💿 3. One Heart (Aguda Achas) — Beri Weber · 2016 · 11 songs
+🎵 Achas — Mordechai Shapiro
+🎵 Achas — Yingerlich
+🎵 Achas — Yaakov Rosenblum
+🎵 Achas — Yerachmiel Begun & The Miami Boys Choir
+🎵 Achas — Freilach Band
+Text "songs more" for 8 more songs, or an album's number for its songs.
+```
 
-(The bridge can't put a caption on a picture, so the name is drawn on it. If a picture can't be made, you get the plain cover and the name as a line of text; a song without a cover comes with its name as text.)
-
+- **Nothing is picked for you.** Even one song the words name exactly comes as a menu of one, and an artist's full name (`search lipa schmeltzer`) is a menu with them on the 🎤 line; 👍 it for their page.
+- **The order.** Artists the words spell exactly come first, then ones they start, then ones a typo away (`achas` offers "Nachas", below any real match, and never opens it). Songs: the ones the words name (give or take "(feat. …)", "(Live)" and the alphabet), then the ones with every word in the title, then the ones that fit only with the artist's name; within each, the most played first. Albums: the ones the words name, then the newest, then the bigger. An album's editions ("(Yinglish Version)", "- גרסה עברית") are one line.
+- **Whose it is.** " — Artist" is left off a line when the menu's only artist is that line's (`search lipa schmeltzer`: his songs and albums plain, "Lipa Schmeltzer Concert — Camp Coolam" credited).
 - **Apostrophes are optional.** `search lipa vnusni` finds "V’Nusni", `search uvtuvcha` finds "U’v’tuvcha HaGadol", and `search v'nusni` works too.
-- **Typos are fine.** `search yoely wiess shabos`, `search lipa shmeltzer vnusni` (the site writes "Schmeltzer"), `search avrohom fried` ("Avraham"), `search shlomo daskal` ("Shloime") and `search mordechai ben dovid` all work. The bot learns the site's spelling from the titles around your other words.
-- **Extra words are fine.** `... by Yoely Weiss` is understood, and in a longer request one stray word (an `mp3` at the end, say) is forgiven.
+- **Typos are fine.** `search yoely wiess shabos`, `search lipa shmeltzer vnusni` (the site writes "Schmeltzer"), `search avrohom fried` ("Avraham") all work.
 - **Hebrew and Yiddish titles** are found by how you'd write them in English: `search vnusni` finds "ונתנו", `search elazar lipa'le` the album "אלעזר ליפא׳לע", `search shabbos` also "שבת".
-- **Where songs come from.** `search` asks **Zemer first**: its catalog has the albums and singles of every artist on Zemer's list. If it has something that fits every word you typed, that is the answer. If not, the bot looks on music-table.com: your catalog first, then the site ([Zemer and YouTube Music](youtube-music.md), `SONG_SOURCES`). A Zemer song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
-- **A song it already knows by name comes back at once** (when Zemer has nothing for it). The song's whole name, alone or with some or all of the artist's (`search vnusni`, `search lipa vnusni`), is answered from the catalog without searching the site, and songs it keeps ready on disk go out without waiting for a download. A song that has to be downloaded starts downloading while its card is being made.
+- **Where it comes from.** `search` asks **Zemer first**: its catalog has the albums and singles of every artist on Zemer's list. Only when nothing there fits every word does the bot look on music-table.com: your catalog first, then the site ([Zemer and YouTube Music](youtube-music.md), `SONG_SOURCES`). A menu from music-table.com looks the same (an artist the site has on a 🎤 line, then songs). A Zemer song arrives as an `.m4a`; a music-table.com one as an `.mp3`.
 - **A letter off in `search` itself is fine** (`serach`, `seach`).
 
-## Lists
+### Just one kind
 
-When several songs or albums fit, you get a list, one short message each, so you can tap 👍 on the one you want: a song is its title, an album starts with 💿, has a number, and gives its year and how many songs it has. When everything on the list is by one artist, their name comes first, once:
+`artist`, `album` or `song` (or the plural) and the words give a menu of that kind only: `album lipa schmeltzer` is five of his albums, `artists achas` the three Nachas artists. `albums <name>` searches; `albums more` pages (an album actually called "More" needs `search more`).
 
-```text
-🎤 Lipa Schmeltzer
-💿 1. אלעזר ליפא׳לע · 2025 · 15 songs
-💿 2. אלעזר ליפא׳לע (Yinglish Version) · 2025 · 15 songs
-💿 3. אלעזר ליפא׳לע - גרסה עברית · 2025 · 15 songs
-Text an album's number to choose from its songs.
-```
-
-Otherwise each line says whose it is:
-
-```text
-🎵 Shabbos — Shua Rose
-🎵 Shabbos — Shlomo Katz
-🎵 Shabbos — Suki & Ding
-💿 1. Shabbos Tish — Belz · 2000 · 14 songs
-💿 2. Shabbos Classics — Efraim Mendelson · 2018 · 13 songs
-Text an album's number to choose from its songs.
-```
-
-A song that is on one of the albums listed (or, on an artist's page, on any of their albums) isn't listed on its own as if it were a single: it is under its album's number.
-
-Then any of:
+### Doing something with a menu
 
 | Reply | What happens |
 | --- | --- |
-| 👍 on a song (🎵) | That song. The list stays open, so you can 👍 another next. |
-| 👍 on an album (💿) | The whole album, as one zip (below) |
-| An album's number (`2`) | Its songs, numbered as on the album, under the album's 💿 line: 👍 the songs you want (or text a song's number), or 👍 the 💿 line for all of it as a zip |
-| `all` (or `send all`, `everything`) | Every song on the list, with 5 seconds between files: files only, no cards, up to 20 (not the albums) |
-| `more` | The next ones, when there are more |
-| `search` and a new name | A new search; the old list closes |
+| 👍 on a song (🎵) | That song: its card (the cover, with the title and artist drawn under it), then the audio file. The menu stays open. |
+| 👍 on an album (💿), or its number (`2`) | The album's songs (below) |
+| 👍 on an artist (🎤) | Their page: their newest albums and most played songs (below) |
+| `songs more` (or `albums more`, `artists more`) | The next 8 of that kind; album numbers go on from the ones shown (6, 7, …) |
+| `more` | The last "… more" again; before any, it says which there are |
+| `all` (or `send all`, `everything`) | Every song shown so far, files only, up to 20, 5 seconds apart |
+| 👍 on any line of an earlier menu | Back to that menu: it is the one `songs more`, numbers and `all` go on with |
 
-A number that isn't on the list gets the numbers that are ("Text a number from the list (1 to 5), or tap 👍 on a song."), and in a list with no numbers, "To get a song from the list, tap 👍 on it." Numbers on an artist's page go on across `more` (the second page's first album is 6), and the earlier ones still work. A search's list stays open (for `all`) for half an hour, the other lists for two hours, and the daily message's for the day; a 👍 on a song works for a month. (On Beeper and RCS for Business, where a 👍 can't reach the bot, a list comes as one numbered message instead, and you reply with a number.)
+A 👍 on a menu's last line goes back to it without sending anything (`🎵 Back to "achas".`). An unrelated text in between (`help`, a question) leaves the menu as it is; only a new menu replaces it. A number not in the menu gets the numbers that are; a number works for two hours after the menu was last used, a 👍 on a line for a month. The menus are kept in the catalog, so a restart (or a deploy) loses nothing: `songs more` goes on where it was.
 
-## Artists
+## An artist's page
 
-Search for an artist's name, or part of it (`search lipa`, `search yoely weiss`), to get their page on Zemer: their five most played songs, then their five newest albums, and `more` for the next ones.
-
-```text
-🎤 Lipa Schmeltzer
-24 albums · 25 singles · 412 songs
-🎵 Mizrach
-🎵 Hang Up The Phone
-🎵 Abaye Ve'rava - אביי ורבא
-🎵 Believe In A Miracle
-🎵 Shualim - שועלים
-💿 ליפא פאַר א גוּט יאָר - Lipa's Tekiyos · 2026 · 12 songs
-💿 אלעזר ליפא׳לע · 2025 · 15 songs
-💿 יום טוב ליפא · 2023 · 17 songs
-💿 The Event 5769 (Live) · 2023 · 26 songs
-💿 BavLipa - בבליפא · 2022 · 20 songs
-🎵 Text "more" for more of Lipa Schmeltzer.
-```
-
-- Typos are fine (`search lipa shmeltzer`).
-- An album shows once here, in its original edition; `album lipa` lists all of them, every edition, newest first, eight at a time.
-- An artist Zemer doesn't have gets their releases from music-table.com instead, newest first, ten at a time (an album there is one entry; picking it lists its songs).
-
-## Albums
-
-To get a whole album, start with `album`:
+👍 an artist's 🎤 line:
 
 ```text
-album a poshiter yid
+🎤 Lipa Schmeltzer · 21 albums · 412 songs
+💿 1. ליפא פאַר א גוּט יאָר - Lipa's Tekiyos · 2026 · 12 songs
+💿 2. אלעזר ליפא׳לע · 2025 · 15 songs
+…
+🎵 פועל
+🎵 Kovati (AKA Lipa's Superbowl Takeover)
+…
+Text "albums more" or "songs more" for 8 more, or an album's number for its songs.
 ```
 
-An album the words name is sent at once; otherwise you get the albums that fit (`album lipa` lists all of an artist's), numbered: a 👍 on one sends it, its number lists its songs to choose from (`all` doesn't send every album). A `search` lists albums too, after the songs, and when a song comes whose album your words also name, a 💿 line for the album comes under it.
+Their newest five albums (an album's editions as one) and their five most played songs, a song listed even when its album is too; `albums more` and `songs more` for the rest. An artist music-table.com has (a 🎤 line in a menu from there) gets their releases there instead, newest first, ten at a time with `more`.
 
-You get its cover and one line (`11 songs, coming as a zip.`), then **one zip file**, `Artist - Album.zip`, with every song, numbered in album order (`01 Chamisha Kolos.m4a`, `02 …`). A zip holds up to 100 MB (`MAX_ZIP_MB`, what the bridge and Google Messages take), which nearly every album fits; a bigger one arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
+## An album
 
-Everything from Zemer is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out of the zip ("1 left out").
+👍 an album's 💿 line, or text its number:
+
+```text
+💿 FOREVER — Itzik Dadya · 2025 · 13 songs
+🎵 1. Bayit Shel Shalom - בית של שלום
+🎵 2. Forever - פוראבר
+…
+🎵 13. RokedLi (Funk Version)
+📦 All 13 songs as one zip · 44 min
+Tap 👍 on the songs you want, or text their numbers; 👍 📦 or text "zip" for all of it.
+```
+
+- 👍 a song, or text its number, for that song; `all` sends its songs one by one (up to 20).
+- **👍 the 📦 line, or text `zip`**, for all of it: its cover, one line (`13 songs, coming as a zip.`), then **one zip file**, `Artist - Album.zip`, every song numbered in album order (`01 Bayit Shel Shalom.m4a`, …). A zip holds up to 100 MB (`MAX_ZIP_MB`, what the bridge and Google Messages take), which nearly every album fits; a bigger one arrives as several zips, "(part 1 of 2)" and so on. In a chat that can't take a file (Beeper) the songs come one by one instead.
+- `songs more` in an album goes on with the menu it was opened from. A 💿 line from before menus (an old message) opens its album the same way.
+- Everything from Zemer is held to [Zemer's artist list](youtube-music.md#zemers-artist-list), no female singers: an album is offered only if its artist is on the list, and a song on it that has a woman credited, or is blocked, is left out ("1 left out").
 
 ## Zemer alone
 
@@ -200,20 +191,27 @@ To see today's message now: `npm run library -- digest` (shows it, sends nothing
 
 ## 👍 to get a song
 
-A thumbs up (any skin tone) on a message that stands for one song gets you that song: any option in a list, any song's line in the daily message, and a new-song alert's card or line. Other reactions, and a 👍 on anything else (like a song you just received, or a heading), are just reactions; the bot ignores them.
+A thumbs up (any skin tone) on a line does what the line is: a song's line gets the song, an album's opens it, an artist's opens their page, a 📦 sends the zip, a menu's last line goes back to it. That holds for a menu, an album, an artist's page, the daily message and a new-song alert. Other reactions, and a 👍 on anything else (like a song you just received), are just reactions; the bot ignores them.
 
 👍 as many as you like at once. Text lists are sent together; the audio files come **5 seconds apart**, each card with its song, so the phone has sent one before the next arrives ("typing…" shows while the next one waits). `SONG_GAP_SECONDS` in [Configuration](configuration.md) changes the gap; it applies to `all` too.
 
 ## Small things worth knowing
 
-- `help`, `hi`, `menu` or a single character gets the help text, the list of commands:
+- `help`, `hi`, `menu` or a single character gets the help, every command in one message:
 
   ```text
   🎵 Start each message with a command:
-  "search" and a song or an artist, like "search lipa vnusni".
-  "trending", "new", "chanukah", "purim", "wedding" or "vocal" for lists, "more" for the next ones, and "all" for every song on a list.
-  "follow" and an artist to get their new songs as soon as they're out ("unfollow", "following").
-  Tap 👍 on a song (🎵) to get it, or on an album (💿) for all of it as a zip; text an album's number to choose from its songs.
+  search <words> — artists, albums and songs
+  artist / album / song <words> — just that kind
+  artists more · albums more · songs more — 8 more ("more" repeats the last)
+  👍 a 🎤 artist — newest albums and top songs
+  👍 a 💿 album, or text its number — its songs; 👍 a song or text its number to get it
+  👍 📦 or text "zip" — the whole album as one zip
+  👍 any line of an earlier list — back to that list
+  all — every song on the list (up to 20)
+  zemer <words> — Zemer only
+  trending · new · chanukah · purim · wedding · vocal — music-table.com lists
+  follow / unfollow <artist> · following
   ```
 
 - A message that isn't a command gets the line to send instead:

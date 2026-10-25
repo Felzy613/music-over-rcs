@@ -5,9 +5,16 @@ Text "search" and a song name in Google Messages and get the audio file back, wi
 A personal bot that lives in your own "message yourself" chat. You text it a song, an album or an artist; it looks first in [Zemer](https://github.com/ZemerTeam/zemer-app)'s catalog (the albums and singles of the artists on Zemer's list, with no female singers; the audio comes from YouTube Music), and only when Zemer doesn't have it on [music-table.com](https://www.music-table.com) (a Jewish music blog that offers MP3 downloads of new singles on its release posts), and sends the file back over RCS. Every morning it can also send you what's new.
 
 ```text
-you:  search yoely weiss shabbos
-bot:  [the cover, with "Shabbos · Yoely Weiss" drawn under it]
-      [Yoely Weiss — Shabbos.mp3, 4.4 MB]
+you:  search achas
+bot:  🎤 Nachas
+      💿 1. Achas — Mordechai Shapiro · 2022 · 12 songs
+      🎵 Achas — Mordechai Shapiro
+      🎵 Achas — Yingerlich
+      …
+      Text "songs more" for 8 more songs, or an album's number for its songs.
+you:  👍 on "Achas — Mordechai Shapiro"
+bot:  [the cover, with "Achas · Mordechai Shapiro" drawn under it]
+      [Mordechai Shapiro — Achas.m4a, 3.6 MB]
 ```
 
 ## What you can text it
@@ -16,21 +23,22 @@ Every message starts with a command, so a song's name is never taken for one.
 
 | Text | What you get |
 | --- | --- |
-| `search` and a song, like `search yoely weiss shabbos` | The song: its cover, then the audio file. Typos and missing apostrophes are fine (`search yoely wiess shabos`), and Hebrew and Yiddish titles are found by how you'd spell them in English (`search vnusni` for "ונתנו", `search elazar lipa'le` for "אלעזר ליפא׳לע"). |
-| `search` and an artist, like `search lipa` or `search yoely weiss` | Their page: their five most played singles and their five newest albums, numbered, `more` for the next ones. A song on one of their albums is under that album, not listed on its own. |
-| `search` and anything else, like `search shabbos` | The songs (🎵) and albums (💿) that have all your words, one message each to 👍, the albums numbered |
-| `album` and a name, like `album a poshiter yid` | That album, **all of it as one zip** (`Artist - Album.zip`, with `01 Title.m4a`, `02 …` inside; up to 100 MB, which is nearly every album), with the cover first. Several that fit are listed to pick from. |
-| `album` and an artist, like `album lipa` | All their albums, newest first, eight at a time |
+| `search` and anything, like `search achas`, `search lipa schmeltzer` or `search yoely weiss shabbos` | A **menu**, like a streaming app's: up to 5 artists (🎤), 5 albums (💿, numbered) and 5 songs, best first, one message each to 👍. Nothing is sent or opened on its own. Typos and missing apostrophes are fine (`search yoely wiess shabos`), and Hebrew and Yiddish titles are found by how you'd spell them in English (`search vnusni` for "ונתנו", `search elazar lipa'le` for "אלעזר ליפא׳לע"). |
+| `artist`, `album` or `song` and a name, like `album lipa schmeltzer` | A menu of that kind only |
+| `songs more`, `albums more`, `artists more` | The next 8 of that kind in the menu on screen (`more` repeats the last one) |
+| 👍 on a song (🎵) | The song: its cover, then the audio file. 👍 several and their audio files come 5 seconds apart, so the phone keeps up. |
+| 👍 on an artist (🎤) | Their page: their newest albums and most played songs, `albums more` / `songs more` for the rest |
+| 👍 on an album (💿), or its number, like `2` | Its songs, numbered as on the album (👍 the ones you want, or text their numbers), and a 📦 line |
+| 👍 on 📦, or `zip` | The whole album as **one zip** (`Artist - Album.zip`, with `01 Title.m4a`, `02 …` inside; up to 100 MB, which is nearly every album), with the cover first |
+| 👍 on any line of an earlier menu | Back to that menu: `songs more` and numbers go on with it |
 | `zemer` and a song, like `zemer lipa vnusni` | The same as `search`, on Zemer alone: no falling back to music-table.com (`youtube` and `yt` still work too) |
 | `trending` | What's popular on music-table.com right now |
 | `new` | The newest releases |
 | `chanukah`, `purim`, `wedding` or `vocal` | That list, most popular first |
-| `more` | The next ten of the last list |
-| 👍 on a song (🎵) or an album (💿) in a list or the daily message | That song, or that album as one zip. 👍 several and their audio files come 5 seconds apart, so the phone keeps up. |
-| An album's number, like `2` | That album's songs, numbered as on the album: 👍 the ones you want (or text a song's number), or 👍 the album line at the top for all of it as a zip |
-| `all` | Every song on the last list (up to 20), with 5 seconds between audio files |
+| `more` | The next ten of a music-table.com list |
+| `all` | Every song on the list on screen (up to 20), with 5 seconds between audio files |
 | `follow shwekey` | New songs by that artist as soon as they're out (`following` lists them, `unfollow shwekey` stops) |
-| `help` | A reminder of all this |
+| `help` | Every command, in one message |
 
 Each morning (09:00 unless you change it) it sends a **daily new-music message**: one picture of the new releases' covers, then a line for each. It sends names and pictures, not songs; 👍 the ones you want, or text `all`.
 
@@ -40,9 +48,11 @@ Each morning (09:00 unless you change it) it sends a **daily new-music message**
 
 ## What it does behind the scenes
 
-- **Zemer first, music-table.com behind it.** Zemer's catalog has whole albums as well as singles, so a search asks it first and takes what it finds there whenever it has the song; music-table.com, which mostly has new singles, answers only what Zemer doesn't have. Everything from Zemer is checked against Zemer's artist list again, on the bot's side, when it is found and again when it is sent.
+- **Zemer first, music-table.com behind it.** Zemer's catalog has whole albums as well as singles, so a search asks it first and lists what it finds there whenever anything fits; music-table.com, which mostly has new singles, answers only what Zemer doesn't have. Everything from Zemer is checked against Zemer's artist list again, on the bot's side, when it is found and again when it is sent.
 - **Knows the whole site.** On its first run it reads all of music-table.com (about 3,600 posts: 5,000+ songs by 1,000+ artists) into a local catalog, in the background, and then keeps it current every three hours, for its lists and the daily message.
-- **Answers while it sends.** A request made while a song or album is on its way is answered at once if the answer is text (a list, an album's songs); any songs you ask for meanwhile come after the ones already on their way, in the order you asked.
+- **Answers while it sends.** A request made while a song or album is on its way is answered at once if the answer is text (a menu, an album's songs); any songs you ask for meanwhile come after the ones already on their way, in the order you asked.
+- **Remembers where you are.** Every menu, artist and album it shows is kept (in the catalog, backed up with it), so `songs more`, a number or a 👍 on an older menu work across restarts.
+- **Measures itself.** Each request leaves one `timeline:` line in the host's log (phone to bot, the bot's own work, each message, and when Google Messages had the last one), each song a `song:` line, each album an `album:` line; the cloud host's `/status` shows the last 20.
 - **Saves what it sends.** Once a OneDrive app is set up ([How it runs](docs/cloud.md), step 5; it is on the live bot), every song it sends is also uploaded in the background to your OneDrive, sorted like a music library, `Artist/Album/01 Title.mp3` (a single goes in `Artist/Singles/`), with tags to match (artist, album, track number, title, cover); the file you get is named `Artist - Title.mp3`. The host has no disk to keep songs on, so without OneDrive nothing is saved. (A copy run on a computer with a disk can instead keep popular songs ready ahead of time and move them to an external drive: see [The library](docs/library.md).)
 - **Forgiving search.** Apostrophes are optional ("vnusni" finds "V’Nusni"), a longer word may be a letter or two off, part of the artist's name is enough, and a word typed in English letters matches a Hebrew or Yiddish title it can be read as. When a request doesn't match exactly on music-table.com, it tries the request with each word left out and learns how the site spells your words from the titles around them.
 - **Polite to the site.** It identifies itself, paces its requests, and remembers what it learned so it doesn't ask twice.

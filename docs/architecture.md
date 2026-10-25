@@ -9,28 +9,33 @@ In production the homeserver, the bridge and the bot run together in one contain
 ```text
 phone ──RCS──> Google Messages ──> mautrix-gmessages ──> Synapse room ──> MatrixClient.listMessages()
                                                                                │
-                                                               runner (one chat, polls every 1.5 s)
+                                                  runner (one chat; a long poll: the homeserver answers when a text comes)
                                                                                │  a command, or a 👍
                                                                               bot
                                                     ┌──────────────────────────┼───────────────────────────┐
-                                             catalog (SQLite)          music-table.com lookup           lists
-                                             exact song, artist        search → pick → read posts       trending / new / artist
+                                           Zemer (search.zemer.io)     catalog + music-table.com         lists
+                                           menu: artists, albums, songs  when Zemer has nothing          trending / new / artist
                                                     └──────────────────────────┼───────────────────────────┘
-                                                                        replies: image, text, audio
+                                                     views (catalog): the menu on screen, and the ones before it
+                                                                        replies: image, text, audio, album
                                                                                │
                                                      runner: image fetch, audio from disk or download, send
                                                                                │
                                                      MatrixClient.sendImage / sendText / sendAudio ──> bridge ──> phone
 ```
 
-- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback like `play:42`, `album:<id>`, `tracks:<id>`, `post:<slug>` or `all:…`) and returns replies: `text` (optionally closing a list, with the list as its options, or standing for one song or album), `image` (a cover, with the song's name to draw on it), `collage` (covers, each standing for its song), `audio`, `album` (songs to send as one zip). A list is a heading, one text per entry, and a closing text with the options. Songs have no numbers (a 👍 picks); albums do (`number` on the line, `numbers` on the closing text), and texting an album's number (`tracks:<id>`) lists its songs, numbered as on the album.
-- **`runner`** connects the bot to one chat on a platform: it polls for new messages, skips its own (🎵, 💿, 🎤, or the invisible mark a list's closing line starts with), handles 👍, `all` and numbers (an album's where a 👍 picks; every line's where a 👍 can't reach the bot), shows "typing…", prepares pictures and files (songs download ahead, at most three at once) and sends replies in order. A text answer goes out at once; an answer with a song, picture or album waits in a queue of such answers (one at a time, in the order asked) that the poll doesn't wait for, so a request made while a song or album is on its way is answered then and not after it. Where a 👍 can't reach the bot it numbers a list and folds it back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
+- **`bot`** decides what to answer. It knows nothing about chat platforms: it takes a message (text, or a postback: `play:42`, `artist:<id>`, `album:<id>`, `tracks:<id>`, `single:<id>`, `zip:<id>`, `view:<id>`, `mtartist:<id>`, `post:<slug>` or `all:…`, any of them with `@<view>` after it) and returns replies: `text` (a menu line standing for a song, album or artist, or a menu's closing line carrying the menu as its options), `image` (a cover, with the song's name to draw on it, maybe a `better` one on its way), `collage`, `audio` (maybe with an `after` to wait for before tagging), `album` (songs to send as one zip). **A search is a menu** (the owner's design, 2026-10-20): up to 5 artists, 5 albums (numbered) and 5 songs, ranked by `src/ranking.ts`, written by `src/menu.ts`, one message per line, nothing picked or sent on its own. Each menu, artist page, album and list is a **view** (`src/views.ts`, the `views` table): what it is of, and every line it has shown. `songs more` (and `albums more`, `artists more`) asks the source again (its answers are kept 10 minutes), leaves out what the view has shown and shows the next 8; a view without that kind passes it to the one it was opened from. A line's postback names its view (`play:42@41`), so a 👍 on a line of an older menu makes that menu current again. An answer that changes the current view without showing a list carries that view's options (a text with chips and no words), so a number picks from the menu now on screen.
+- **`runner`** connects the bot to one chat on a platform: it reads new messages (a long poll where the chat can: `MATRIX_SYNC_WAIT_MS`, which an announcement or stop ends), skips its own (🎵, 💿, 🎤, 📦, or the invisible mark a menu's closing line starts with), handles 👍, `all` and numbers (an album's, or a song's in an album, where a 👍 picks; every line's where a 👍 can't reach the bot), shows "typing…", prepares pictures and files (songs download ahead; an album's three at a time, each to disk as it comes, fewer when memory is short or after YouTube turned the relay away) and sends replies in order. A menu's options apply when the answer is decided, not when it has been sent, and only an answer with options of its own replaces them. Each request leaves a `timeline:` line (`src/timeline.ts`), each song a `song:` line and each album an `album:` line; with the bridge's status events on (the cloud host), a request's line waits for Google's word that its messages arrived. A text answer goes out at once; an answer with a song, picture or album waits in a queue of such answers (one at a time, in the order asked) that the poll doesn't wait for, so a request made while a song or album is on its way is answered then and not after it. Where a 👍 can't reach the bot it numbers a list and folds it back into one message. It also sends messages the bot starts itself (`announce`, used by the daily message), never in the middle of answering a request.
 - **Transports** implement `ChatClient` (`listMessages`, `sendText`, `sendAudio`, optional `sendImage`, `sendFile` (the album zip), `setTyping`): `src/matrix/` (the bridge route), `src/beeper/`, and the simulator's `SimulatedChat`. The RCS for Business route (`src/rbm/`, `src/handler.ts`, `src/server.ts`) is a webhook server that uses the bot directly.
 
 ## Code layout
 
 ```text
-src/bot.ts              what to answer: Zemer first, then music-table.com; artists' pages, songs, albums, lists and their format, follow / unfollow
+src/bot.ts              what to answer: commands, postbacks, menus (Zemer first, then music-table.com), artists' pages, albums, paging, going back, lists, follow / unfollow
+src/ranking.ts          a menu's order: artists (exact, then started, then a typo away), songs (named, then every word in the title, then only with the artist; most played first), albums (named, then newest; editions folded)
+src/menu.ts             a menu's lines (🎤, 💿 numbered, "Title — Artist"), its closing line, and the help
+src/views.ts            the chat's views (menus, artists, albums, lists), which one is current, and postbacks with a view in them
+src/timeline.ts         where a request's time goes, one line for the log and /status
 src/runner.ts           watches one chat and answers it; 👍, numbers (albums', or every line's where 👍 can't reach), album zips from disk, songs spaced out, typing, announcements, safety limits
 src/catalog.ts          the SQLite catalog: songs, artists, site posts, plays, kept songs, follows, state
 src/health.ts           problem reports when something breaks (mailed by the cloud host; a notification on a Mac); the bridge's login status, and when to restart it
@@ -85,8 +90,9 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 | `plays` | Every song sent, with its time |
 | `follows` | Artists you follow (or unfollowed, so they're never followed for you again), whether by your choice or from your plays, and since when |
 | `audio_cache` | Songs kept on disk, for a bot on a computer with a disk (the cloud host keeps none): the file (a name in the cache folder, or its full path once moved to `SONGS_ARCHIVE_DIR`), type, size, last used |
-| `message_links` | Messages that stand for one song (for 👍), kept a month |
-| `state` | Small facts: last sync, scan progress, the daily message's date, the current list |
+| `message_links` | Messages that stand for something (a song, album, artist, menu: their postback, with its view), for 👍, kept a month |
+| `views` | Every menu, artist page, album and list shown: what it is of, the view it was opened from, every line it showed (with its postback and number), the last "… more"; ids never reused, a month unused or past the newest 300 cleared out |
+| `state` | Small facts: last sync, scan progress, the daily message's date, the current view (`chat.view`), the options on offer (`chat.choices`) |
 
 ## Background jobs
 
@@ -96,7 +102,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 
 ## Safety rails
 
-- Every bot message starts with 🎵, or 💿 (an album line) or 🎤 (an artist's name over a list); the one exception is a list's closing line ('Text "more" for more of …'), which starts with an invisible left-to-right mark (`HINT_MARK`) because it isn't a song. Add-on relays start with 🤖. The runner never answers a message that starts with any of these, or one it sent itself.
+- Every bot message starts with 🎵, or 💿 (an album line), 🎤 (an artist) or 📦 (an album's zip); the one exception is a menu's closing line ('Text "songs more" for 8 more songs…'), which starts with an invisible left-to-right mark (`HINT_MARK`) because it isn't a song. Add-on relays start with 🤖. The runner never answers a message that starts with any of these, or one it sent itself.
 - At most 30 answers a minute (a loop shows as answer after answer; a long list, like an album's 50 songs, is one answer and goes out whole, up to 200 messages); a word-for-word repeat within 20 seconds is answered once. The homeserver's own message limit is lifted (`rc_message` in `src/cloud/provision.ts`): its default, a message every 5 s after a burst of 10, made a long list arrive over minutes.
 - Downloads are refused unless they're audio and within the size limit; links to web pages are rejected.
 - The site client paces its requests and remembers answers; download hosts must be the site's own over HTTPS.
@@ -109,7 +115,7 @@ npm test
 npm run typecheck
 ```
 
-About 900 tests (904 on 2026-10-20), `node:test`, no network: `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search box and search page, release pages, lists by page, category and sort, feed, releases for sale, download links that redirect to storage), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's catalog (search sorted into kinds, artists' pages, albums, with the marks Hebrew titles carry), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
+About 950 tests (949 on 2026-10-21), `node:test`, no network. The menus are checked against what Zemer really answered for "achas", "lipa schmeltzer" and "forever" (`test/fixtures/zemer`, served as they are by the Zemer mock's raw mode, with Zemer's real artist list for those artists): `test/helpers/` has mock servers for a Matrix homeserver (with reactions and uploads), music-table.com (search box and search page, release pages, lists by page, category and sort, feed, releases for sale, download links that redirect to storage), YouTube Music (search, session ids, the player with retired client versions, media links that want the client's User-Agent and a Range header), Zemer's catalog (search sorted into kinds, artists' pages, albums, with the marks Hebrew titles carry), Zemer's content server (the artist list and its version, blocked songs), Beeper and Google's RBM API, and a music file host. The library tests run the schedule on a fake clock (the first day, a host that was down at 09:00, retries, quiet hours), and the seasons are checked against real dates.
 
 ## Extending
 
