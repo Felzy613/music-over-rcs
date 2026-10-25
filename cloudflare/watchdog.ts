@@ -37,7 +37,10 @@ export const REPORT_AGAIN_MS = 6 * 60 * 60_000;
 export const NOT_RUNNING_REPORT_MS = 30 * 60_000;
 
 async function ask(deps: WatchdogDeps, path: string, headers: Record<string, string> = {}): Promise<Response> {
-  return deps.fetch(`${deps.renderUrl}${path}`, { headers, signal: AbortSignal.timeout(45_000) });
+  // Called on its own, never as `deps.fetch(…)`: the Workers runtime refuses a fetch called with another object as `this`
+  // ("Illegal invocation"). Every check failed that way from the Worker's first day to 2026-10-25, so none kept Render awake.
+  const fetchOnly = deps.fetch;
+  return fetchOnly(`${deps.renderUrl}${path}`, { headers, signal: AbortSignal.timeout(45_000) });
 }
 
 export async function runWatchdog(deps: WatchdogDeps): Promise<WatchdogState> {

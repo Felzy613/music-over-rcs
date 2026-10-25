@@ -104,7 +104,7 @@ export async function sendOutbox(env: Env, now: number = Date.now(), doFetch: ty
 }
 
 /** One round of the five-minute job: mail what is waiting, then check the host. */
-export async function runScheduled(env: Env, now: number = Date.now(), doFetch: typeof fetch = fetch): Promise<WatchdogState> {
+export async function runScheduled(env: Env, now: number = Date.now(), doFetch: typeof fetch = (input, init) => fetch(input, init)): Promise<WatchdogState> {
   try {
     await sendOutbox(env, now, doFetch);
   } catch (err) {

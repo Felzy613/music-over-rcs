@@ -121,6 +121,28 @@ describe('the five-minute job', () => {
     assert.ok(saved.reportedAt, 'the outage was recorded as reported even though the alert could not be sent');
   });
 
+  test('reaches the host with the Workers runtime’s fetch, which refuses to be called on another object (2026-10-25)', async () => {
+    // As workerd does: a fetch called as `something.fetch(…)` throws instead of fetching.
+    const asked: string[] = [];
+    const workersFetch = function (this: unknown, input: string | URL | Request): Promise<Response> {
+      if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');
+      asked.push(String(input));
+      return Promise.resolve(new Response('ok'));
+    } as typeof fetch;
+    const real = globalThis.fetch;
+    globalThis.fetch = workersFetch;
+    try {
+      const bucket = new FakeBucket();
+      const state = await runScheduled({ STATE: bucket.binding, RENDER_URL: 'https://mors.example' }, T0);
+      assert.equal(state.lastCheck?.detail, 'up');
+      assert.equal(state.lastCheck?.ok, true);
+      assert.equal(state.failures, 0);
+      assert.deepEqual(asked, ['https://mors.example/healthz'], 'the request that keeps the free service awake went out');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   test('serves nothing: there is no way in', async () => {
     assert.equal(await (await worker.fetch()).text(), 'ok');
   });
