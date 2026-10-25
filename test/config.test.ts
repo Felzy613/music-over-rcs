@@ -156,6 +156,7 @@ describe('loadMatrixConfig', () => {
       token: 'token',
       roomID: '!room:localhost',
       bridgeUrl: 'http://127.0.0.1:29336',
+      syncWaitMs: 25_000,
       pollMs: 1500,
       dbPath: 'data/catalog.db',
       maxDownloadMb: 100,
@@ -194,6 +195,8 @@ describe('loadMatrixConfig', () => {
     assert.equal(loadMatrixConfig({ ...matrix, ALBUM_DOWNLOADS: '1' }).albumDownloads, 1);
     assert.throws(() => loadMatrixConfig({ ...matrix, ALBUM_DOWNLOADS: '9' }), /ALBUM_DOWNLOADS must be a whole number from 1 to 5/);
     assert.equal(loadMatrixConfig({ ...matrix, BRIDGE_STATUS_EVENTS: '1' }).sendStatus, true);
+    assert.equal(loadMatrixConfig({ ...matrix, MATRIX_SYNC_WAIT_MS: '0' }).syncWaitMs, 0, 'reads every MATRIX_POLL_MS, as before');
+    assert.throws(() => loadMatrixConfig({ ...matrix, MATRIX_SYNC_WAIT_MS: '90000' }), /MATRIX_SYNC_WAIT_MS must be a whole number of ms from 0 to 60000/);
   });
 
   test('reports every problem at once, with the next step', () => {

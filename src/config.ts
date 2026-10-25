@@ -251,6 +251,11 @@ export interface MatrixConfig extends ChatSettings {
   token: string;
   /** Empty when loaded with `room: false` (scripts that don't watch one room). */
   roomID: string;
+  /**
+   * How long a read of the chat waits at the homeserver for something new (MATRIX_SYNC_WAIT_MS, default 25 s; 0 reads every
+   * MATRIX_POLL_MS as before): a text is read the moment it arrives, and the homeserver answers twice a minute, not forty times.
+   */
+  syncWaitMs: number;
 }
 
 /** Reads and validates the Matrix settings, reporting every problem at once. */
@@ -267,7 +272,10 @@ export function loadMatrixConfig(env: NodeJS.ProcessEnv = process.env, options: 
   const settings = readChatSettings(env, 'MATRIX_POLL_MS', problems);
   const bridgeUrl = (env.BRIDGE_URL?.trim() || 'http://127.0.0.1:29336').replace(/\/+$/, '');
   checkUrl('BRIDGE_URL', bridgeUrl, problems);
+  const waitText = env.MATRIX_SYNC_WAIT_MS?.trim();
+  const syncWaitMs = waitText ? Number(waitText) : 25_000;
+  if (!(Number.isInteger(syncWaitMs) && syncWaitMs >= 0 && syncWaitMs <= 60_000)) problems.push(`MATRIX_SYNC_WAIT_MS must be a whole number of ms from 0 to 60000 (got "${waitText}")`);
 
   throwIfAny(problems);
-  return { homeserver, token, roomID, bridgeUrl, ...settings };
+  return { homeserver, token, roomID, bridgeUrl, syncWaitMs, ...settings };
 }

@@ -144,8 +144,12 @@ export interface IncomingPicture {
 
 /** What the runner needs from a chat platform: read what's new in one chat, and write to it. */
 export interface ChatClient {
-  /** Messages the runner may not have seen yet, oldest first. Repeats are fine; the runner de-duplicates by id. */
-  listMessages(chatID: string): Promise<ChatMessage[]>;
+  /**
+   * Messages the runner may not have seen yet, oldest first. Repeats are fine; the runner de-duplicates by id. Where the
+   * platform can, `waitMs` holds the call until something new comes (a long poll) and `signal` ends that wait early;
+   * platforms that can't answer at once.
+   */
+  listMessages(chatID: string, options?: { waitMs?: number; signal?: AbortSignal }): Promise<ChatMessage[]>;
   /** Sends a text; returns the message's id when the platform gives one (a 👍 on it can then be matched). */
   sendText(chatID: string, text: string): Promise<string | void>;
   sendAudio(chatID: string, audio: DownloadedAudio): Promise<string | void>;
@@ -213,6 +217,11 @@ export interface RunnerOptions {
   /** Gets a picture ready to send (a song's card, the daily collage). Without it, pictures are skipped. */
   prepareImage?(picture: Picture): Promise<PreparedPicture>;
   pollMs?: number;
+  /**
+   * How long a read of the chat may wait for something new (a long poll), where the chat can: a request is read the moment it
+   * arrives, and the loop reads again at once; an announcement or stop() ends the wait. 0 (the default) reads every pollMs.
+   */
+  waitMs?: number;
   /** How often "typing…" is renewed while a request is being worked on. It has to be shorter than the platform's timeout. */
   typingRefreshMs?: number;
   /** Keeps the options on offer beyond this process. Without it they live only here. */
@@ -1055,6 +1064,8 @@ export function createRunner(options: RunnerOptions): Runner {
 
   /** Runs a job that sends on its own (an announcement), after whatever is under way, and makes polls wait for it. */
   async function exclusive(job: () => Promise<void>): Promise<void> {
+    // A long poll waiting for news would hold the job up to its whole wait: it stops listening, and reads again afterwards.
+    listening?.abort();
     while (current || delivering > 0) await (current ?? delivery).catch(() => {});
     const run = (async () => {
       try {
@@ -1070,12 +1081,33 @@ export function createRunner(options: RunnerOptions): Runner {
     return run;
   }
 
-  /** Reads the chat once and starts answering what's new. Songs and albums are sent in the background (see `send`). */
-  function poll(): Promise<void> {
+  /** The long poll under way, if one is: aborting it ends its wait (for an announcement, or stop()). */
+  let listening: AbortController | undefined;
+  /** The last read came back at once with nothing: a chat that doesn't hold a long poll, which the loop then doesn't hammer. */
+  let quick = false;
+
+  /**
+   * Reads the chat once (waiting up to `waitMs` for something new, where the chat can) and starts answering what's new. Songs
+   * and albums are sent in the background (see `send`).
+   */
+  function poll(waitMs = 0): Promise<void> {
     if (current) return current;
     const run = (async () => {
       try {
-        const listed = await chat.listMessages(chatID);
+        const ears = waitMs > 0 ? new AbortController() : undefined;
+        listening = ears;
+        const asked = now();
+        let listed: ChatMessage[];
+        try {
+          listed = await chat.listMessages(chatID, ears ? { waitMs, signal: ears.signal } : undefined);
+        } catch (err) {
+          // Stopped listening on purpose: nothing was read, so nothing is lost.
+          if (ears?.signal.aborted) return;
+          throw err;
+        } finally {
+          listening = undefined;
+        }
+        quick = ears !== undefined && listed.length === 0 && backlog.length === 0 && now() - asked < 1000;
         // Read first: a poll that fails keeps the backlog for the next one.
         const messages = [...backlog.splice(0), ...listed];
         failures = 0;
@@ -1143,9 +1175,12 @@ export function createRunner(options: RunnerOptions): Runner {
 
   async function loop(): Promise<void> {
     if (stopped) return;
-    await poll();
+    const waitMs = Math.max(0, options.waitMs ?? 0);
+    await poll(waitMs);
     if (stopped) return;
-    timer = setTimeout(() => void loop(), Math.min(pollMs * 2 ** Math.min(failures, 4), 15_000));
+    // A long poll that answered reads again at once; one that came back empty straight away, or failed, waits as a short poll does.
+    const pause = waitMs > 0 && failures === 0 && !quick ? 0 : Math.min(pollMs * 2 ** Math.min(failures, 4), 15_000);
+    timer = setTimeout(() => void loop(), pause);
   }
 
   return {
@@ -1162,11 +1197,13 @@ export function createRunner(options: RunnerOptions): Runner {
     async start() {
       await prime();
       stopped = false;
-      timer = setTimeout(() => void loop(), pollMs);
+      // A long poll listens from the start; short polls begin a poll's time from now.
+      timer = setTimeout(() => void loop(), (options.waitMs ?? 0) > 0 ? 0 : pollMs);
     },
     async stop() {
       stopped = true;
       clearTimeout(timer);
+      listening?.abort();
       wake?.(); // a song waiting its turn goes now
       await current;
       await idle();

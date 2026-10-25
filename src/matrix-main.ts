@@ -152,6 +152,8 @@ try {
     // A restart (routine on a cloud host) answers what was sent while the bot was down instead of dropping it.
     resume: resumeIn(catalog),
     pollMs: config.pollMs,
+    // A long poll: a text is read the moment the homeserver has it (MATRIX_SYNC_WAIT_MS=0 reads every MATRIX_POLL_MS instead).
+    waitMs: config.syncWaitMs,
     songGapMs: config.songGapMs,
     ...(config.downloadsAhead ? { downloadsAhead: config.downloadsAhead } : {}),
     // An album's songs come three at a time (ALBUM_DOWNLOADS), each to disk as it arrives; another starts only while the host has

@@ -287,7 +287,12 @@ interface RequestOptions {
   body?: unknown;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  /** Ends the request early (a long poll that is no longer wanted). */
+  signal?: AbortSignal | undefined;
 }
+
+/** How much longer than its own wait a long poll may take before it is given up on. */
+const LONG_POLL_SLACK_MS = 15_000;
 
 /**
  * A small Matrix client-server API client: just enough to read one room, write to it, and look around.
@@ -381,11 +386,15 @@ export class MatrixClient {
     return rooms;
   }
 
-  /** New messages in a room since the last call (the first call returns recent history), oldest first. */
-  async listMessages(roomID: string): Promise<ChatMessage[]> {
+  /**
+   * New messages in a room since the last call (the first call returns recent history), oldest first. With `waitMs`, the
+   * homeserver holds the call until something new comes or that long has passed (a long poll), and `signal` ends the wait
+   * early; nothing is lost either way, since the place it reads from moves only with an answer.
+   */
+  async listMessages(roomID: string, options: { waitMs?: number; signal?: AbortSignal } = {}): Promise<ChatMessage[]> {
     // Knowing who this is tells the phone's pictures from the bot's own.
     if (!this.#userId) await this.whoami();
-    return (await this.#newEvents(roomID)).flatMap((event) => {
+    return (await this.#newEvents(roomID, options)).flatMap((event) => {
       const message = toChatMessage(event, this.#userId);
       return message ? [message] : [];
     });
@@ -539,10 +548,11 @@ export class MatrixClient {
     }
   }
 
-  async #newEvents(roomID: string): Promise<MatrixEvent[]> {
-    const query: Record<string, string> = { filter: timelineFilter(roomID), timeout: '0' };
+  async #newEvents(roomID: string, options: { waitMs?: number; signal?: AbortSignal | undefined } = {}): Promise<MatrixEvent[]> {
+    const waitMs = Math.max(0, Math.round(options.waitMs ?? 0));
+    const query: Record<string, string> = { filter: timelineFilter(roomID), timeout: String(waitMs) };
     if (this.#since) query.since = this.#since;
-    const data = await this.#request('GET', '/_matrix/client/v3/sync', { query });
+    const data = await this.#request('GET', '/_matrix/client/v3/sync', { query, signal: options.signal, ...(waitMs > 0 ? { timeoutMs: waitMs + LONG_POLL_SLACK_MS } : {}) });
     // Only move the cursor once the response is in hand, so a failed call loses nothing.
     if (typeof data.next_batch === 'string') this.#since = data.next_batch;
     return eventsAt(data, 'rooms', 'join', roomID, 'timeline', 'events').filter((event) => !this.#sent.has(event.eventId));
@@ -573,7 +583,9 @@ export class MatrixClient {
           ...options.headers,
         },
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-        signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS)])
+          : AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
       });
       const text = await res.text();
       const json = parseJson(text);

@@ -837,6 +837,69 @@ describe('runner over Matrix (the bridge case)', () => {
     assert.deepEqual(asked, [`all:play:${blue.id}`], '"all", read while the song was on its way, had the list of the answer it came with');
   });
 
+  describe('a long poll', () => {
+    const waitFor = async (condition: () => boolean, ms = 2000): Promise<void> => {
+      const deadline = Date.now() + ms;
+      while (!condition()) {
+        if (Date.now() > deadline) throw new Error('timed out');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+    const longPolling = (waitMs: number) => {
+      const bot = createBot({ catalog, checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true }) });
+      // pollMs is long on purpose: only the long poll can read a request this soon.
+      return createRunner({ chat: new MatrixClient({ token: mock.token, homeserver: mock.url }), bot, chatID: mock.roomId, fetchAudio: (url, title) => fetchAudio(url, title), pollMs: 10_000, waitMs });
+    };
+
+    test('a request is read the moment it reaches the homeserver, not at the next poll', async () => {
+      const runner = longPolling(5000);
+      await runner.start();
+      try {
+        await waitFor(() => mock.longPolls > 0);
+        const typed = Date.now();
+        typedOnPhone('search paper planes');
+        await waitFor(() => mock.sent.length >= 2);
+        assert.ok(Date.now() - typed < 1000, `answered after ${Date.now() - typed} ms`);
+      } finally {
+        const stopping = Date.now();
+        await runner.stop();
+        assert.ok(Date.now() - stopping < 1000, 'stop() ends the wait');
+      }
+    });
+
+    test('a message the bot starts itself does not wait for the long poll to end', async () => {
+      const runner = longPolling(5000);
+      await runner.start();
+      try {
+        await waitFor(() => mock.longPolls > 0);
+        const started = Date.now();
+        await runner.announce([{ kind: 'text', text: 'New music today' }]);
+        assert.ok(Date.now() - started < 1000, `sent after ${Date.now() - started} ms`);
+        assert.equal(mock.sent.at(-1)?.content.body, '🎵 New music today');
+        // And it listens again afterwards.
+        typedOnPhone('search paper planes');
+        await waitFor(() => mock.sent.length >= 3);
+      } finally {
+        await runner.stop();
+      }
+    });
+
+    test('the client waits for news, and a wait that is ended loses nothing', async () => {
+      const client = new MatrixClient({ token: mock.token, homeserver: mock.url });
+      await client.listMessages(mock.roomId);
+      const stop = new AbortController();
+      const ended = client.listMessages(mock.roomId, { waitMs: 5000, signal: stop.signal });
+      await waitFor(() => mock.longPolls > 0);
+      stop.abort();
+      await assert.rejects(ended);
+      typedOnPhone('hello there');
+      const started = Date.now();
+      const news = await client.listMessages(mock.roomId, { waitMs: 5000 });
+      assert.deepEqual(news.map((message) => message.text), ['hello there']);
+      assert.ok(Date.now() - started < 1000);
+    });
+  });
+
   describe('timelines', () => {
     test('each request leaves one line, and each song one, in the log and for /status', async () => {
       const { runner, logs, timelines } = makeRunner();

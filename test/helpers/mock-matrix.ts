@@ -62,6 +62,8 @@ export interface MockMatrix extends Listening {
   failTyping: boolean;
   /** The next `count` sends are answered with 429. */
   rateLimit(count: number): void;
+  /** How many syncs have waited for something new (a long poll that found nothing at once). */
+  readonly longPolls: number;
   addMessage(sender: string, content: Record<string, unknown>, room?: string): string;
   /** A reaction (as the bridge passes on a 👍 tapped in Google Messages) to an event in the watched room. */
   addReaction(sender: string, eventId: string, key: string): string;
@@ -105,8 +107,10 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     { id: botRoomId, name: '', members: 2, heroes: [botUser] },
   ];
   const invites: MockInvite[] = [{ id: '!invited:localhost', name: 'Alex', inviter: '@gmessages_alex:localhost' }];
-  const state = { echoAsGhost: false, botReplies: false, sendStatus: false, failSync: false, failTyping: false, rateLimited: 0 };
+  const state = { echoAsGhost: false, botReplies: false, sendStatus: false, failSync: false, failTyping: false, rateLimited: 0, longPolls: 0 };
   let counter = 0;
+  /** Long polls waiting for something new (a sync with a timeout): each new event wakes them. */
+  const waiters = new Set<() => void>();
 
   const push = (sender: string, content: Record<string, unknown>, timeline: MockEvent[] = events, type = 'm.room.message'): MockEvent => {
     counter++;
@@ -118,6 +122,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
       content,
     };
     timeline.push(event);
+    for (const wake of [...waiters]) wake();
     return event;
   };
 
@@ -163,14 +168,37 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
         const since = url.searchParams.get('since');
         const [sincePrimary = 0, sinceBot = 0] = since === null ? [] : since.split('.').map(Number);
         const limit = filter.room?.timeline?.limit ?? 50;
-        const join: Record<string, unknown> = {};
-        for (const id of watched) {
-          const timeline = timelines.get(id);
-          if (!timeline) continue;
-          const offset = id === roomId ? sincePrimary : sinceBot;
-          join[id] = { timeline: { events: (since === null ? timeline.slice(-limit) : timeline.slice(offset)).filter(wanted), limited: false } };
+        const read = () => {
+          const join: Record<string, unknown> = {};
+          let news = 0;
+          for (const id of watched) {
+            const timeline = timelines.get(id);
+            if (!timeline) continue;
+            const offset = id === roomId ? sincePrimary : sinceBot;
+            const found = (since === null ? timeline.slice(-limit) : timeline.slice(offset)).filter(wanted);
+            news += found.length;
+            join[id] = { timeline: { events: found, limited: false } };
+          }
+          return { join, news };
+        };
+        let answer = read();
+        // A long poll, as Synapse does it: with nothing new, the answer waits until something comes or the timeout passes.
+        const timeout = Number(url.searchParams.get('timeout') ?? 0);
+        if (answer.news === 0 && since !== null && timeout > 0) {
+          state.longPolls += 1;
+          await new Promise<void>((resolve) => {
+            const done = (): void => {
+              clearTimeout(timer);
+              waiters.delete(done);
+              resolve();
+            };
+            const timer = setTimeout(done, timeout);
+            waiters.add(done);
+            req.on('close', done);
+          });
+          answer = read();
         }
-        return json(200, { next_batch: `${events.length}.${botEvents.length}`, rooms: { join } });
+        return json(200, { next_batch: `${events.length}.${botEvents.length}`, rooms: { join: answer.join } });
       }
       const join = Object.fromEntries(
         rooms.map((room) => [
@@ -319,6 +347,9 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     get sendStatus() {
       return state.sendStatus;
     },
+    get longPolls() {
+      return state.longPolls;
+    },
     set sendStatus(value: boolean) {
       state.sendStatus = value;
     },
@@ -373,6 +404,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
       created.length = 0;
       state.echoAsGhost = false;
       state.sendStatus = false;
+      state.longPolls = 0;
       state.botReplies = false;
       state.failSync = false;
       state.failTyping = false;
