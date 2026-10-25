@@ -94,6 +94,9 @@ describe('Google webhook to bot to RBM API', () => {
   const sentMessages = () =>
     rbm.requests.filter((r) => r.path.endsWith('/agentMessages')).map((r) => r.body.contentMessage);
   const sentEvents = () => rbm.requests.filter((r) => r.path.endsWith('/agentEvents')).map((r) => r.body);
+  /** A tap on one of a message's suggestions. */
+  const tap = (reply: { postbackData: string; text: string }, messageId: string) =>
+    deliver({ agentId: AGENT, senderPhoneNumber: ME, messageId, sendTime: '2026-01-01T00:00:01Z', suggestionResponse: { postbackData: reply.postbackData, text: reply.text } });
 
   test('answers the verification handshake and the health check', async () => {
     const handshake = await fetch(`${app.url}${WEBHOOK_PATH}`, {
@@ -108,33 +111,28 @@ describe('Google webhook to bot to RBM API', () => {
     assert.equal((await fetch(`${app.url}/nope`)).status, 404);
   });
 
-  test('a text request becomes read receipt, typing, caption and audio file', async () => {
+  test('a text request becomes read receipt, typing and a menu; tapping its song sends the caption and audio file', async () => {
     const res = await deliver(userText('search paper planes', 'm1'));
     assert.equal(res.status, 200);
 
     assert.deepEqual(sentEvents(), [{ eventType: 'READ', messageId: 'm1' }, { eventType: 'IS_TYPING' }]);
-    assert.deepEqual(sentMessages(), [
-      { text: '🎵 Mira Vale — Paper Planes at Dawn' },
-      { contentInfo: { fileUrl: `${music.url}/planes.mp3`, forceRefresh: false } },
-    ]);
+    const [menu] = sentMessages();
+    assert.equal(menu.text, '1. Paper Planes at Dawn — Mira Vale\n\nTap one to pick it.');
+    assert.equal(menu.suggestions.length, 1);
+    rbm.requests.length = 0;
+    await tap(menu.suggestions[0].reply, 'm1b');
+    assert.deepEqual(sentMessages(), [{ text: '🎵 Mira Vale — Paper Planes at Dawn' }, { contentInfo: { fileUrl: `${music.url}/planes.mp3`, forceRefresh: false } }]);
     assert.ok(rbm.requests.every((r) => r.path.startsWith(`/v1/phones/${ME}/`)));
   });
 
   test('an ambiguous request offers chips, and tapping one sends the track', async () => {
     await deliver(userText('search night owls', 'm2'));
     const [question] = sentMessages();
-    assert.match(question.text, /^🎤 The Night Owls\n1\. Blue Horizon\n2\. Blue Horizon \(Live\)$/);
+    assert.match(question.text, /^1\. Blue Horizon — The Night Owls\n2\. Blue Horizon \(Live\) — The Night Owls\n\nTap one to pick it\.$/);
     assert.equal(question.suggestions.length, 2);
 
     rbm.requests.length = 0;
-    const tapped = question.suggestions[0].reply;
-    await deliver({
-      agentId: AGENT,
-      senderPhoneNumber: ME,
-      messageId: 'm3',
-      sendTime: '2026-01-01T00:00:01Z',
-      suggestionResponse: { postbackData: tapped.postbackData, text: tapped.text },
-    });
+    await tap(question.suggestions[0].reply, 'm3');
     const messages = sentMessages();
     assert.equal(messages.length, 2);
     assert.match(messages[1].contentInfo.fileUrl, /\/blue\.mp3$/);
@@ -142,6 +140,9 @@ describe('Google webhook to bot to RBM API', () => {
 
   test('a link that is not audio is explained, not sent', async () => {
     await deliver(userText('search broken link', 'm4'));
+    const [menu] = sentMessages();
+    rbm.requests.length = 0;
+    await tap(menu.suggestions[0].reply, 'm4b');
     const messages = sentMessages();
     assert.equal(messages.length, 1);
     assert.match(messages[0].text, /I can't send "Nobody — Broken Link": it isn't an audio file/);
@@ -153,8 +154,11 @@ describe('Google webhook to bot to RBM API', () => {
   });
 
   test('when Google rejects the file, the user is told', async () => {
-    rbm.failNext((r) => r.path.endsWith('/agentMessages') && r.body?.contentMessage?.contentInfo !== undefined, 400);
     await deliver(userText('search paper planes', 'm6'));
+    const [menu] = sentMessages();
+    rbm.requests.length = 0;
+    rbm.failNext((r) => r.path.endsWith('/agentMessages') && r.body?.contentMessage?.contentInfo !== undefined, 400);
+    await tap(menu.suggestions[0].reply, 'm6b');
     const messages = sentMessages();
     assert.equal(messages.length, 3, 'caption, the rejected audio attempt, then the notice');
     assert.match(messages[2].text, /couldn't send it/);
@@ -180,7 +184,7 @@ describe('Google webhook to bot to RBM API', () => {
     const event = userText('search paper planes', 'm10');
     await deliver(event);
     await deliver(event);
-    assert.equal(sentMessages().length, 2, 'one caption and one audio, not four');
+    assert.equal(sentMessages().length, 1, 'one menu, not two');
   });
 
   test('receipts and other events are ignored', async () => {

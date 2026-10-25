@@ -7,6 +7,7 @@ import { allowedEdits, correctableEdits, editDistance, rankSongs } from './sourc
 import type { SongFacts } from './library/naming.ts';
 import type { ChoiceStore, MessageLinks, PendingChoices, ResumePoint, ResumeStore } from './runner.ts';
 import type { Track } from './types.ts';
+import type { View, ViewKey, ViewStore } from './views.ts';
 
 export interface NewTrack {
   title: string;
@@ -168,7 +169,22 @@ const SCHEMA = `
     postback   TEXT NOT NULL,
     at         TEXT NOT NULL
   );
+  -- AUTOINCREMENT: a view's id is never used again, so an old message's "@id" can't come to mean another view.
+  CREATE TABLE IF NOT EXISTS views (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent    INTEGER,
+    kind      TEXT NOT NULL,
+    key       TEXT NOT NULL,
+    shown     TEXT NOT NULL DEFAULT '[]',
+    last_more TEXT,
+    at        TEXT NOT NULL,
+    used_at   TEXT NOT NULL
+  );
 `;
+
+/** Views are kept a month from when they were last used, and only the newest of them. */
+const VIEW_DAYS = 31;
+const VIEWS_KEPT = 300;
 
 const TRACK_COLUMNS = 'id, title, artist, url, cover';
 
@@ -730,6 +746,47 @@ export class Catalog {
     return row ? String(row.postback) : undefined;
   }
 
+  // --- the chat's menus and pages (see views.ts) ---
+
+  /** A new view; old ones (unused for a month, or past the newest 300) are cleared out first. */
+  openView(key: ViewKey, parent: number | undefined, at: Date = new Date()): View {
+    this.#db.prepare('DELETE FROM views WHERE used_at < ?').run(new Date(at.getTime() - VIEW_DAYS * 24 * 60 * 60_000).toISOString());
+    this.#db.prepare('DELETE FROM views WHERE id NOT IN (SELECT id FROM views ORDER BY id DESC LIMIT ?)').run(VIEWS_KEPT - 1);
+    const result = this.#db
+      .prepare('INSERT INTO views (parent, kind, key, shown, at, used_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(parent ?? null, key.kind, JSON.stringify(key), '[]', at.toISOString(), at.toISOString());
+    return { id: Number(result.lastInsertRowid), ...(parent !== undefined ? { parent } : {}), key, shown: [] };
+  }
+
+  view(id: number): View | undefined {
+    const row = this.#db.prepare('SELECT * FROM views WHERE id = ?').get(id);
+    if (!row) return undefined;
+    try {
+      const key = JSON.parse(String(row.key)) as ViewKey;
+      const shown = JSON.parse(String(row.shown)) as View['shown'];
+      if (!key || typeof key !== 'object' || !Array.isArray(shown)) return undefined;
+      return {
+        id: Number(row.id),
+        ...(row.parent !== null && row.parent !== undefined ? { parent: Number(row.parent) } : {}),
+        key,
+        shown,
+        ...(typeof row.last_more === 'string' && row.last_more ? { lastMore: row.last_more as View['lastMore'] } : {}),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  saveView(view: View, at: Date = new Date()): void {
+    this.#db
+      .prepare('UPDATE views SET key = ?, shown = ?, last_more = ?, used_at = ? WHERE id = ?')
+      .run(JSON.stringify(view.key), JSON.stringify(view.shown), view.lastMore ?? null, at.toISOString(), view.id);
+  }
+
+  touchView(id: number, at: Date = new Date()): void {
+    this.#db.prepare('UPDATE views SET used_at = ? WHERE id = ?').run(at.toISOString(), id);
+  }
+
   // --- small facts the bot keeps between runs (when the daily message last went out, …) ---
 
   getState(key: string): string | undefined {
@@ -869,6 +926,26 @@ export function resumeIn(catalog: Pick<Catalog, 'getState' | 'setState'>, key = 
     },
     save(point) {
       catalog.setState(key, JSON.stringify(point));
+    },
+  };
+}
+
+/**
+ * The chat's views (menus, artists, albums, lists) and which one is current (state `chat.view`), kept in the catalog's
+ * database, so "songs more" and a 👍 on an older menu still work after a restart.
+ */
+export function viewsIn(catalog: Pick<Catalog, 'openView' | 'view' | 'saveView' | 'touchView' | 'getState' | 'setState'>, key = 'chat.view'): ViewStore {
+  return {
+    open: (viewKey, parent) => catalog.openView(viewKey, parent),
+    get: (id) => catalog.view(id),
+    save: (view) => catalog.saveView(view),
+    current() {
+      const id = Number(catalog.getState(key) || NaN);
+      return Number.isInteger(id) ? catalog.view(id) : undefined;
+    },
+    setCurrent(id) {
+      catalog.setState(key, id === undefined ? '' : String(id));
+      if (id !== undefined) catalog.touchView(id);
     },
   };
 }

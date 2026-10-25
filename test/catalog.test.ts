@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { Catalog } from '../src/catalog.ts';
+import { Catalog, viewsIn } from '../src/catalog.ts';
 import type { Track } from '../src/types.ts';
 import { SAMPLE } from './helpers/sample.ts';
 
@@ -214,5 +214,42 @@ describe('Catalog.importFrom', () => {
       assert.equal(fresh.count(), 1, 'the target still works');
       fresh.close();
     });
+  });
+});
+
+describe('the chat’s views', () => {
+  test('are kept with what they showed and which is current, across a reopen of the file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'views-'));
+    try {
+      const path = join(dir, 'catalog.db');
+      const first = new Catalog(path);
+      const views = viewsIn(first);
+      const menu = views.open({ kind: 'search', query: 'achas' });
+      const album = views.open({ kind: 'album', albumId: 'MPREb_x', title: 'Achas' }, menu.id);
+      menu.shown.push({ kind: 'song', id: 'abc', postback: 'play:1', label: 'Achas' });
+      menu.lastMore = 'songs';
+      views.save(menu);
+      views.setCurrent(album.id);
+      first.close();
+
+      const again = viewsIn(new Catalog(path));
+      assert.deepEqual(again.current(), { id: album.id, parent: menu.id, key: { kind: 'album', albumId: 'MPREb_x', title: 'Achas' }, shown: [] });
+      assert.deepEqual(again.get(menu.id), { id: menu.id, key: { kind: 'search', query: 'achas' }, shown: [{ kind: 'song', id: 'abc', postback: 'play:1', label: 'Achas' }], lastMore: 'songs' });
+      again.setCurrent(undefined);
+      assert.equal(again.current(), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a month unused, or past the newest 300, they are cleared out when a new one is opened', () => {
+    const catalog = new Catalog(':memory:');
+    const old = catalog.openView({ kind: 'search', query: 'old' }, undefined, new Date('2026-08-01T00:00:00Z'));
+    const kept = catalog.openView({ kind: 'search', query: 'kept' }, undefined, new Date('2026-10-01T00:00:00Z'));
+    catalog.openView({ kind: 'search', query: 'new' }, undefined, new Date('2026-10-20T00:00:00Z'));
+    assert.equal(catalog.view(old.id), undefined);
+    assert.ok(catalog.view(kept.id));
+    for (let i = 0; i < 305; i += 1) catalog.openView({ kind: 'search', query: `q${i}` }, undefined, new Date('2026-10-20T00:00:00Z'));
+    assert.equal(catalog.view(kept.id), undefined, 'only the newest 300 are kept');
   });
 });

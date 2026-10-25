@@ -7,7 +7,8 @@ import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import type { DownloadedAudio } from '../src/audio-fetch.ts';
 import { splitArtists } from '../src/artists.ts';
 import { createBot, joinLists } from '../src/bot.ts';
-import { Catalog, choicesIn, linksIn, type SitePost } from '../src/catalog.ts';
+import { Catalog, choicesIn, linksIn, viewsIn, type SitePost } from '../src/catalog.ts';
+import { splitPostback } from '../src/views.ts';
 import { catalogBrowse } from '../src/library/browse.ts';
 import { AudioCache, cachedCheck, cachedFetch, prefetch, songsToKeep } from '../src/library/audio-cache.ts';
 import { buildDigest, categoryLabel } from '../src/library/digest.ts';
@@ -916,7 +917,8 @@ describe('library: artists, trending and new', () => {
   });
 
   describe('the bot with lists', () => {
-    const bot = () => createBot({ catalog, checkAudio: async () => ({ ok: true, type: 'audio/mpeg' }), browse: catalogBrowse(catalog, () => at(6, 12)), now: () => at(6, 12) });
+    // A new bot for every message, as after a restart: where the chat is in its lists is in the catalog.
+    const bot = () => createBot({ catalog, checkAudio: async () => ({ ok: true, type: 'audio/mpeg' }), browse: catalogBrowse(catalog, () => at(6, 12)), now: () => at(6, 12), views: viewsIn(catalog) });
     const ask = (text: string) => bot().handle({ from: 'me', messageId: 'm', text });
     // The lists as one message each, as a chat without 👍 gets them; the split form has its own tests.
     const text = (replies: Reply[]) => {
@@ -943,16 +945,23 @@ describe('library: artists, trending and new', () => {
       assert.doesNotMatch(more.text, /"more"/, 'nothing after these');
       assert.equal(more.chips?.length, 12, 'every number shown so far still works');
       assert.equal(more.chipsValidMs, 2 * 60 * 60_000);
-      assert.match(text(await ask('more')).text, /^Text "trending", "new" or "search" and an artist first/);
+      assert.equal(text(await ask('more')).text, "That's all of them.");
       assert.match(text(await ask('new')).text, /^🆕 New on music-table\.com\n1\. Song (6|7|8|9|10|11|12) — Band · Oct 6/);
     });
 
-    test("an artist's name lists their songs, newest first, with dates", async () => {
+    test("an artist's name offers the artist with their songs; the artist lists their songs, newest first, with dates", async () => {
       song('a', 'Shabbos', 'Yoely Weiss', 1, 10);
       song('b', 'Purim', 'Yoely Weiss', 4, 10);
-      const list = text(await ask('search yoely weiss'));
+      const menu = await ask('search yoely weiss');
+      assert.match(text(menu).text, /^1\. 🎤 Yoely Weiss\n2\. (Shabbos|Purim)\n3\. (Shabbos|Purim)\n\nReply with a number to pick one\.$/);
+      const artist = menu.find((reply) => reply.kind === 'text' && reply.text.startsWith('🎤'));
+      assert.ok(artist?.kind === 'text');
+      const list = text(await bot().handle({ from: 'me', messageId: 'm', postback: artist.postback! }));
       assert.equal(list.text, '🎤 Yoely Weiss · 2 releases on music-table.com, newest first\n1. Purim · Oct 4\n2. Shabbos · Oct 1\n\nReply with a number to get it.');
-      assert.deepEqual(list.chips?.map((chip) => chip.postback), [`play:${catalog.findArtist(['yoely', 'weiss'])!.id && catalog.search('purim')[0]!.id}`, `play:${catalog.search('shabbos')[0]!.id}`]);
+      assert.deepEqual(
+        list.chips?.map((chip) => splitPostback(chip.postback).action),
+        [`play:${catalog.search('purim')[0]!.id}`, `play:${catalog.search('shabbos')[0]!.id}`],
+      );
     });
 
     test('an album is one entry, and picking it lists its songs in order', async () => {
@@ -963,10 +972,12 @@ describe('library: artists, trending and new', () => {
       song('single', 'Elul', 'Yaakov Shwekey', 4, 100);
       const list = text(await ask('trending'));
       assert.match(list.text, /\n1\. 💿 Bardichevers \(Full Album\) — TYH Nation · 3 songs · Oct 5\n2\. Elul — Yaakov Shwekey · Oct 4/);
-      assert.equal(list.chips?.[0]?.postback, 'post:tyh');
+      assert.equal(splitPostback(list.chips?.[0]?.postback ?? '').action, 'post:tyh');
       const album = await bot().handle({ from: 'me', messageId: 'm', postback: 'post:tyh' });
       assert.equal(text(album).text, 'TYH Nation · 3 songs\n1. 01 Intro\n2. 02 Yiddishkeit\n3. 10 Finale\n\nReply with a number to get it.', 'track 10 after track 1, not before 2');
-      assert.match(text(await ask('search tyh nation')).text, /\n1\. 💿 Bardichevers \(Full Album\) · 3 songs · Oct 5$/m);
+      const artist = (await ask('search tyh nation')).find((reply) => reply.kind === 'text' && reply.text.startsWith('🎤'));
+      assert.ok(artist?.kind === 'text');
+      assert.match(text(await bot().handle({ from: 'me', messageId: 'm', postback: artist.postback! })).text, /\n1\. 💿 Bardichevers \(Full Album\) · 3 songs · Oct 5$/m);
     });
 
     test('"all" on a list with an album sends the album\'s songs too, at most twenty, and says what it could not send', async () => {
@@ -984,10 +995,11 @@ describe('library: artists, trending and new', () => {
       assert.deepEqual(replies.at(-1), { kind: 'text', text: "I couldn't send Band — Track 3." }, 'the file at #2 is the third track');
     });
 
-    test('a song name still plays the song, and help mentions the lists', async () => {
+    test('a song name puts the song in the menu, and help mentions the lists', async () => {
       song('a', 'Shabbos', 'Yoely Weiss', 1, 10);
-      assert.equal((await ask('search yoely weiss shabbos'))[1]?.kind, 'audio');
-      assert.match(text(await ask('help')).text, /"trending", "new", "chanukah", "purim", "wedding" or "vocal"/);
+      const menu = await ask('search yoely weiss shabbos');
+      assert.ok(menu.some((reply) => reply.kind === 'text' && reply.text === 'Shabbos — Yoely Weiss' && reply.postback?.startsWith('play:')));
+      assert.match(text(await ask('help')).text, /trending · new · chanukah · purim · wedding · vocal/);
     });
 
     test('lists say so when the catalog has nothing yet', async () => {

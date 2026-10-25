@@ -157,7 +157,16 @@ describe('following artists', () => {
       browse: catalogBrowse(catalog, now),
       now,
     });
-    return async (text: string) => texts(await bot.handle({ from: 'me', messageId: 'm', text }));
+    const ask = async (text: string) => texts(await bot.handle({ from: 'me', messageId: 'm', text }));
+    /** A search, then a 👍 on the menu's first song: what that answers. Anything else is just asked. */
+    return Object.assign(ask, {
+      play: async (text: string) => {
+        const menu = await bot.handle({ from: 'me', messageId: 'm', text });
+        const line = menu.find((reply) => reply.kind === 'text' && reply.postback?.startsWith('play:'));
+        assert.ok(line?.kind === 'text', `no song for "${text}"`);
+        return texts(await bot.handle({ from: 'me', messageId: 'm', postback: line.postback! }));
+      },
+    });
   };
 
   test('"follow", "following" and "unfollow"', async () => {
@@ -178,16 +187,16 @@ describe('following artists', () => {
     add(5, 'Mendy Weiss');
     for (const n of [5, 6, 7]) catalog.add({ title: `Other ${n}`, artist: 'Mendy Weiss', url: `https://x.test/post/m${n}#0`, post: `m${n}` });
     const ask = chat();
-    assert.equal((await ask('search yoely weiss song 1')).length, 0, 'a card and a file, no text');
-    await ask('search yoely weiss song 1'); // the same song again doesn't count twice
-    await ask('search yoely weiss song 2');
-    const third = await ask('search yoely weiss song 3');
+    assert.equal((await ask.play('search yoely weiss song 1')).length, 0, 'a card and a file, no text');
+    await ask.play('search yoely weiss song 1'); // the same song again doesn't count twice
+    await ask.play('search yoely weiss song 2');
+    const third = await ask.play('search yoely weiss song 3');
     assert.deepEqual(third, ['🔔 You\'ve had a few songs by Yoely Weiss, so I\'ll send you their new ones as soon as they\'re out. (Text "unfollow yoely weiss" to stop.)']);
-    assert.deepEqual(await ask('search yoely weiss song 4'), [], 'said once');
+    assert.deepEqual(await ask.play('search yoely weiss song 4'), [], 'said once');
     assert.deepEqual(catalog.followed().map((artist) => [artist.name, artist.auto]), [['Yoely Weiss', true]]);
 
     await ask('unfollow mendy weiss');
-    for (const title of ['mendy weiss song 5', 'mendy weiss other 5', 'mendy weiss other 6', 'mendy weiss other 7']) await ask(title);
+    for (const title of ['search mendy weiss song 5', 'search mendy weiss other 5', 'search mendy weiss other 6', 'search mendy weiss other 7']) await ask.play(title);
     assert.deepEqual(catalog.followed().map((artist) => artist.name), ['Yoely Weiss'], 'an unfollow sticks');
   });
 

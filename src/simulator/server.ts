@@ -5,7 +5,8 @@ import type { AddressInfo } from 'node:net';
 import { checkAudio, megabytes } from '../audio-check.ts';
 import { AudioFetchError, fetchAudio, sanitizeFileName, type DownloadedAudio } from '../audio-fetch.ts';
 import { createBot, describe } from '../bot.ts';
-import type { Catalog } from '../catalog.ts';
+import { viewsIn, type Catalog } from '../catalog.ts';
+import { splitPostback } from '../views.ts';
 import { createPictures, type Picture, type PreparedPicture } from '../library/images.ts';
 import { catalogBrowse } from '../library/browse.ts';
 import { Categories } from '../library/categories.ts';
@@ -145,6 +146,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
     onPlay: (track) => catalog.recordPlay(track.id),
     browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined),
     follows: catalogFollows(catalog),
+    views: viewsIn(catalog),
     ...sources,
   });
 
@@ -199,11 +201,13 @@ export function createSimulator(options: SimulatorOptions): Simulator {
 
   /** What a 👍 picked, in words: the song, or the album. */
   function picked(postback: string): string {
-    const id = /^play:(\d+)$/.exec(postback)?.[1];
+    // Which menu it was picked from (`play:42@41`) doesn't matter here.
+    const { action } = splitPostback(postback);
+    const id = /^play:(\d+)$/.exec(action)?.[1];
     const track = id === undefined ? undefined : catalog.get(Number(id));
     if (track) return describe(track);
-    const slug = /^post:(.+)$/.exec(postback)?.[1];
-    return (slug === undefined ? undefined : catalog.sitePost(slug)?.title) ?? postback;
+    const slug = /^post:(.+)$/.exec(action)?.[1];
+    return (slug === undefined ? undefined : catalog.sitePost(slug)?.title) ?? action;
   }
 
   /** The runner reports what it does in plain lines; they open and annotate each request in the trace. */

@@ -40,6 +40,11 @@ export interface MockZemerSearch extends Listening {
   artists: MockZemerArtist[];
   songs: MockZemerSong[];
   releases: MockZemerRelease[];
+  /**
+   * Saved answers of the real search, served as they are, by "/search <words>", "/artist <id>" or "/album <id>" (the
+   * words in lower case): the golden menus in test/fixtures/zemer are what search.zemer.io answered on 2026-10-20.
+   */
+  raw: Map<string, unknown>;
   /** Every request, as "/path?query". */
   requests: string[];
   /** Answer every request with HTTP 500. */
@@ -63,6 +68,7 @@ export async function startMockZemerSearch(initial: { artists: MockZemerArtist[]
     artists: [],
     songs: [],
     releases: [],
+    raw: new Map(),
     requests: [],
     failing: false,
     reset() {
@@ -71,6 +77,7 @@ export async function startMockZemerSearch(initial: { artists: MockZemerArtist[]
       mock.releases = [...initial.releases];
       mock.requests = [];
       mock.failing = false;
+      mock.raw = new Map();
     },
   };
   mock.reset();
@@ -101,6 +108,8 @@ export async function startMockZemerSearch(initial: { artists: MockZemerArtist[]
     };
     if (mock.failing) return json(500, { error: 'internal' });
     const id = url.searchParams.get('id') ?? '';
+    const saved = mock.raw.get(`${url.pathname} ${url.pathname === '/search' ? (url.searchParams.get('q') ?? '').trim().toLowerCase() : id}`);
+    if (saved !== undefined) return json(200, saved);
 
     if (url.pathname === '/search') {
       const q = url.searchParams.get('q') ?? '';

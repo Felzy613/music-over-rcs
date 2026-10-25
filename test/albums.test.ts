@@ -23,6 +23,7 @@ import {
 import { createZemerFinder } from '../src/sources/zemer.ts';
 import { ZemerWhitelist } from '../src/sources/zemer-whitelist.ts';
 import type { Reply } from '../src/types.ts';
+import { splitPostback } from '../src/views.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
 import { readZip } from './helpers/read-zip.ts';
 import { startMockZemerContent, type MockArtist, type MockZemerContent } from './helpers/mock-zemer-content.ts';
@@ -229,9 +230,12 @@ describe('albums on YouTube Music', () => {
     }
     const lines = (replies: Reply[]): string[] => replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined).map((reply) => reply.text);
 
-    test('"album" and a name that names one album sends it at once: its cover, one short line, then the album', async () => {
-      const { say, youTube } = setup();
-      const replies = await say('album shabbuson');
+    test('"album" and a name lists the albums, the one it names first; the album’s zip is its cover, one short line, then the album', async () => {
+      const { say, tap, youTube } = setup();
+      const menu = await say('album shabbuson');
+      assert.deepEqual(lines(menu), [`💿 Shabbuson — ${MICHOEL} · 2022`, `💿 Shabbuson Live — ${MICHOEL} · 2023`, "Text an album's number for its songs."]);
+      assert.equal(menu.some((reply) => reply.kind === 'album'), false, 'nothing is sent on its own');
+      const replies = await tap('zip:MPREb_shabbuson01');
       assert.equal(replies.length, 3);
       assert.deepEqual(replies[0], { kind: 'image', url: 'https://lh3.googleusercontent.com/MPREb_shabbuson01=w544-h544-l90-rj', caption: { title: 'Shabbuson', artist: MICHOEL } });
       assert.equal(textOf(replies[1]).text, '3 songs, coming as a zip (1 left out).');
@@ -247,24 +251,29 @@ describe('albums on YouTube Music', () => {
       });
     });
 
-    test('several albums fit: the artist’s name, then "💿 Title · year" one message each, and a 👍 on one sends it; "all" does not send every album', async () => {
+    test('several albums fit: "💿 Title — Artist · year" one message each, numbered; a 👍 on one opens it; "all" does not send every album', async () => {
       const { say, tap } = setup();
       const replies = await say('albums michoel schnitzler');
-      assert.equal(textOf(replies[0]).text, `🎤 ${MICHOEL}`);
-      assert.deepEqual(lines(replies), ['💿 Shabbuson · 2022', '💿 Shabbuson Live · 2023']);
-      const postbacks = replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.postback] : []));
-      assert.deepEqual(postbacks, ['album:MPREb_shabbuson01', 'album:MPREb_shabbuson02']);
+      assert.deepEqual(lines(replies), [`💿 Shabbuson Live — ${MICHOEL} · 2023`, `💿 Shabbuson — ${MICHOEL} · 2022`, "Text an album's number for its songs."]);
+      const postbacks = replies.flatMap((reply) => (reply.kind === 'text' && reply.postback?.startsWith('album:') ? [reply.postback] : []));
+      assert.deepEqual(
+        postbacks.map((postback) => splitPostback(postback).action),
+        ['album:MPREb_shabbuson02', 'album:MPREb_shabbuson01'],
+      );
       // The list's chips ride on its last message, which says what an album's number does.
-      assert.equal(textOf(replies.at(-1)).text, "Text an album's number to choose from its songs.");
       assert.equal(textOf(replies.at(-1)).chips?.length, 2);
-      assert.deepEqual(textOf(replies.at(-1)).numbers, [
-        { number: 1, postback: 'tracks:MPREb_shabbuson01' },
-        { number: 2, postback: 'tracks:MPREb_shabbuson02' },
-      ]);
-
-      assert.equal(albumOf(await tap('album:MPREb_shabbuson02')).title, 'Shabbuson Live');
+      assert.deepEqual(
+        textOf(replies.at(-1)).numbers?.map((choice) => [choice.number, splitPostback(choice.postback).action]),
+        [
+          [1, 'album:MPREb_shabbuson02'],
+          [2, 'album:MPREb_shabbuson01'],
+        ],
+      );
+      const opened = await tap(postbacks[0]!);
+      assert.equal(textOf(opened[0]).text, `💿 Shabbuson Live — ${MICHOEL} · 2023`);
+      assert.equal(opened.some((reply) => reply.kind === 'album'), false);
       const all = await tap(`all:${postbacks.join('|')}`);
-      assert.match(textOf(all[0]).text, /That list is albums/);
+      assert.match(textOf(all[0]).text, /That list has no songs/);
       assert.equal(all.length, 1);
     });
 
@@ -275,38 +284,38 @@ describe('albums on YouTube Music', () => {
       assert.equal(textOf((await say('album'))[0]).text, 'Text "album" and an album or an artist, like "album a poshiter yid" or "album lipa".');
     });
 
-    test('an album whose own page may not be sent is refused with the reason', async () => {
+    test('an album whose own page may not be sent is refused with the reason, opened or sent', async () => {
       const { tap } = setup();
-      assert.equal(textOf((await tap('album:MPREb_heralbum04'))[0]).text, "I can't send that album: it has a female singer, which I don't send.");
+      assert.equal(textOf((await tap('album:MPREb_heralbum04'))[0]).text, "I can't open that album: it has a female singer, which I don't send.");
+      assert.equal(textOf((await tap('zip:MPREb_heralbum04'))[0]).text, "I can't send that album: it has a female singer, which I don't send.");
     });
 
     test('a song blocked after the album was opened stays out: each is checked again just before it goes', async () => {
       const { tap, youTube } = setup();
-      const opened = await tap('album:MPREb_shabbuson01');
+      const opened = await tap('zip:MPREb_shabbuson01');
       assert.equal(albumOf(opened).songs.length, 3);
       zemer.publish((_artists, blocked) => blocked.global.push('albumsong02'));
-      const again = await tap('album:MPREb_shabbuson01');
+      const again = await tap('zip:MPREb_shabbuson01');
       assert.deepEqual(albumOf(again).songs.map((song) => song.url), [youTube.trackUrl('albumsong01'), youTube.trackUrl('albumsong04')]);
       assert.equal(textOf(again[1]).text, '2 songs, coming as a zip (2 left out).');
     });
 
-    test('a search whose words name an album too says so under the song it found, with the album’s 👍 on that line', async () => {
-      const { say, tap, youTube } = setup();
+    test('a search whose words name a song and an album lists both: the album (a 👍 opens it) and the song', async () => {
+      const { say, tap } = setup();
       const replies = await say('search night songs');
-      assert.deepEqual(replies.find((reply) => reply.kind === 'audio'), { kind: 'audio', url: youTube.trackUrl('nightsongs1'), title: `${OWLS} — Night Songs` });
-      const notice = textOf(replies.at(-1));
-      assert.equal(notice.text, '💿 Night Songs · 2021');
-      assert.equal(notice.postback, 'album:MPREb_nightsongs3');
-      assert.deepEqual(albumOf(await tap(notice.postback!)).songs.map((song) => song.title), ['One', 'Two', 'Three']);
+      assert.deepEqual(lines(replies), [`💿 Night Songs — ${OWLS} · 2021`, `Night Songs — ${OWLS}`, "Text an album's number for its songs."]);
+      assert.equal(replies.some((reply) => reply.kind === 'audio'), false);
+      const album = replies.find((reply) => reply.kind === 'text' && reply.text.startsWith('💿'));
+      assert.ok(album?.kind === 'text');
+      assert.deepEqual(lines(await tap(album.postback!)).slice(1, 4), ['One', 'Two', 'Three']);
     });
 
     test('with no song by that name but an album, the albums are the answer, the one the words name first', async () => {
       const { say } = setup();
       const replies = await say('search shabbuson');
-      assert.equal(textOf(replies[0]).text, `🎤 ${MICHOEL}`);
-      assert.deepEqual(lines(replies), ['💿 Shabbuson · 2022', '💿 Shabbuson Live · 2023']);
+      assert.deepEqual(lines(replies), [`💿 Shabbuson — ${MICHOEL} · 2022`, `💿 Shabbuson Live — ${MICHOEL} · 2023`, "Text an album's number for its songs."]);
       assert.equal(textOf(replies.at(-1)).chips?.length, 2);
-      assert.deepEqual(lines(await say('search shabbuson live')), ['💿 Shabbuson Live · 2023']);
+      assert.deepEqual(lines(await say('search shabbuson live')), [`💿 Shabbuson Live — ${MICHOEL} · 2023`, "Text an album's number for its songs."]);
     });
 
     test('an album the words name outright beats a song that only resembles them', async () => {
@@ -315,19 +324,17 @@ describe('albums on YouTube Music', () => {
       catalog.add({ title: 'Shabbuson Medley', artist: OWLS, url: 'https://www.music-table.com/post/shabbuson-medley#0' });
       const { say } = setup({ catalog });
       const replies = await say('search shabbuson');
-      assert.equal(lines(replies)[0], '💿 Shabbuson · 2022');
+      assert.equal(lines(replies)[0], `💿 Shabbuson — ${MICHOEL} · 2022`);
       assert.equal(replies.some((reply) => reply.kind === 'audio'), false);
     });
 
-    test('a search for an artist lists their songs, then their albums, under their name', async () => {
+    test('a search for an artist lists their albums, then their songs', async () => {
       const { say } = setup();
       const replies = await say('search michoel schnitzler');
       const shown = replies.flatMap((reply) => (reply.kind === 'text' && reply.text ? [reply.text] : []));
-      assert.equal(shown[0], `🎤 ${MICHOEL}`);
-      assert.equal(shown.filter((text) => text.startsWith('🎤')).length, 1, 'one artist, one heading');
-      const firstAlbum = shown.findIndex((text) => text.startsWith('💿'));
-      assert.ok(firstAlbum > 1, 'songs first, then albums');
-      assert.deepEqual(shown.slice(firstAlbum), ['💿 Shabbuson · 2022', '💿 Shabbuson Live · 2023', "Text an album's number to choose from its songs."]);
+      const firstSong = shown.findIndex((text) => !text.startsWith('💿'));
+      assert.deepEqual(shown.slice(0, firstSong), [`💿 Shabbuson Live — ${MICHOEL} · 2023`, `💿 Shabbuson — ${MICHOEL} · 2022`], 'albums first, newest first');
+      assert.ok(shown.length - firstSong > 1, 'then songs');
       assert.ok(!shown.some((text) => text.includes('Guest')), 'nothing a woman is credited on');
     });
 
@@ -352,25 +359,23 @@ describe('albums on YouTube Music', () => {
       };
       const { say } = setup({ albums: broken });
       const replies = await say('search night songs');
-      assert.equal(replies.some((reply) => reply.kind === 'audio'), true);
+      assert.ok(lines(replies).includes(`Night Songs — ${OWLS}`));
       assert.equal(replies.some((reply) => reply.kind === 'text' && reply.text.startsWith('💿')), false);
     });
 
-    test('"zemer" mentions a matching album too', async () => {
+    test('"zemer" lists a matching album too', async () => {
       const { say } = setup();
       const replies = await say('zemer night songs');
-      assert.equal(textOf(replies.at(-1)).text, '💿 Night Songs · 2021');
+      assert.ok(lines(replies).includes(`💿 Night Songs — ${OWLS} · 2021`));
     });
 
     test('when YouTube turns this server away, an album request says so plainly', async () => {
       const { say, tap, youTube } = setup();
       youtube.firstAcceptedVisitor = 99;
       await youTube.checkStreams();
-      assert.equal(
-        textOf((await say('album shabbuson'))[0]).text,
-        "I couldn't search albums on Zemer: YouTube Music is turning this server away for now (it asks to confirm it isn't a bot).",
-      );
-      assert.equal(textOf((await tap('album:MPREb_shabbuson01'))[0]).text, "I can't send that album: YouTube Music is turning this server away for now (it asks to confirm it isn't a bot).");
+      assert.equal(textOf((await say('album shabbuson'))[0]).text, "I couldn't search Zemer right now: YouTube Music is turning this server away for now (it asks to confirm it isn't a bot).");
+      assert.equal(textOf((await tap('album:MPREb_shabbuson01'))[0]).text, "I can't open that album: YouTube Music is turning this server away for now (it asks to confirm it isn't a bot).");
+      assert.equal(textOf((await tap('zip:MPREb_shabbuson01'))[0]).text, "I can't send that album: YouTube Music is turning this server away for now (it asks to confirm it isn't a bot).");
     });
 
     test('with YouTube Music off there are no albums, and it says so', async () => {
@@ -384,7 +389,10 @@ describe('albums on YouTube Music', () => {
       const { bot, youTube } = setup({ catalog });
       for (const text of ['zemer blue horizon night owls', 'youtube blue horizon night owls', 'yt blue horizon night owls', 'youtube music blue horizon night owls', 'Youtub blue horizon night owls']) {
         const replies = await bot.handle({ from: 'u', messageId: 'm', text });
-        assert.deepEqual(replies.at(-1), { kind: 'audio', url: youTube.trackUrl('aaaaaaaaaa1'), title: `${OWLS} — Blue Horizon` }, text);
+        const song = replies.find((reply) => reply.kind === 'text' && reply.postback?.startsWith('play:'));
+        assert.ok(song?.kind === 'text' && song.text === `Blue Horizon — ${OWLS}`, text);
+        const sent = await bot.handle({ from: 'u', messageId: 'm', postback: song.postback! });
+        assert.deepEqual(sent.at(-1), { kind: 'audio', url: youTube.trackUrl('aaaaaaaaaa1'), title: `${OWLS} — Blue Horizon` }, text);
       }
     });
 
@@ -485,9 +493,17 @@ describe('sending an album as a zip', () => {
     });
   }
 
+  /** Typed on the phone: the album's name ("album …", a menu), its number (its songs), then "zip" (all of it). From then on only what the zip brought is kept. */
   async function ask(runner: ReturnType<typeof makeRunner>, text: string): Promise<void> {
     await runner.prime();
-    matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: text });
+    for (const body of [text, '1']) {
+      matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body });
+      await runner.tick();
+    }
+    events = [];
+    mostInFlight = 0;
+    matrix.sent.splice(0);
+    matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'zip' });
     await runner.tick();
   }
 
@@ -570,7 +586,7 @@ describe('sending an album as a zip', () => {
     assert.deepEqual(matrix.uploads.map((upload) => upload.bytes.length), [4000, 4000, 4000]);
   });
 
-  test('picking from a list of albums with a 👍-style postback sends the zip too', async () => {
+  test('an album picked by its number, then "zip", is the zip of that album', async () => {
     const runner = makeRunner();
     await ask(runner, 'album night songs');
     const file = matrix.sent.find((event) => event.content.msgtype === 'm.file')!.content;

@@ -73,8 +73,9 @@ export function createEventHandler(deps: HandlerDeps): (event: UserEvent) => Pro
       replies = [{ kind: 'text', text: ERROR_NOTICE }];
     }
 
-    // Options are tappable chips here, so a list stays one message.
-    for (const reply of joinLists(replies)) {
+    // Options are tappable chips here, so a list stays one message, and its chips are what picks: tapped, not texted.
+    for (const joined of joinLists(replies)) {
+      const reply = joined.kind === 'text' && joined.chips ? { ...joined, text: joined.text.replace(/\b(R|r)eply with a number to pick one/, (_, r: string) => `${r === 'R' ? 'T' : 't'}ap one to pick it`) } : joined;
       if (reply.kind === 'text' && !reply.text.trim()) continue; // a message with no words only carries a list's chips
       if (await attempt(`sending ${reply.kind} reply`, () => deps.rbm.send(from, reply))) continue;
       if (reply.kind === 'audio') {

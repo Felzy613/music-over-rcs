@@ -18,9 +18,14 @@ import type { ZemerWhitelist } from './zemer-whitelist.ts';
 
 export const ZEMER_SEARCH_URL = 'https://search.zemer.io';
 
-/** What one search asks for of each kind; the app asks for 8 to 100. */
-const PER_KIND = 20;
-/** How long an artist's or an album's page is kept, so "more" (or the album after its song) doesn't ask again. */
+/**
+ * What one search asks for of each kind (songs, albums, singles, videos; a kind with fewer has them all); the app asks
+ * for 8 to 100. 50 because Zemer's order is not by plays: at 20, "achas" missed its most played song (1.5 million plays,
+ * measured 2026-10-20), and 50 still leaves a menu of 5 and two pages of 8 of each kind after the list takes its share.
+ * It answered as fast at 50 as at 20 (0.16 to 0.28 s).
+ */
+const PER_KIND = 50;
+/** How long a search's answer, or an artist's or an album's page, is kept, so "songs more" (or the album after its song) doesn't ask again. */
 const PAGE_TTL_MS = 10 * 60_000;
 const PAGES_KEPT = 30;
 /** How long a song's cover is waited for (its album's, when it has none of its own) before the video's picture is used. */
@@ -220,6 +225,7 @@ export class ZemerSearch {
   #now: () => number;
   #artists = new Map<string, { at: number; page: ZemerArtistPage | undefined }>();
   #albums = new Map<string, { at: number; page: ZemerAlbumPage | undefined }>();
+  #searches = new Map<string, { at: number; page: ZemerResults | undefined }>();
 
   constructor(options: ZemerSearchOptions = {}) {
     this.baseUrl = (options.baseUrl ?? ZEMER_SEARCH_URL).replace(/\/+$/, '');
@@ -229,9 +235,11 @@ export class ZemerSearch {
     this.#now = options.now ?? Date.now;
   }
 
-  /** Artists, songs, videos, albums and singles that fit the words, each kind best first. */
+  /** Artists, songs, videos, albums and singles that fit the words, each kind best first. Kept a while, for paging. */
   async search(query: string): Promise<ZemerResults> {
-    return parseResults(await this.#get('/search', { q: query, k: String(PER_KIND) }, `searching "${query}"`));
+    const key = query.trim().toLowerCase();
+    const results = await this.#keep(this.#searches, key, async () => parseResults(await this.#get('/search', { q: query, k: String(PER_KIND) }, `searching "${query}"`)));
+    return results!;
   }
 
   /** Everything by one artist (the songs with how often they were played); undefined when Zemer doesn't have them. */
@@ -253,6 +261,10 @@ export class ZemerSearch {
   /** A page asked for in the last few minutes is not asked for again ("more", a song's cover and then its album). */
   async #kept<T>(pages: Map<string, { at: number; page: T | undefined }>, key: string, fetchPage: () => Promise<T | undefined>): Promise<T | undefined> {
     if (!ID.test(key)) return undefined;
+    return this.#keep(pages, key, fetchPage);
+  }
+
+  async #keep<T>(pages: Map<string, { at: number; page: T | undefined }>, key: string, fetchPage: () => Promise<T | undefined>): Promise<T | undefined> {
     const kept = pages.get(key);
     if (kept && this.#now() - kept.at < PAGE_TTL_MS) return kept.page;
     const page = await fetchPage();
@@ -404,9 +416,12 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
     const title = options.video ? tidyVideoTitle(song.title, song.artist) : song.title;
     const aka = akaOf(ids);
     return {
+      id: song.videoId,
       title,
       artist: song.artist,
       ...(aka ? { aka } : {}),
+      ...(song.plays !== undefined ? { plays: song.plays } : {}),
+      ...(options.video ? { video: true } : {}),
       ...(song.album ? { album: song.album } : {}),
       ...(song.seconds ? { seconds: song.seconds } : {}),
       async keep() {
@@ -426,6 +441,7 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
       title: release.title,
       artist: release.artist,
       year: release.year,
+      ...(release.released ? { released: release.released } : {}),
       cover: release.cover,
       ...(release.songs ? { songs: release.songs } : {}),
       ...(release.single ? { single: true } : {}),
@@ -435,7 +451,11 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
 
   const allowedRelease = (release: ZemerRelease): boolean => whitelist.allows(release.id, idsOf(release));
 
-  /** The same song or album twice (an edition, a re-upload) is one: the one with more songs, or else the first. */
+  /**
+   * The same song or album twice (an edition, a re-upload) is one: the better copy by `better` (the most played song, the
+   * album with more songs), or else the first. For "achas" the first copy of Mordechai Shapiro's song had no play count
+   * and the second 1.5 million.
+   */
   const sameTitle = (title: string, artist: string): string => `${tokenize(title).join(' ')}|${tokenize(artist).join(' ')}`;
   function once<T extends { title: string; artist: string }>(items: T[], better: (a: T, b: T) => boolean = () => false): T[] {
     const kept = new Map<string, T>();
@@ -462,7 +482,12 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
       if (!(err instanceof SourceError)) throw err;
       throw new ZemerError(`${why}, and ${err.message}`);
     }
-    return { songs: tracks.map((track): FoundSong => ({ title: track.title, artist: track.artist, keep: async () => track })), albums: releases, artists: [] };
+    return {
+      songs: tracks.map((track): FoundSong => ({ id: `t${track.id}`, title: track.title, artist: track.artist, keep: async () => track })),
+      albums: releases.filter((release) => !release.single),
+      singles: releases.filter((release) => release.single),
+      artists: [],
+    };
   }
 
   async function open(albumId: string): ReturnType<AlbumSource['open']> {
@@ -485,7 +510,7 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
     const albumIds = idsOf(page.album);
     const verdict = whitelist.verdict(albumId, albumIds);
     if (!verdict.ok) throw new ZemerError(verdict.why === 'blocked' ? "Zemer's list blocks that album" : verdict.why === 'female' ? "it has a female singer, which I don't send" : "its artist isn't on Zemer's artist list");
-    const songs: Array<{ number: number; track: Track }> = [];
+    const songs: Array<{ number: number; track: Track; seconds?: number }> = [];
     for (const song of page.songs) {
       // A song credited to the album's artist (or to nobody) is the album artist's.
       const sameArtist = !song.artist || tokenize(song.artist).join(' ') === tokenize(page.album.artist).join(' ');
@@ -501,7 +526,7 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
         ...(page.album.year ? { year: page.album.year } : {}),
       };
       const track = await found({ ...song, artist: song.artist || page.album.artist }, ids, undefined, { album, cover: page.album.cover }).keep();
-      songs.push({ number, track });
+      songs.push({ number, track, ...(song.seconds ? { seconds: song.seconds } : {}) });
     }
     const leftOut = page.songs.length - songs.length;
     note(`album "${page.album.title}": ${plural(page.songs.length, 'song')}, ${songs.length} may be sent${leftOut > 0 ? `, ${leftOut} left out by Zemer's list` : ''}`);
@@ -527,26 +552,36 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
         return fromYouTube(words.join(' '), err.message);
       }
       const releases = releasesIn(results.albums, results.singles);
-      const songs: FoundSong[] = [];
       const seen = new Set<string>();
-      for (const [list, video] of [[results.songs, false], [results.videos, true]] as const) {
-        for (const song of list) {
+      const songsOf = (list: ZemerSong[], video: boolean): FoundSong[] =>
+        list.flatMap((song) => {
           const ids = idsOf(song);
-          if (seen.has(song.videoId) || !whitelist.allows(song.videoId, ids)) continue;
+          if (seen.has(song.videoId) || !whitelist.allows(song.videoId, ids)) return [];
           seen.add(song.videoId);
-          songs.push(found(song, ids, song.album ? releases.get(song.album.id) : undefined, { video }));
-        }
-      }
-      const albums = once([...results.albums, ...results.singles].filter(allowedRelease)).map(toAlbum);
+          return [found(song, ids, song.album ? releases.get(song.album.id) : undefined, { video })];
+        });
+      const morePlays = (a: FoundSong, b: FoundSong): boolean => (a.plays ?? 0) > (b.plays ?? 0);
+      const audio = once(songsOf(results.songs, false), morePlays);
+      // A video is a song only when no song has it: its title, tidied, and its artist are no song's.
+      const sung = new Set(audio.map((song) => sameTitle(song.title, song.artist)));
+      const videos = once(
+        songsOf(results.videos, true).filter((video) => !sung.has(sameTitle(video.title, video.artist))),
+        morePlays,
+      );
+      const moreSongs = (a: ZemerRelease, b: ZemerRelease): boolean => (a.songs ?? 0) > (b.songs ?? 0);
+      // Albums (and EPs) apart from singles, as Zemer sorts them: a menu lists a single as a song.
+      const albums = once(results.albums.filter(allowedRelease), moreSongs).map(toAlbum);
+      const singles = once(results.singles.filter(allowedRelease), moreSongs).map(toAlbum);
       const artists = results.artists.flatMap((artist): ArtistRef[] => {
         if (!whitelist.allows(artist.id, [artist.id])) return [];
         const aka = akaOf([artist.id]);
         return [{ id: artist.id, name: artist.name, ...(aka ? { aka } : {}) }];
       });
+      const songs = [...audio, ...videos];
       note(
-        `Zemer found ${plural(results.songs.length + results.videos.length, 'song')}, ${plural(results.albums.length + results.singles.length, 'album')} and ${plural(results.artists.length, 'artist')}; ${songs.length}, ${albums.length} and ${artists.length} pass Zemer's list`,
+        `Zemer found ${plural(results.songs.length + results.videos.length, 'song')}, ${plural(results.albums.length + results.singles.length, 'album')} and ${plural(results.artists.length, 'artist')}; ${songs.length}, ${albums.length + singles.length} and ${artists.length} pass Zemer's list`,
       );
-      return { songs: once(songs), albums, artists };
+      return { songs, albums, singles, artists };
     },
     async artist(artistId): Promise<ArtistPage | undefined> {
       if (!deps.zemer) return undefined;

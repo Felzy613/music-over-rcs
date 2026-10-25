@@ -1,0 +1,496 @@
+{
+"artists": [
+{
+"id": "UC-lS3CgpgMe-4vGOctdjdRQ",
+"name": "Camp M & N"
+},
+{
+"id": "UC-rPxFHSMKoQ8MP5rOqQJ8Q",
+"name": "Moshe Mendlowitz",
+"altName": "משה מנדלוביץ"
+},
+{
+"id": "UC0-foS39p84VAaTwngP4W4w",
+"name": "Abish Brodt",
+"altName": "אביש בראדט"
+},
+{
+"id": "UC08KoYG0GOqiuW13VS1MNxA",
+"name": "The Solomon Brothers",
+"altName": "האחים סלומון"
+},
+{
+"id": "UC0C-NbVqlaDM03FupGPxKwQ",
+"name": "Shimon Friedman"
+},
+{
+"id": "UC0u_NC9_qtrRsxYDY7J-r2w",
+"name": "Mendy Hershkowitz Band"
+},
+{
+"id": "UC1-uPfCV7ZcLCSou9v_Vclw",
+"name": "Avraham Fried",
+"altName": "אברהם פריד"
+},
+{
+"id": "UC1KksRnkCYh5orLN-R-lB2g",
+"name": "Waterbury Mesivta",
+"altName": "מתיבתא ד'ווטרברי"
+},
+{
+"id": "UC1QsA-Q6SUKX9gWi1heQDEA",
+"name": "Joey Newcomb",
+"altName": "יוסף ניוקומב"
+},
+{
+"id": "UC31c9ukaP0w1Gugn6mTb5pA",
+"name": "Ari Goldwag",
+"altName": "ארי גולדוואג"
+},
+{
+"id": "UC3ZK6GXNJu6bL2az3GdGDtA",
+"name": "Mordechai Gottlieb - מרדכי גוטליב",
+"altName": "מרדכי גוטליב"
+},
+{
+"id": "UC4CYdo6LDLhirmusMEqBaSg",
+"name": "Aharon Segal",
+"altName": "אהרון סגל"
+},
+{
+"id": "UC57Tolf_FQa0iZs4xVndEMg",
+"name": "Bentzi Marcus",
+"altName": "בנצי מרקוס"
+},
+{
+"id": "UC5iQV5j4ad2ruwmJn2vyvGg",
+"name": "Soulfarm",
+"altName": "סולפארם"
+},
+{
+"id": "UC5rKMtdamiGoJUq4fsKn-pg",
+"name": "Zusha",
+"altName": "זושא"
+},
+{
+"id": "UC67d9XPlTYHn56MqsgbEElg",
+"name": "Mezamrim Choir",
+"altName": "המזמרים"
+},
+{
+"id": "UC70AOHKZJjByNzs4uB6-dEg",
+"name": "Zanvil Weinberger",
+"altName": "זאנוויל וויינברגר"
+},
+{
+"id": "UC8DwcOr-H0nDmz-pHgRg18g",
+"name": "Yitzchak Halevi",
+"altName": "יצחק ה-לוי"
+},
+{
+"id": "UC8n1Io5T76kSYeuYVQHzsQA",
+"name": "Beri Weber",
+"altName": "בערי וועבער"
+},
+{
+"id": "UC9vlyAYjANficGvyJMgOkaw",
+"name": "Michoel Pruzansky",
+"altName": "מיכאל פרוזנסקי"
+},
+{
+"id": "UCADbQ62Bk2eEXqDF_wbz-bw",
+"name": "Yoni Galen"
+},
+{
+"id": "UCAEnYu8sXpSpHQCPRWq9q0A",
+"name": "The Renov Men Sing"
+},
+{
+"id": "UCAPjT-v_5MLUUFra6tb-Pkg",
+"name": "Tzlil V'zemer Boys Choir",
+"altName": "פרחי צליל וזמר"
+},
+{
+"id": "UCB6Eo60K3nQkI08kbTo5pqA",
+"name": "Masri"
+},
+{
+"id": "UCBA7r9Xl5dFoTlj0UW19iug",
+"name": "Camp Coolam"
+},
+{
+"id": "UCBKUOjensvi6-T9T5jQjqzw",
+"name": "Sandy Shmuely",
+"altName": "סנדי שמואלי"
+},
+{
+"id": "UCBMDYwogwSLZRYxRbJq5GUw",
+"name": "Pey Dalid",
+"altName": "פ''ד"
+},
+{
+"id": "UCBNwLHNwE9kQ2bE2wt1g36g",
+"name": "Shlomo Carlebach",
+"altName": "שלמה קרליבך"
+},
+{
+"id": "UCBVXowqf2vbz8NjC_lqIt6w",
+"name": "Lenny Solomon & Shlock Rock"
+},
+{
+"id": "UCCvkbGgdCz_D5_DDIC8uZhw",
+"name": "Moshe Tischler",
+"altName": "משה טישלר"
+},
+{
+"id": "UCCy0WVu4NEhR1b0XPIe-deQ",
+"name": "Shloime Nemetsky"
+},
+{
+"id": "UCDSlemAwo0zZQR3C9oeiarQ",
+"name": "Shimon Kugel",
+"altName": "שמעון קוגל"
+},
+{
+"id": "UCEjcKdpkZkvgT5ISMGV5DCg",
+"name": "Sruly Green",
+"altName": "שרולי גרין"
+},
+{
+"id": "UCFaqeWT7ZBJsdeOvCWvYhfA",
+"name": "Nachas",
+"altName": "נחת"
+},
+{
+"id": "UCFehNHjcIkNesGMVlwW0ENg",
+"name": "Akiva Gelb",
+"altName": "עקיבא געלב"
+},
+{
+"id": "UCHBST5NBv-gZeXkJjjP74Kw",
+"name": "Thank You Hashem",
+"altName": "טנקיו השם"
+},
+{
+"id": "UCHO5vboPtd5venQADWPUncw",
+"name": "Moshe Tarlow"
+},
+{
+"id": "UCIABt7M29lqjVWw4q2OQe_w",
+"name": "Belz",
+"altName": "בעלזא"
+},
+{
+"id": "UCK8I9UUQukwqy_QADoFg6Og",
+"name": "Mordechai Ben David",
+"altName": "מרדכי בן דוד"
+},
+{
+"id": "UCL36Xtz4BIISA-jMGzyUItw",
+"name": "L’Chaim OG"
+},
+{
+"id": "UCNBG7G28lqHgX8UGYraRrGw",
+"name": "Eitan Katz",
+"altName": "איתן כץ"
+},
+{
+"id": "UCNu_lYQXHXhzkf1YU-aZl8Q",
+"name": "Shulem Lemmer",
+"altName": "שלום למר"
+},
+{
+"id": "UCPB6WX90hwcgMJkdOOeklGQ",
+"name": "Chayala Neuhaus & Yehuda Kirschner"
+},
+{
+"id": "UCPQLhDp7TjJpERp18PWmVgA",
+"name": "Lehava"
+},
+{
+"id": "UCQBBI2C_q-Eekqx_TF0QO7A",
+"name": "C Lanzbom",
+"altName": "לנזבאום"
+},
+{
+"id": "UCQZJH2kEKLECIeD79w6L1uQ",
+"name": "Schwebel Scharf & Levine"
+},
+{
+"id": "UCT-mEPzcpu9NA3_lcwbHq0A",
+"name": "Mendy Jerufi",
+"altName": "מנדי ג'רופי"
+},
+{
+"id": "UCTd_6EUO6fzkuDmFhP7OBlA",
+"name": "Yehuda Tenenbaum"
+},
+{
+"id": "UCTeE1RGDHXf3jdpLHz0sGLg",
+"name": "Camp S'dei Chemed International"
+},
+{
+"id": "UCTl5QsZJVZKlROpVUcHRZzQ",
+"name": "Mizrach"
+},
+{
+"id": "UCUU0EZqjbr9asGqLmDcYxGg",
+"name": "Shlomo Katz",
+"altName": "שלמה כ''ץ"
+},
+{
+"id": "UCVLQWjtgDSTZN37_YbISUAQ",
+"name": "Motty Ilowitz",
+"altName": "מאטי אילאוויטש"
+},
+{
+"id": "UCWjr5f7WIqjSq-aI3fYEBAQ",
+"name": "הלל מאיר",
+"altName": "Hillel Meir"
+},
+{
+"id": "UCXArsdvij0trHqjCmzj699w",
+"name": "Kesher"
+},
+{
+"id": "UCXCXxW1k-htkwGcx-qTcuaQ",
+"name": "Zevi Klein"
+},
+{
+"id": "UCXWR2cjhJrMsvau5XRKYUGA",
+"name": "Yaakov Yanky Lemmer"
+},
+{
+"id": "UCYUYMGdAeHH6atUovEvJsUg",
+"name": "Shalom Mann",
+"altName": "שלום מן"
+},
+{
+"id": "UCYbj0V1byoIQw_CNvfrjhkg",
+"name": "Yitzchak Simcha"
+},
+{
+"id": "UCYf5FBxTr_WOGZ0bg0jAgpw",
+"name": "Abie Rotenberg",
+"altName": "איבי רוטנברג"
+},
+{
+"id": "UCYsDee6axf7o03ktN2GKakw",
+"name": "Shlomo Simcha",
+"altName": "שלמה שמחה"
+},
+{
+"id": "UCZ4XuQbhnCWNdoNlPCqHebg",
+"name": "Uri Davidi",
+"altName": "אורי דוידי"
+},
+{
+"id": "UCZyhPAyueho_sd3C2kocAFA",
+"name": "Yaakov Rosenblum",
+"altName": "יעקב רוזנבלום"
+},
+{
+"id": "UC_1ATkk1law94D4f6s9NJQg",
+"name": "Zalman Goldstein",
+"altName": "זלמן גולדשטיין"
+},
+{
+"id": "UC_AnZatVR_lH-MMnJo0-iGA",
+"name": "Shlomo Katz",
+"altName": "שלמה כ''ץ"
+},
+{
+"id": "UC_IxmTZosg-FyYkvf1mzYnw",
+"name": "Baruch Levine",
+"altName": "ברוך לוין"
+},
+{
+"id": "UC_dRX63mhvOrenBjYWJx9mA",
+"name": "Yaakov Shwekey",
+"altName": "יעקב שוואקי"
+},
+{
+"id": "UCaDC4VKiVa5q_iSNJxCSLhQ",
+"name": "Yingerlich"
+},
+{
+"id": "UCaSs5F26wYkoirLRfsA1Upg",
+"name": "Shloime Daskal",
+"altName": "שלומי דאסקל"
+},
+{
+"id": "UCam5AHZJ6vMvYkPsYFsBfnQ",
+"name": "Freilach Band",
+"altName": "תזמורת פריילעך"
+},
+{
+"id": "UCam5S6kKMkvDQfCywD531gg",
+"name": "MRM Music",
+"altName": "מרמ מיוזיק"
+},
+{
+"id": "UCcF3ej8cahVLf2gVXvbpS3w",
+"name": "Yiddish Nachas",
+"altName": "אידיש נחת"
+},
+{
+"id": "UCcZtXNw4qpFeIF7C3y1JMZg",
+"name": "Shalsheles",
+"altName": "שלשלת"
+},
+{
+"id": "UCckg6lcQaW00lvNHwCjo7xA",
+"name": "Shmueli Ungar",
+"altName": "שמילי אונגר"
+},
+{
+"id": "UCdFAcfF4GqZ-FiheSzhLHNg",
+"name": "DJ SRUL"
+},
+{
+"id": "UCeb-Kw9qTcvpBakT7H4_J9A",
+"name": "Sam Glaser",
+"altName": "סאם גלזר"
+},
+{
+"id": "UCfWRyQLkrtC0G3sG001vq8A",
+"name": "DJ Farbreng",
+"altName": "די ג'יי פארברענג"
+},
+{
+"id": "UCgR5nn9ZT0yMtGybj7A1Kag",
+"name": "Rabbi B",
+"altName": "רבי בי"
+},
+{
+"id": "UChXSWl1R37ir_MAp0TPmj4Q",
+"name": "Aron Judowitz"
+},
+{
+"id": "UCiYY3LCuBdTI0ufmdzmAXiQ",
+"name": "Naftali Blumenthal",
+"altName": "נפתלי בלומנטל"
+},
+{
+"id": "UCj8kKm4E7Ede3xd0SLbMIwA",
+"name": "Shimon Craimer"
+},
+{
+"id": "UCjUs6KaR718mvm0DmBRpJrQ",
+"name": "Aharon Berk",
+"altName": "אהרן בירק"
+},
+{
+"id": "UCl80Gv3npsInBbatoVaZgTQ",
+"name": "Michoel Streicher",
+"altName": "מיכאל שטרייכר"
+},
+{
+"id": "UCm5x_womXL5E7TAYca5JkZQ",
+"name": "Mordechai Shapiro",
+"altName": "מרדכי שפירא"
+},
+{
+"id": "UCmmK4Kb7U1b4pd4Pzt9_Evw",
+"name": "Duvy Burston"
+},
+{
+"id": "UCmphH6p4YO4CdVeIp9NANaw",
+"name": "Camp Gan Yisroel Parksville"
+},
+{
+"id": "UCmushzrKzk9WQDu4Q1-rqgg",
+"name": "Yosef Gestetner",
+"altName": "יוסף גשטטנר"
+},
+{
+"id": "UCnsRvQIrnbRgucXJj78zP-A",
+"name": "Zaide Chayim"
+},
+{
+"id": "UCo69C9U4ol49c-C3GHCbk2w",
+"name": "Lipa Schmeltzer",
+"altName": "ליפא שמעלצר"
+},
+{
+"id": "UCpXoZ0kzHZdQWJ54U7XzJfA",
+"name": "Levi Cohen",
+"altName": "לוי כהן"
+},
+{
+"id": "UCqagfxK3U01lGOiRXaYLYQA",
+"name": "Shir V’shevach Boys Choir"
+},
+{
+"id": "UCqd4SrS68U_V8f67UY7bhPg",
+"name": "Isaac Bitton",
+"altName": "אייזיק ביטון"
+},
+{
+"id": "UCrZ7hkbMeFtDfWGqF1SqFDw",
+"name": "Yerachmiel Begun & The Miami Boys Choir",
+"altName": "ירחמיאל ביגון ופרחי מיאמי"
+},
+{
+"id": "UCs2H_ywMnysIENhMMQ9JIiA",
+"name": "Dovid Stein",
+"altName": "דוד שטיין"
+},
+{
+"id": "UCsHGHbJHnqeUR8ZDdHGgSag",
+"name": "Gavriel Yablok"
+},
+{
+"id": "UCu1G23njT2YZweYWPQzemWQ",
+"name": "Camp Chayolei Hamelech",
+"altName": "מחנה חיילי המלך"
+},
+{
+"id": "UCu6IT3jTOtAcNfjIQSIyCQQ",
+"name": "Simcha Leiner",
+"altName": "שמחה ליינר"
+},
+{
+"id": "UCuUcHnYY30pDCJ-wNjw20gA",
+"name": "Itzik Dadya",
+"altName": "איציק דדיה"
+},
+{
+"id": "UCv58Dafo6Yue5eve-Xcky0Q",
+"name": "Shloime Dachs",
+"altName": "שלומי דאקס"
+},
+{
+"id": "UCvlkeIeYV4PfkQ_M9wfhQ7A",
+"name": "Shlepping Nachas",
+"altName": "שלפינג נחת"
+},
+{
+"id": "UCxEklyOKH3Jn1_1_AaRQsrQ",
+"name": "Gad Elbaz",
+"altName": "גד אלבז"
+},
+{
+"id": "UCxGq2_-a3KKM0S0fJOmuMAw",
+"name": "Dovid Chesner",
+"altName": "דוד צ'זנר"
+},
+{
+"id": "UCxnDtc3FPtvgYMkHCQkxSXw",
+"name": "Judaism Alive"
+},
+{
+"id": "UCykUQrbIpRuIAJfq7j4OGow",
+"name": "Yosef Kasper"
+},
+{
+"id": "UCzO25gJ0zn2Hhu10n0n2m4g",
+"name": "Rabbi Yoel Ferber",
+"altName": "הרב יואל פערבער"
+}
+],
+"blocked": {
+"global": [],
+"female": []
+}
+}

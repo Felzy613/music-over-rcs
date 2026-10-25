@@ -19,6 +19,8 @@ const textOf = (reply: Reply | undefined): TextReply => {
   return reply;
 };
 const audioUrl = (replies: Reply[]): string | undefined => replies.find((reply) => reply.kind === 'audio')?.url;
+/** The menu's song lines. */
+const songLines = (replies: Reply[]): string[] => replies.flatMap((reply) => (reply.kind === 'text' && reply.postback?.startsWith('play:') ? [reply.text] : []));
 
 /**
  * Which place a search asks, and in what order: Zemer first (a stand-in that, like the real one, answers any words with
@@ -35,7 +37,7 @@ describe('search looks on Zemer first, then in the catalog and on music-table.co
         if (options.zemerDown) throw new SourceError("Zemer's search answered HTTP 500");
         const words = query.toLowerCase().split(/\s+/);
         const songs = ZEMER_SONGS.filter((song) => words.some((word) => `${song.title} ${song.artist}`.toLowerCase().includes(word))).map(
-          (song): FoundSong => ({ title: song.title, artist: song.artist, keep: async () => catalog.add(song) }),
+          (song): FoundSong => ({ id: song.url.slice(-11), title: song.title, artist: song.artist, keep: async () => catalog.add(song) }),
         );
         return { songs, albums: [] as Album[], artists: [] };
       },
@@ -57,56 +59,60 @@ describe('search looks on Zemer first, then in the catalog and on music-table.co
       source: site,
       ...(options.musicTableFirst ? { musicTableFirst: true } : {}),
     });
-    return { catalog, zemerAsked, siteAsked, say: (text: string) => bot.handle({ from: 'u', messageId: 'm', text }) };
+    const say = (text: string) => bot.handle({ from: 'u', messageId: 'm', text });
+    /** The menu's first song, picked: where its audio comes from. */
+    const first = async (text: string): Promise<string | undefined> => {
+      const menu = await say(text);
+      const line = menu.find((reply) => reply.kind === 'text' && reply.postback?.startsWith('play:'));
+      assert.ok(line?.kind === 'text', `no song in ${JSON.stringify(menu)}`);
+      assert.equal(audioUrl(menu), undefined, 'a menu sends nothing');
+      return audioUrl(await bot.handle({ from: 'u', messageId: 'm', postback: line.postback! }));
+    };
+    return { catalog, zemerAsked, siteAsked, say, first };
   }
 
   test('a song Zemer has is sent from there, even when the catalog holds the same one from music-table.com', async () => {
     const catalog = new Catalog(':memory:');
     catalog.add({ title: 'Blue Horizon', artist: OWLS, url: 'https://www.music-table.com/post/blue-horizon#0' });
-    const { say, siteAsked } = setup({ catalog });
-    assert.equal(audioUrl(await say('search blue horizon night owls')), 'https://music.youtube.com/watch?v=aaaaaaaaaa1');
+    const { first, siteAsked } = setup({ catalog });
+    assert.equal(await first('search blue horizon night owls'), 'https://music.youtube.com/watch?v=aaaaaaaaaa1');
     assert.deepEqual(siteAsked, [], 'music-table.com was not even asked');
   });
 
-  test('words that name one of Zemer’s songs play it at once; otherwise its songs that fit are listed', async () => {
-    const { say } = setup();
-    assert.equal(audioUrl(await say('search blue horizon')), 'https://music.youtube.com/watch?v=aaaaaaaaaa1');
-    const listed = await say('search night owls');
-    assert.deepEqual(
-      listed.flatMap((reply) => (reply.kind === 'text' && reply.text ? [reply.text] : [])),
-      [`🎤 ${OWLS}`, 'Blue Horizon', 'Blue Horizon (Live)'],
-    );
+  test('words that name one of Zemer’s songs put it first in the menu; nothing is played at once', async () => {
+    const { say, first } = setup();
+    assert.equal(await first('search blue horizon'), 'https://music.youtube.com/watch?v=aaaaaaaaaa1');
+    assert.deepEqual(songLines(await say('search night owls')), [`Blue Horizon — ${OWLS}`, `Blue Horizon (Live) — ${OWLS}`]);
   });
 
   test('when Zemer has nothing that fits, the catalog is looked in, then music-table.com', async () => {
     const catalog = new Catalog(':memory:');
     catalog.add({ title: 'Stranger Song', artist: 'Nobody Known', url: 'https://www.music-table.com/post/stranger-song#0' });
-    const { say, zemerAsked, siteAsked } = setup({ catalog, site: ['Other Song'] });
-    assert.equal(audioUrl(await say('search stranger song nobody known')), 'https://www.music-table.com/post/stranger-song#0');
+    const { first, zemerAsked, siteAsked } = setup({ catalog, site: ['Other Song'] });
+    assert.equal(await first('search stranger song nobody known'), 'https://www.music-table.com/post/stranger-song#0');
     assert.deepEqual(zemerAsked, ['stranger song nobody known'], 'Zemer was asked first');
-    assert.deepEqual(siteAsked, [], 'the catalog named the song, so the site was not asked');
-    assert.equal(audioUrl(await say('search other song')), 'https://www.music-table.com/post/other-song#0');
-    assert.deepEqual(siteAsked, ['other song']);
+    assert.equal(await first('search other song'), 'https://www.music-table.com/post/other-song#0');
+    assert.deepEqual(siteAsked, ['stranger song nobody known', 'other song']);
   });
 
   test('Zemer answers any words with its nearest songs, so only those with every word count', async () => {
     // "blue horizon owls zzzz" would bring Blue Horizon by The Night Owls, which misses "zzzz": a different song.
-    const { say, siteAsked } = setup({ site: ['Blue Horizon Owls Zzzz'] });
-    assert.equal(audioUrl(await say('search blue horizon owls zzzz')), 'https://www.music-table.com/post/blue-horizon-owls-zzzz#0');
+    const { first, siteAsked } = setup({ site: ['Blue Horizon Owls Zzzz'] });
+    assert.equal(await first('search blue horizon owls zzzz'), 'https://www.music-table.com/post/blue-horizon-owls-zzzz#0');
     assert.deepEqual(siteAsked, ['blue horizon owls zzzz']);
   });
 
   test('a typo within the allowance, or an apostrophe left out, still finds the song on Zemer', async () => {
-    const { say } = setup();
-    assert.equal(audioUrl(await say('search shabos medley')), 'https://music.youtube.com/watch?v=ffffffffff1');
-    assert.equal(audioUrl(await say('search mira vnusni')), 'https://music.youtube.com/watch?v=gggggggggg1');
+    const { first } = setup();
+    assert.equal(await first('search shabos medley'), 'https://music.youtube.com/watch?v=ffffffffff1');
+    assert.equal(await first('search mira vnusni'), 'https://music.youtube.com/watch?v=gggggggggg1');
   });
 
   test('when Zemer cannot be asked, the catalog and music-table.com answer, without a word about it', async () => {
     const catalog = new Catalog(':memory:');
     catalog.add({ title: 'Blue Horizon', artist: OWLS, url: 'https://www.music-table.com/post/blue-horizon#0' });
-    const { say } = setup({ catalog, zemerDown: true });
-    assert.equal(audioUrl(await say('search blue horizon night owls')), 'https://www.music-table.com/post/blue-horizon#0');
+    const { first } = setup({ catalog, zemerDown: true });
+    assert.equal(await first('search blue horizon night owls'), 'https://www.music-table.com/post/blue-horizon#0');
   });
 
   test('when nothing is found anywhere it says where it looked, and when nobody could be asked it says why', async () => {
@@ -122,8 +128,8 @@ describe('search looks on Zemer first, then in the catalog and on music-table.co
   test('with music-table.com first in SONG_SOURCES, the catalog is looked in before Zemer', async () => {
     const catalog = new Catalog(':memory:');
     catalog.add({ title: 'Blue Horizon', artist: OWLS, url: 'https://www.music-table.com/post/blue-horizon#0' });
-    const { say, zemerAsked } = setup({ catalog, musicTableFirst: true });
-    assert.equal(audioUrl(await say('search blue horizon night owls')), 'https://www.music-table.com/post/blue-horizon#0');
+    const { first, zemerAsked } = setup({ catalog, musicTableFirst: true });
+    assert.equal(await first('search blue horizon night owls'), 'https://www.music-table.com/post/blue-horizon#0');
     assert.deepEqual(zemerAsked, []);
   });
 

@@ -2,7 +2,7 @@ import './load-env.ts';
 import { checkAudio } from './audio-check.ts';
 import { fetchAudio } from './audio-fetch.ts';
 import { createBot } from './bot.ts';
-import { Catalog, choicesIn, linksIn, resumeIn } from './catalog.ts';
+import { Catalog, choicesIn, linksIn, resumeIn, viewsIn } from './catalog.ts';
 import { alertFromEnv, allNotify } from './alert.ts';
 import { Health, BridgeWatch, bridgeStatus, macNotify, online } from './health.ts';
 import { bridgeRestarter } from './bridge-restart.ts';
@@ -123,6 +123,8 @@ try {
     browse: library.browse,
     follows: library.follows,
     ...(assistant ? { assistant } : {}),
+    // The chat's menus and where it is in them ("songs more", a 👍 on an older menu), kept across restarts.
+    views: viewsIn(catalog),
     ...sources,
   });
   const bridge = new BridgeWatch({

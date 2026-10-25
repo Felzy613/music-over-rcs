@@ -113,7 +113,7 @@ describe('an assistant\'s word ("jarvis …")', () => {
     await instance.handle({ from: 'me', messageId: '2', text: 'search jarvis' });
     assert.deepEqual(forwarded, []);
     const [help] = await instance.handle({ from: 'me', messageId: '3', text: 'help' });
-    assert.equal((help as Extract<Reply, { kind: 'text' }>).text, `${HELP_TEXT}\n"jarvis" and a message to ask Jarvis; the answer comes back here.`);
+    assert.equal((help as Extract<Reply, { kind: 'text' }>).text, `${HELP_TEXT}\njarvis <message> — ask Jarvis; the answer comes back here`);
     const without = createBot({ catalog, checkAudio });
     const [plain] = await without.handle({ from: 'me', messageId: '4', text: 'help' });
     assert.equal((plain as Extract<Reply, { kind: 'text' }>).text, HELP_TEXT);

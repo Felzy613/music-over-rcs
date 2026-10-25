@@ -25,6 +25,7 @@ import {
   type SiteEvent,
 } from '../src/sources/music-table.ts';
 import type { Reply } from '../src/types.ts';
+import { splitPostback } from '../src/views.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
 import { startMockMusicTable, type MockMusicTable, type MockPost } from './helpers/mock-music-table.ts';
 
@@ -493,9 +494,14 @@ describe('looking things up on the site from the bot', () => {
     ]);
   });
 
-  test('a request the catalog cannot answer is answered from the site: caption, then the audio address', async () => {
-    const { ask } = setup();
-    assert.deepEqual(await ask('yoely weiss shabbos'), [
+  test('a request the catalog cannot answer is answered from the site: a menu, and its song is a caption, then the audio address', async () => {
+    const { ask, tap } = setup();
+    const menu = await ask('yoely weiss shabbos');
+    assert.deepEqual(
+      menu.map((reply) => (reply.kind === 'text' ? reply.text : reply.kind)),
+      ['Shabbos — Yoely Weiss', 'Tap 👍 on a song to get it.'],
+    );
+    assert.deepEqual(await tap(textOf(menu[0]).postback!), [
       { kind: 'text', text: '🎵 Yoely Weiss — Shabbos' },
       { kind: 'audio', url: `${site.url}/post/yoely-weiss-shabbos#0`, title: 'Yoely Weiss — Shabbos' },
     ]);
@@ -514,13 +520,16 @@ describe('looking things up on the site from the bot', () => {
     const { ask, tap } = setup();
     const replies = await ask('weiss');
     assert.deepEqual(
-      replies.flatMap((reply) => (reply.kind === 'text' && reply.postback ? [reply.text] : [])),
+      replies.flatMap((reply) => (reply.kind === 'text' && reply.postback?.startsWith('play:') ? [reply.text] : [])),
       ['Shabbos — Yoely Weiss', "Purim '26 & More — Yoely Weiss", 'One — Mendy Weiss', 'Two — Mendy Weiss'],
       'songs by two artists: one list, each with its artist',
     );
     const asked = textOf(replies.at(-1));
-    assert.deepEqual(asked.chips?.map((chip) => chip.postback), ['play:1', 'play:2', 'play:3', 'play:4']);
-    assert.deepEqual(await tap('play:4'), [
+    assert.deepEqual(
+      asked.chips?.map((chip) => splitPostback(chip.postback).action),
+      ['play:1', 'play:2', 'play:3', 'play:4'],
+    );
+    assert.deepEqual(await tap(asked.chips![3]!.postback), [
       { kind: 'text', text: '🎵 Mendy Weiss — Two' },
       { kind: 'audio', url: `${site.url}/post/mendy-weiss-album#1`, title: 'Mendy Weiss — Two' },
     ]);
@@ -541,12 +550,10 @@ describe('looking things up on the site from the bot', () => {
     const mine = await startMockMusicTable(posts);
     try {
       const catalog = new Catalog(':memory:');
-      await setup({ site: mine, catalog }).ask('a song');
+      const menu = await setup({ site: mine, catalog }).ask('a song');
       posts[0]!.gone = true;
       const later = setup({ site: mine, catalog }); // a fresh client, as after a restart
-      assert.deepEqual(await later.ask('a song'), [
-        { kind: 'text', text: 'I can\'t send "Some Band — A Song": that release is gone from music-table.com.' },
-      ]);
+      assert.deepEqual(await later.tap(textOf(menu[0]).postback!), [{ kind: 'text', text: 'I can\'t send "Some Band — A Song": that release is gone from music-table.com.' }]);
     } finally {
       await mine.close();
     }
@@ -822,15 +829,18 @@ describe('music-table.com over Matrix, end to end', () => {
     return createRunner({ chat, bot, chatID: matrix.roomId, fetchAudio: audio.fetchAudio, pollMs: 20, log: () => {} });
   }
 
-  test('a song typed on the phone is found on the site and arrives as the site’s own MP3', async () => {
+  test('a song typed on the phone is found on the site and, 👍’d in its menu, arrives as the site’s own MP3', async () => {
     const runner = makeRunner();
     await runner.prime();
     matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'search yoely weiss shabbos' });
     await runner.tick();
+    assert.deepEqual(matrix.sent.map((event) => event.content.body), ['🎵 Shabbos — Yoely Weiss', '‎Tap 👍 on a song to get it.']);
+    matrix.addReaction(matrix.ghost, matrix.sent[0]!.eventId, '👍');
+    await runner.tick();
 
-    assert.equal(matrix.sent.length, 2);
-    assert.deepEqual(matrix.sent[0]?.content, { msgtype: 'm.text', body: '🎵 Yoely Weiss — Shabbos' });
-    const audio = matrix.sent[1]?.content;
+    assert.equal(matrix.sent.length, 4);
+    assert.deepEqual(matrix.sent[2]?.content, { msgtype: 'm.text', body: '🎵 Yoely Weiss — Shabbos' });
+    const audio = matrix.sent[3]?.content;
     assert.equal(audio?.msgtype, 'm.audio');
     assert.equal(audio?.filename, 'Yoely Weiss — Shabbos.mp3');
     assert.equal(audio?.info.mimetype, 'audio/mpeg');

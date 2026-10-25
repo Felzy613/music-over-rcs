@@ -134,6 +134,15 @@ describe('message simulator', () => {
     streams.push(opened);
     return opened;
   };
+  /** A search, then a 👍 on its menu's first song, waiting for each to be answered. */
+  const pick = async (live: EventStream, text: string) => {
+    await say(text);
+    const searched = await live.waitFor((f) => f.event === 'trace-end');
+    const line = live.frames.map((f) => f.data).find((d) => d?.from === 'bot' && typeof d.text === 'string' && d.text.startsWith('🎵 '));
+    assert.ok(line, `no song for "${text}"`);
+    await react(line.id);
+    return live.waitFor((f) => f.event === 'trace-end' && f.data.id !== searched.data.id);
+  };
   const labels = (frames: Frame[], runId?: number) =>
     frames
       .filter((f) => f.event === 'trace-item' && (runId === undefined || f.data.runId === runId))
@@ -189,7 +198,7 @@ describe('message simulator', () => {
     }
   });
 
-  test('a song name runs through the real bot and site and comes back as audio, with every step on record', async () => {
+  test('a song name runs through the real bot and site and comes back as a menu; a 👍 on its song brings the audio, with every step on record', async () => {
     try {
       const live = await stream();
       await live.waitFor((f) => f.event === 'snapshot');
@@ -202,30 +211,36 @@ describe('message simulator', () => {
       const typing = live.frames.filter((f) => f.event === 'typing').map((f) => f.data);
       assert.deepEqual(typing, [true, false]);
 
-      const messages = live.frames.filter((f) => f.event === 'message').map((f) => f.data);
-      assert.equal(messages[0].from, 'me');
-      assert.equal(messages[0].text, 'search yoely weiss shabbos');
-      assert.equal(messages[1].from, 'bot');
-      assert.match(messages[1].text, /Yoely Weiss .* Shabbos/);
-      assert.equal(messages[2].from, 'bot');
-      assert.match(messages[2].audio.name, /Shabbos\.mp3$/);
-      assert.equal(messages[2].audio.mime, 'audio/mpeg');
-      assert.equal(messages[2].audio.bytes, site.bytes('yoely-weiss-shabbos').length);
-      assert.match(messages[2].audio.linkId, /^[0-9a-f]{8}$/);
+      const menu = live.frames.filter((f) => f.event === 'message').map((f) => f.data);
+      assert.equal(menu[0].from, 'me');
+      assert.equal(menu[0].text, 'search yoely weiss shabbos');
+      assert.equal(menu[1].from, 'bot');
+      assert.equal(menu[1].text, '🎵 Shabbos — Yoely Weiss');
+      assert.ok(!menu.some((message) => message.audio), 'nothing is sent before it is picked');
 
-      const steps = labels(live.frames, ended.data.id);
-      assert.ok(steps.some((s) => s.startsWith('your catalog: ') && s.includes('no match')), steps.join('\n'));
-      assert.ok(steps.some((s) => s.startsWith('site search: ')), steps.join('\n'));
-      assert.ok(steps.some((s) => s.startsWith('read post: ')), steps.join('\n'));
-      assert.ok(steps.some((s) => s.startsWith('check file: audio/mpeg')), steps.join('\n'));
-      assert.ok(steps.some((s) => s.startsWith('file ready: ') && s.includes('not downloaded')), steps.join('\n'));
-      assert.ok(steps.some((s) => s.startsWith('reply sent: ')), steps.join('\n'));
-
+      const searched = labels(live.frames, ended.data.id);
+      assert.ok(searched.some((s) => s.startsWith('your catalog: ') && s.includes('no match')), searched.join('\n'));
+      assert.ok(searched.some((s) => s.startsWith('site search: ')), searched.join('\n'));
+      assert.ok(searched.some((s) => s.startsWith('read post: ')), searched.join('\n'));
+      assert.ok(searched.some((s) => s.startsWith('reply sent: ')), searched.join('\n'));
       assert.equal(ended.data.text, 'search yoely weiss shabbos');
       assert.equal(ended.data.choice, false);
       assert.equal(typeof ended.data.firstReplyMs, 'number');
       assert.ok(ended.data.firstReplyMs <= ended.data.totalMs);
       assert.equal(catalog.count(), 1, 'what the site had is now saved, so the next ask is local');
+
+      await react(menu[1].id);
+      const picked = await live.waitFor((f) => f.event === 'trace-end' && f.data.id !== ended.data.id);
+      assert.equal(picked.data.choice, true);
+      const reply = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data).slice(-2);
+      assert.match(reply[0].text, /Yoely Weiss .* Shabbos/);
+      assert.match(reply[1].audio.name, /Shabbos\.mp3$/);
+      assert.equal(reply[1].audio.mime, 'audio/mpeg');
+      assert.equal(reply[1].audio.bytes, site.bytes('yoely-weiss-shabbos').length);
+      assert.match(reply[1].audio.linkId, /^[0-9a-f]{8}$/);
+      const sent = labels(live.frames, picked.data.id);
+      assert.ok(sent.some((s) => s.startsWith('check file: audio/mpeg')), sent.join('\n'));
+      assert.ok(sent.some((s) => s.startsWith('file ready: ') && s.includes('not downloaded')), sent.join('\n'));
     } finally {
       await finish();
     }
@@ -234,8 +249,7 @@ describe('message simulator', () => {
   test('the site file is only checked, not downloaded, unless asked', async () => {
     try {
       const live = await stream();
-      await say('search benny friedman');
-      await live.waitFor((f) => f.event === 'trace-end');
+      await pick(live, 'search benny friedman');
       assert.deepEqual(site.fileRequests, [], 'the file itself was never requested, only described');
       assert.equal(site.signed, 1, 'a link is signed to check the file, then reused');
     } finally {
@@ -246,8 +260,7 @@ describe('message simulator', () => {
   test('Play asks for a fresh signed link and the file behind it is the real one', async () => {
     try {
       const live = await stream();
-      await say('search yoely weiss shabbos');
-      await live.waitFor((f) => f.event === 'trace-end');
+      await pick(live, 'search yoely weiss shabbos');
       const audio = live.frames.map((f) => f.data).find((d) => d?.audio)?.audio;
       assert.ok(audio);
 
@@ -274,6 +287,9 @@ describe('message simulator', () => {
       const ended = await live.waitFor((f) => f.event === 'trace-end');
       const steps = labels(live.frames, ended.data.id).join('\n');
       assert.match(steps, /lookup: .*left out/);
+      const line = live.frames.map((f) => f.data).find((d) => d?.from === 'bot' && d.text?.startsWith('🎵 Shabbos'));
+      await react(line.id);
+      await live.waitFor((f) => f.event === 'trace-end' && f.data.id !== ended.data.id);
       const reply = live.frames.map((f) => f.data).find((d) => d?.from === 'bot' && d.audio);
       assert.match(reply.audio.name, /Shabbos\.mp3$/);
     } finally {
@@ -287,8 +303,6 @@ describe('message simulator', () => {
       await say('search weiss');
       const first = await live.waitFor((f) => f.event === 'trace-end');
       const said = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').map((f) => f.data);
-      // One artist's songs: their name over the list ("🎤 Yoely Weiss"), then one message per song.
-      assert.ok(said.some((message) => /^🎤 .+/.test(message.text ?? '')), 'the artist heads the list');
       const options = said.filter((message) => /^(?:🎵|💿) /.test(message.text ?? ''));
       assert.ok(options.length >= 2, `one message per option: ${JSON.stringify(said.map((message) => message.text))}`);
       assert.ok(options.every((message) => !/^🎵 \d/.test(message.text ?? '')), 'no numbers');
@@ -323,11 +337,11 @@ describe('message simulator', () => {
       const live = await stream();
       await say('search benny friedman');
       await live.waitFor((f) => f.event === 'trace-end');
+      const said = live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').length;
       await say('search benny friedman');
       const ignored = await live.waitFor((f) => f.event === 'trace-item' && f.data.item.label === 'ignored');
       assert.match(ignored.data.item.detail, /20 seconds/);
-      const answers = live.frames.map((f) => f.data).filter((d) => d?.audio);
-      assert.equal(answers.length, 1, 'only one copy of the song');
+      assert.equal(live.frames.filter((f) => f.event === 'message' && f.data.from === 'bot').length, said, 'only one menu');
     } finally {
       await finish();
     }
@@ -353,9 +367,13 @@ describe('message simulator', () => {
 
       const late = await stream();
       const snapshot = await late.waitFor((f) => f.event === 'snapshot');
-      assert.equal(snapshot.data.messages.length, 3, 'my message, the title, the audio');
+      assert.deepEqual(
+        snapshot.data.messages.map((message: { text?: string }) => message.text),
+        ['search benny friedman', '🎤 Benny Friedman', '🎵 Live', '‎Tap 👍 on a song to get it.'],
+        'my message, then the menu: the artist the site has, their song, and its last line',
+      );
       assert.equal(snapshot.data.runs.length, 1);
-      assert.ok(snapshot.data.runs[0].items.length >= 5);
+      assert.ok(snapshot.data.runs[0].items.length >= 4);
       assert.equal(snapshot.data.typing, false);
       assert.equal(snapshot.data.catalogTracks, 1);
     } finally {

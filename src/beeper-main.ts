@@ -4,7 +4,7 @@ import { fetchAudio } from './audio-fetch.ts';
 import { BeeperClient, describeBeeperError } from './beeper/client.ts';
 import { youTubeRelayFromEnv } from './cloud/youtube-relay.ts';
 import { createBot } from './bot.ts';
-import { Catalog, choicesIn, linksIn } from './catalog.ts';
+import { Catalog, choicesIn, linksIn, viewsIn } from './catalog.ts';
 import { Health } from './health.ts';
 import { loadBeeperConfig } from './config.ts';
 import { setUpLibrary } from './library/setup.ts';
@@ -85,6 +85,8 @@ try {
     onPlay: library.onPlay,
     browse: library.browse,
     follows: library.follows,
+    // The chat's menus and where it is in them, kept across restarts.
+    views: viewsIn(catalog),
     ...sources,
   });
   const runner = createRunner({

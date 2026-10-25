@@ -8,6 +8,7 @@ import { createYouTubeAlbumSource, createYouTubeMusicSource, gatedAudioCheck, Yo
 import { createZemerFinder, tidyVideoTitle, ZemerError, ZemerSearch, zemerSearchFromEnv } from '../src/sources/zemer.ts';
 import { ZemerWhitelist } from '../src/sources/zemer-whitelist.ts';
 import type { Reply } from '../src/types.ts';
+import { splitPostback } from '../src/views.ts';
 import { startMockZemerContent, type MockArtist, type MockZemerContent } from './helpers/mock-zemer-content.ts';
 import { startMockZemerSearch, type MockZemerRelease, type MockZemerSearch, type MockZemerSong } from './helpers/mock-zemer-search.ts';
 import { artistId, startMockYouTubeMusic, type MockYouTubeMusic } from './helpers/mock-youtube-music.ts';
@@ -103,6 +104,17 @@ const textOf = (reply: Reply | undefined): TextReply => {
   assert.ok(reply && reply.kind === 'text', `expected a text reply, got ${JSON.stringify(reply)}`);
   return reply;
 };
+/** A menu's song lines. */
+const songLines = (replies: Reply[]): string[] => replies.flatMap((reply) => (reply.kind === 'text' && reply.postback?.startsWith('play:') ? [reply.text] : []));
+/** The postback of the line that starts with `text`. */
+const lineOf = (replies: Reply[], text: string): string => {
+  const line = replies.find((reply) => reply.kind === 'text' && reply.text.startsWith(text) && reply.postback);
+  assert.ok(line?.kind === 'text', `no line "${text}" in ${JSON.stringify(texts(replies))}`);
+  return line.postback!;
+};
+/** A 💿 line as the chat shows it, its number after the mark. */
+const numbered = (replies: Reply[]): string[] =>
+  replies.flatMap((reply) => (reply.kind === 'text' && reply.text ? [reply.number !== undefined && reply.text.startsWith('💿 ') ? `💿 ${reply.number}. ${reply.text.slice(3)}` : reply.number !== undefined ? `${reply.number}. ${reply.text}` : reply.text] : []));
 
 describe('Zemer', () => {
   let search: MockZemerSearch;
@@ -131,7 +143,7 @@ describe('Zemer', () => {
     test('every request says to leave out female singers; what it finds comes sorted into kinds, without the marks Hebrew titles carry', async () => {
       const found = await client().search('vnusni lipa');
       const asked = new URL(search.url + search.requests[0]!).searchParams;
-      assert.deepEqual([asked.get('q'), asked.get('allowFemale'), asked.get('blockVideos'), asked.get('kidZone'), asked.get('k')], ['vnusni lipa', '0', '0', '0', '20']);
+      assert.deepEqual([asked.get('q'), asked.get('allowFemale'), asked.get('blockVideos'), asked.get('kidZone'), asked.get('k')], ['vnusni lipa', '0', '0', '0', '50']);
       assert.ok(found.songs.some((song) => song.title === 'ונתנו'), 'the invisible mark is gone');
       assert.ok(found.videos.some((song) => song.videoId === 'lipaleiby00'));
       assert.deepEqual(found.artists.map((artist) => artist.name), [LIPA]);
@@ -226,57 +238,58 @@ describe('Zemer', () => {
       };
     }
 
-    test('an artist’s name opens their page: most played songs, newest albums (one edition each), and "more" for the rest', async () => {
-      const { say, siteAsked } = setup();
+    test('an artist’s name is a menu; a 👍 on them opens their page: newest albums (one edition each), most played songs, and "… more"', async () => {
+      const { say, tap, siteAsked } = setup();
       for (const words of ['search lipa', 'search lipa shmeltzer']) {
-        const page = await say(words);
-        assert.deepEqual(texts(page), [
-          `🎤 ${LIPA}\n8 albums · 1 single · 8 songs`,
-          'Mizrach',
-          'Hang Up The Phone',
-          "Abaye Ve'rava - אביי ורבא",
-          'Believe In A Miracle',
-          'Shualim - שועלים',
-          '💿 אלעזר ליפא׳לע · 2025 · 2 songs',
-          '💿 Leap Of Faith · 2012 · single',
-          '💿 A Poshiter Yid · 2008 · 4 songs',
-          '💿 Hallel · 2006 · single',
-          '💿 Lipa Baderech · 2003 · single',
-          `Text an album's number to choose from its songs, or "more" for more of ${LIPA}.`,
-        ], words);
-        assert.equal(picks(page)[5]![1], 'album:MPREb_eluzor', 'the original edition, not the Yinglish or the Hebrew one');
-        // The albums are numbered: texting a number lists that album's songs.
-        assert.deepEqual(numbersOf(page), [[1, '💿 אלעזר ליפא׳לע · 2025 · 2 songs'], [2, '💿 Leap Of Faith · 2012 · single'], [3, '💿 A Poshiter Yid · 2008 · 4 songs'], [4, '💿 Hallel · 2006 · single'], [5, '💿 Lipa Baderech · 2003 · single']]);
-        assert.deepEqual(textOf(page.at(-1)).numbers?.[2], { number: 3, postback: 'tracks:MPREb_poshiteryid' });
+        const menu = await say(words);
+        assert.equal(texts(menu)[0], `🎤 ${LIPA}`, words);
+        assert.ok(!menu.some((reply) => reply.kind === 'audio'), 'nothing is opened or sent on its own');
       }
-      const more = await say('more');
-      // The song "A Poshiter Yid" is on the album of that name (number 3), so it is there, not listed as if it were a single.
-      assert.deepEqual(texts(more), [`🎤 ${LIPA}, continued`, 'Kevodo', 'ונתנו', '💿 Shema · 2000 · single', "Text an album's number to choose from its songs."]);
-      assert.deepEqual(numbersOf(more), [[6, '💿 Shema · 2000 · single']], 'the numbers go on from the page before');
-      assert.equal(textOf(more.at(-1)).numbers?.length, 6, "the first page's albums still answer their numbers");
-      assert.deepEqual(texts(await say('more')), [`That's all of ${LIPA}.`]);
-      assert.match(texts(await say('more'))[0]!, /^Text "search" and an artist first/);
+      const page = await tap(lineOf(await say('search lipa'), '🎤'));
+      assert.deepEqual(numbered(page), [
+        `🎤 ${LIPA} · 6 albums · 8 songs`,
+        '💿 1. אלעזר ליפא׳לע · 2025 · 2 songs',
+        '💿 2. Leap Of Faith · 2012 · single',
+        '💿 3. A Poshiter Yid · 2008 · 4 songs',
+        '💿 4. Hallel · 2006 · single',
+        '💿 5. Lipa Baderech · 2003 · single',
+        'Mizrach',
+        'Hang Up The Phone',
+        "Abaye Ve'rava - אביי ורבא",
+        'Believe In A Miracle',
+        'Shualim - שועלים',
+        'Text "albums more" or "songs more" for 8 more, or an album\'s number for its songs.',
+      ]);
+      assert.equal(splitPostback(lineOf(page, '💿 אלעזר')).action, 'album:MPREb_eluzor', 'the original edition, not the Yinglish or the Hebrew one');
+      assert.deepEqual(splitPostback(textOf(page.at(-1)).numbers![2]!.postback).action, 'album:MPREb_poshiteryid', 'an album’s number opens it');
+      assert.deepEqual(texts(await say('more')), ['Text "albums more" or "songs more".']);
+      // A song is listed even when its album is (the owner asked, 2026-10-20): "A Poshiter Yid" is album 3 and a song too.
+      const songs = await say('songs more');
+      assert.deepEqual(texts(songs), ['Kevodo', 'A Poshiter Yid', 'ונתנו', 'Text "albums more" for 8 more albums, or an album\'s number for its songs.']);
+      assert.deepEqual(numbered(await say('albums more')), ['💿 6. Shema · 2000 · single', "Text an album's number for its songs."], 'the numbers go on from the page before');
+      assert.deepEqual(texts(await say('songs more')), [`That's all the songs for "${LIPA}".`]);
       assert.deepEqual(siteAsked, [], 'music-table.com was not asked');
     });
 
-    test('words that name one song send it at once, with its album’s cover, and the album under it when they name that too', async () => {
+    test('words that name one song put it in a menu with its album; a 👍 sends it with its album’s cover', async () => {
       const { say, tap, youTube } = setup();
-      const replies = await say('search a poshiter yid');
+      const menu = await say('search a poshiter yid');
+      assert.deepEqual(numbered(menu), [`💿 1. A Poshiter Yid — ${LIPA} · 2008 · 4 songs`, `A Poshiter Yid — ${LIPA}`, "Text an album's number for its songs."]);
+      assert.ok(!menu.some((reply) => reply.kind === 'audio'));
+      const replies = await tap(lineOf(menu, 'A Poshiter Yid —'));
       assert.deepEqual(replies.slice(0, 2), [
         { kind: 'image', url: cover('MPREb_poshiteryid'), caption: { title: 'A Poshiter Yid', artist: LIPA } },
         { kind: 'audio', url: youTube.trackUrl('lipaposhite'), title: `${LIPA} — A Poshiter Yid` },
       ]);
-      assert.deepEqual(picks(replies), [['💿 A Poshiter Yid · 2008 · 4 songs', 'album:MPREb_poshiteryid']]);
       const kevodo = await say('search kevodo lipa');
-      assert.equal(kevodo.find((reply) => reply.kind === 'audio')?.url, youTube.trackUrl('lipakevodo0'));
-      assert.equal(picks(kevodo).length, 0, 'no album note when the words name no album');
-      // Played again from the list later, it is the same song from the catalog.
-      assert.ok(await tap(`play:${replies.length}`));
+      assert.deepEqual(songLines(kevodo), [`Kevodo — ${LIPA}`], 'the words name no artist, so the line says whose it is');
     });
 
     test('a Latin spelling finds a Hebrew title, and a song with no picture gets its album’s from the album’s page', async () => {
-      const { say, youTube } = setup();
-      const replies = await say('search vnusni');
+      const { say, tap, youTube } = setup();
+      const menu = await say('search vnusni');
+      assert.deepEqual(songLines(menu), [`ונתנו — ${LIPA}`]);
+      const replies = await tap(lineOf(menu, 'ונתנו'));
       assert.deepEqual(replies, [
         { kind: 'image', url: cover('vnusni'), caption: { title: 'ונתנו', artist: LIPA } },
         { kind: 'audio', url: youTube.trackUrl('lipavnusni0'), title: `${LIPA} — ונתנו` },
@@ -284,28 +297,22 @@ describe('Zemer', () => {
       assert.ok(search.requests.some((request) => request.startsWith('/album?id=MPREb_vnusnisingle')));
     });
 
-    test('"elazar lipa\'le" finds the album with that Hebrew name: the one it names first, then its other editions', async () => {
+    test('"elazar lipa\'le" finds the album with that Hebrew name, its editions as one line', async () => {
       const { say } = setup();
       const replies = await say("search elazar lipa'le");
-      assert.deepEqual(texts(replies), [
-        `🎤 ${LIPA}`,
-        '💿 אלעזר ליפא׳לע · 2025 · 2 songs',
-        '💿 אלעזר ליפא׳לע (Yinglish Version) · 2025 · single',
-        '💿 אלעזר ליפא׳לע - גרסה עברית · 2025 · single',
-        "Text an album's number to choose from its songs.",
-      ]);
+      assert.deepEqual(numbered(replies), [`💿 1. אלעזר ליפא׳לע — ${LIPA} · 2025 · 2 songs`, "Text an album's number for its songs."]);
       assert.ok(!texts(replies).some((text) => text.includes('מי שברך')), "a song that has only Elazar's name in it is not what was asked for");
     });
 
-    test('songs by several artists are one list, "Title — Artist", then their albums; nothing by a woman or an artist off Zemer’s list', async () => {
+    test('songs by several artists are one list, "Title — Artist", after their albums; nothing by a woman or an artist off Zemer’s list', async () => {
       const { say } = setup();
       const replies = await say('search shabbos');
-      assert.deepEqual(texts(replies), [
+      assert.deepEqual(numbered(replies), [
+        '💿 1. Shabbos Classics — Shua Rose · 2024 · single',
         'Shabbos — Shua Rose',
         'Shabbos — Yoely Weiss',
         'שבת — Yoely Weiss',
-        '💿 Shabbos Classics — Shua Rose · 2024 · single',
-        "Text an album's number to choose from its songs.",
+        "Text an album's number for its songs.",
       ]);
       assert.equal(textOf(replies.at(-1)).chips?.length, 4);
     });
@@ -314,15 +321,16 @@ describe('Zemer', () => {
       const { say, siteAsked } = setup();
       const replies = await say('search lipa zzzq');
       assert.deepEqual(siteAsked, ['lipa zzzq']);
-      assert.equal(replies.find((reply) => reply.kind === 'audio')?.url, 'https://www.music-table.com/post/zzzq-song#0');
+      assert.deepEqual(songLines(replies), ['Zzzq Song — Site Artist']);
       assert.equal(textOf((await say('search qqqq wwww'))[0]).text, 'No match for "qqqq wwww" on Zemer or music-table.com. Try the artist and title, or fewer words.');
     });
 
     test('when Zemer’s search can’t be reached, YouTube Music’s own search answers, held to the same list', async () => {
       search.failing = true;
-      const { say, notes, youTube } = setup();
-      const replies = await say('search kevodo lipa');
-      assert.equal(replies.find((reply) => reply.kind === 'audio')?.url, youTube.trackUrl('lipakevodo0'));
+      const { say, tap, notes, youTube } = setup();
+      const menu = await say('search kevodo lipa');
+      assert.deepEqual(songLines(menu), [`Kevodo — ${LIPA}`]);
+      assert.equal((await tap(lineOf(menu, 'Kevodo'))).find((reply) => reply.kind === 'audio')?.url, youTube.trackUrl('lipakevodo0'));
       assert.ok(notes.some((note) => /Zemer's search answered HTTP 500; asking YouTube Music's own search instead/.test(note)), notes.join(' | '));
       youtube.failSearch = true;
       assert.equal(
@@ -342,33 +350,26 @@ describe('Zemer', () => {
       assert.match(textOf((await say('zemer lipa'))[0]).text, /^I couldn't search Zemer right now: YouTube Music is turning this server away/);
     });
 
-    test('"album" and an artist lists every album of theirs, newest first; "album" and a name sends that album', async () => {
+    test('"album" and an artist lists their albums, newest first, one line for an album’s editions; "album" and a name lists that album', async () => {
       const { say } = setup();
       const listed = await say('album lipa');
-      assert.deepEqual(texts(listed), [
-        `🎤 ${LIPA} · 8 albums, newest first`,
-        '💿 אלעזר ליפא׳לע - גרסה עברית · 2025 · single',
-        '💿 אלעזר ליפא׳לע (Yinglish Version) · 2025 · single',
-        '💿 אלעזר ליפא׳לע · 2025 · 2 songs',
-        '💿 Leap Of Faith · 2012 · single',
-        '💿 A Poshiter Yid · 2008 · 4 songs',
-        '💿 Hallel · 2006 · single',
-        '💿 Lipa Baderech · 2003 · single',
-        '💿 Shema · 2000 · single',
-        "Text an album's number to choose from its songs.",
+      assert.deepEqual(numbered(listed), [
+        '💿 1. אלעזר ליפא׳לע · 2025 · 2 songs',
+        '💿 2. Leap Of Faith · 2012 · single',
+        '💿 3. A Poshiter Yid · 2008 · 4 songs',
+        '💿 4. Hallel · 2006 · single',
+        '💿 5. Lipa Baderech · 2003 · single',
+        'Text "albums more" for 8 more albums, or an album\'s number for its songs.',
       ]);
-      assert.deepEqual(
-        numbersOf(listed).map(([n]) => n),
-        [1, 2, 3, 4, 5, 6, 7, 8],
-      );
-      const sent = await say('album a poshiter yid');
-      const album = sent.find((reply) => reply.kind === 'album');
-      assert.equal(album?.kind === 'album' && album.title, 'A Poshiter Yid');
+      assert.deepEqual(numbered(await say('albums more')), ['💿 6. Shema · 2000 · single', "Text an album's number for its songs."]);
+      const one = await say('album a poshiter yid');
+      assert.deepEqual(numbered(one), [`💿 1. A Poshiter Yid — ${LIPA} · 2008 · 4 songs`, "Text an album's number for its songs."]);
+      assert.ok(!one.some((reply) => reply.kind === 'album'), 'nothing is sent on its own');
     });
 
-    test('opening an album checks every song against Zemer’s list: a woman’s song is left out, a guest on the list stays', async () => {
+    test('an album’s zip checks every song against Zemer’s list: a woman’s song is left out, a guest on the list stays', async () => {
       const { tap, catalog, youTube } = setup();
-      const replies = await tap('album:MPREb_poshiteryid');
+      const replies = await tap('zip:MPREb_poshiteryid');
       assert.deepEqual(replies[0], { kind: 'image', url: cover('MPREb_poshiteryid'), caption: { title: 'A Poshiter Yid', artist: LIPA } });
       assert.equal(textOf(replies[1]).text, '3 songs, coming as a zip (1 left out).');
       const album = replies[2];
@@ -379,30 +380,38 @@ describe('Zemer', () => {
         [3, 'With A Guest'],
       ]);
       assert.deepEqual(catalog.artistIdsOf(youTube.trackUrl('lipaguest00')), [id(YOELY)], 'the guest is checked as themself');
-      assert.equal(textOf((await tap('album:MPREb_rina'))[0]).text, "I can't send that album: it has a female singer, which I don't send.");
+      assert.equal(textOf((await tap('zip:MPREb_rina'))[0]).text, "I can't send that album: it has a female singer, which I don't send.");
     });
 
-    test('an album\'s number lists its songs, numbered as on the album: a 👍 on the album gets its zip, on a song (or its number) that song', async () => {
+    test("an album opens into its songs, numbered as on the album, and its zip: a 👍 on a song (or its number) gets that song, on 📦 all of it", async () => {
       const { tap, catalog, youTube } = setup();
-      const replies = await tap('tracks:MPREb_poshiteryid');
-      assert.deepEqual(picks(replies), [
-        [`💿 A Poshiter Yid — ${LIPA} · 2008 · 4 songs`, 'album:MPREb_poshiteryid'],
-        ['A Poshiter Yid', `play:${catalog.search('a poshiter yid lipa', 1)[0]!.id}`],
-        ['Amen', `play:${catalog.search('amen', 1)[0]!.id}`],
-        [`With A Guest — ${YOELY}`, `play:${catalog.search('with a guest', 1)[0]!.id}`],
-      ]);
-      assert.deepEqual(numbersOf(replies).map(([n, text]) => [n, text]), [
-        [1, 'A Poshiter Yid'],
-        [2, 'Amen'],
-        [3, `With A Guest — ${YOELY}`],
-      ]);
-      const closing = textOf(replies.at(-1));
-      assert.equal(closing.text, "Tap 👍 on the songs you want, or on the album for all of it as a zip. (1 song left out: not on Zemer's list.)");
-      assert.deepEqual(closing.numbers?.map((entry) => entry.number), [1, 2, 3]);
-      assert.equal(closing.chips?.length, 3, '"all" sends the three songs');
-      // Nothing was checked or downloaded: a song is when it is picked.
-      const amen = await tap(closing.numbers![1]!.postback);
-      assert.equal(amen.find((reply) => reply.kind === 'audio')?.url, youTube.trackUrl('lipaamen000'));
+      for (const opened of ['tracks:MPREb_poshiteryid', 'album:MPREb_poshiteryid']) {
+        const replies = await tap(opened);
+        assert.deepEqual(
+          replies.flatMap((reply) => (reply.kind === 'text' && reply.text ? [[reply.text, splitPostback(reply.postback ?? '').action.replace(/^view:\d+$/, 'view')]] : [])),
+          [
+            [`💿 A Poshiter Yid — ${LIPA} · 2008 · 4 songs`, 'view'],
+            ['A Poshiter Yid', `play:${catalog.search('a poshiter yid lipa', 1)[0]!.id}`],
+            ['Amen', `play:${catalog.search('amen', 1)[0]!.id}`],
+            [`With A Guest — ${YOELY}`, `play:${catalog.search('with a guest', 1)[0]!.id}`],
+            ['📦 All 3 songs as one zip', 'zip:MPREb_poshiteryid'],
+            ['Tap 👍 on the songs you want, or text their numbers; 👍 📦 or text "zip" for all of it. (1 song left out: not on Zemer\'s list.)', 'view'],
+          ],
+          opened,
+        );
+        assert.deepEqual(numbersOf(replies).map(([n, text]) => [n, text]), [
+          [1, 'A Poshiter Yid'],
+          [2, 'Amen'],
+          [3, `With A Guest — ${YOELY}`],
+        ]);
+        const closing = textOf(replies.at(-1));
+        assert.deepEqual(closing.numbers?.map((entry) => entry.number), [1, 2, 3]);
+        assert.equal(closing.chips?.length, 3, '"all" sends the three songs');
+        assert.ok(!replies.some((reply) => reply.kind === 'album'), 'opening it sends nothing');
+        // Nothing was checked or downloaded: a song is when it is picked.
+        const amen = await tap(closing.numbers![1]!.postback);
+        assert.equal(amen.find((reply) => reply.kind === 'audio')?.url, youTube.trackUrl('lipaamen000'));
+      }
       assert.equal(textOf((await tap('tracks:MPREb_rina'))[0]).text, "I can't open that album: it has a female singer, which I don't send.");
     });
 
@@ -428,15 +437,16 @@ describe('Zemer', () => {
       await fresh.say('search shabbos');
       const shua = fresh.youTube.trackUrl('shuashabbos');
       assert.deepEqual(fresh.catalog.albumOf(shua), { id: 'MPREb_shuashabbos', title: 'Shabbos Classics', artist: SHUA, number: 1, songs: 1, year: 2024 }, 'a one-song release is a single: song 1 of 1');
+      const menu = await fresh.say('search a poshiter yid');
       const requests = search.requests.length;
-      await fresh.say('search a poshiter yid');
-      assert.ok(search.requests.slice(requests).some((request) => request.startsWith('/album?id=MPREb_poshiteryid')), 'its album’s page was asked for');
+      await fresh.tap(lineOf(menu, 'A Poshiter Yid —'));
+      assert.ok(search.requests.slice(requests).some((request) => request.startsWith('/album?id=MPREb_poshiteryid')) || fresh.catalog.albumOf(fresh.youTube.trackUrl('lipaposhite'))?.number === 1, 'its album’s page was asked for');
       assert.deepEqual(fresh.catalog.albumOf(fresh.youTube.trackUrl('lipaposhite')), { id: 'MPREb_poshiteryid', title: 'A Poshiter Yid', artist: LIPA, number: 1, songs: 4, year: 2008 }, 'filled in when it was sent');
     });
 
     test('"zemer" asks Zemer alone, and says why when it has nothing', async () => {
       const { say, siteAsked } = setup();
-      assert.ok((await say('zemer kevodo lipa')).some((reply) => reply.kind === 'audio'));
+      assert.deepEqual(songLines(await say('zemer kevodo lipa')), [`Kevodo — ${LIPA}`]);
       assert.equal(textOf((await say('zemer lipa zzzq'))[0]).text, 'No match for "lipa zzzq" on Zemer (it only has artists on Zemer\'s list). Try the artist and title, or fewer words.');
       assert.deepEqual(siteAsked, []);
     });
@@ -452,8 +462,9 @@ describe('Zemer', () => {
     });
 
     test('with Zemer’s search off, YouTube Music’s own search is used', async () => {
-      const { say, youTube } = setup({ zemer: false });
-      assert.equal((await say('search kevodo lipa')).find((reply) => reply.kind === 'audio')?.url, youTube.trackUrl('lipakevodo0'));
+      const { say, tap, youTube } = setup({ zemer: false });
+      const menu = await say('search kevodo lipa');
+      assert.equal((await tap(lineOf(menu, 'Kevodo'))).find((reply) => reply.kind === 'audio')?.url, youTube.trackUrl('lipakevodo0'));
       assert.deepEqual(search.requests, []);
     });
   });

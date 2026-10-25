@@ -36,10 +36,12 @@ export interface NumberedChoice {
  * under the cover where pictures can be drawn and sent as text otherwise. A collage is several covers in one picture,
  * each with its song's name, and its number where the list is numbered. Where a 👍 picks, a few lines of a list carry
  * a `number` (the albums in a list, the songs of an album), shown before the line, and the text that closes the list
- * says what each number picks (`numbers`): texting one picks it. Elsewhere every line is numbered from the chips instead.
+ * says what each number picks (`numbers`): texting one picks it. Elsewhere every line is numbered from the chips instead,
+ * and the closing text is `numbered` when it says something else there ("reply with a number to pick one"). A reply with
+ * chips and no words only changes what a number or "all" picks (a 👍 that went back to an earlier menu).
  */
 export type Reply =
-  | { kind: 'text'; text: string; chips?: Chip[]; chipsValidMs?: number; postback?: string; number?: number; numbers?: NumberedChoice[] }
+  | { kind: 'text'; text: string; chips?: Chip[]; chipsValidMs?: number; postback?: string; number?: number; numbers?: NumberedChoice[]; numbered?: string }
   | { kind: 'album'; title: string; artist: string; songs: AlbumSong[] }
   | { kind: 'image'; url: string; caption?: { title: string; artist: string }; postback?: string }
   | { kind: 'collage'; images: Array<{ url: string; label: string; postback: string; number?: number }> }

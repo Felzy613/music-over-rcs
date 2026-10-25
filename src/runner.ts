@@ -15,8 +15,8 @@ import type { AlbumSong, Chip, Incoming, NumberedChoice, Reply } from './types.t
  * messages, so this marker is how it tells them apart and never answers itself.
  */
 export const BOT_MARK = '🎵';
-/** Or with one of these, which say what the message is: an album to pick (💿), an artist's name over a list (🎤). */
-export const KIND_MARKS = ['💿', '🎤'] as const;
+/** Or with one of these, which say what the message is: an album to pick (💿), an artist (🎤), an album's zip (📦). */
+export const KIND_MARKS = ['💿', '🎤', '📦'] as const;
 /** What an add-on passes on from elsewhere (see extensions.ts) starts with this instead; the bot never answers those either. */
 export const RELAY_MARK = '🤖';
 /** An invisible left-to-right mark (U+200E). */
@@ -291,7 +291,10 @@ export function createRunner(options: RunnerOptions): Runner {
   let unsaved = false;
   /** When each answer of the last minute was sent. */
   const answerTimes: number[] = [];
-  /** The list of options last offered. A pick keeps it, so another number from the same list works; a new search ends it. */
+  /**
+   * The list of options last offered. A pick keeps it (and its time runs from then), so another number from the same list
+   * works; only an answer with a list of its own replaces it, so a question in between leaves the list on screen pickable.
+   */
   let pending: PendingChoices | undefined;
   /** This run's messages that stand for a song, for when no store is given. */
   const localLinks = new Map<string, string>();
@@ -717,9 +720,6 @@ export function createRunner(options: RunnerOptions): Runner {
       } else if (reply.kind === 'album') {
         await sendAlbum(reply, timeline);
       } else {
-        if (reply.chips) {
-          setChoices({ chips: reply.chips, ...(reply.numbers ? { numbers: reply.numbers } : {}), at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
-        }
         // Options need a word on how to pick one, unless the text already gives it.
         const hint = !chat.reactions && reply.chips && !/\breply with a number\b/i.test(reply.text);
         // Where a 👍 picks, a numbered line (an album, a song of an album) shows its number: texting it picks that line.
@@ -787,6 +787,9 @@ export function createRunner(options: RunnerOptions): Runner {
    * can't hold two downloads' worth of memory.
    */
   async function send(replies: Reply[], done: () => Promise<void>, timeline?: Timeline): Promise<void> {
+    // What a number picks is the answer's list from now, not once the songs before it have gone out: a number texted while
+    // an album is on its way picks from the menu it was texted under.
+    offer(replies);
     const run = async (): Promise<void> => {
       try {
         await respond(replies, timeline);
@@ -808,6 +811,15 @@ export function createRunner(options: RunnerOptions): Runner {
         if (!current) checkpoint();
       }
     });
+  }
+
+  /** An answer's list (the last one in it, where there are several) is the one a number or "all" picks from now on. */
+  function offer(replies: Reply[]): void {
+    for (const reply of chat.reactions ? replies : joinLists(replies)) {
+      if (reply.kind === 'text' && reply.chips) {
+        setChoices({ chips: reply.chips, ...(reply.numbers && chat.reactions ? { numbers: reply.numbers } : {}), at: now(), validMs: reply.chipsValidMs ?? CHOICE_TTL_MS });
+      }
+    }
   }
 
   /** Waits until every answer handed over for delivery has been sent. */
@@ -834,9 +846,9 @@ export function createRunner(options: RunnerOptions): Runner {
     const choice = !isNumber ? undefined : chat.reactions ? numbered.find((entry) => entry.number === Number(text)) : listed[Number(text) - 1];
     // "all": every song on the list. Like a number, it keeps the list.
     const all = listed.length > 0 && ALL_WORDS.has(normalize(text).replace(/[^\p{L}\p{N} ]/gu, '')) ? listed : undefined;
-    // A number meant for the list stays within it; anything else moves on from it.
+    // A number meant for the list stays within it. A pick keeps the list, its time running again from now.
     const outOfRange = isNumber && listed.length > 0 && !choice;
-    if (!(isNumber || all) || listed.length === 0) setChoices(undefined);
+    if ((choice || all) && offered) setChoices({ ...offered, at: now() });
     log(`<- ${choice ? `choice ${text}` : JSON.stringify(text)}`);
     const timeline = new Timeline(text, { phoneAt: Date.parse(message.timestamp), now });
     live.add(timeline);
@@ -1060,6 +1072,7 @@ export function createRunner(options: RunnerOptions): Runner {
     announce(replies) {
       return exclusive(async () => {
         log(`-> announcement (${replies.length} message${replies.length === 1 ? '' : 's'})`);
+        offer(replies);
         await respond(replies);
       });
     },

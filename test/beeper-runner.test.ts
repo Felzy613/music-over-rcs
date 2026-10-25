@@ -68,15 +68,18 @@ describe('runner over Beeper', () => {
     assert.deepEqual(beeper.sent, []);
   });
 
-  test('answers a request with a caption and the audio file as an attachment', async () => {
+  test('answers a request with a numbered menu, and its number with a caption and the audio file as an attachment', async () => {
     const { runner } = makeRunner();
     await runner.prime();
     beeper.addUserMessage('search paper planes');
     await runner.tick();
+    assert.deepEqual([...beeper.sent], [{ text: '🎵 1. Paper Planes at Dawn — Mira Vale\n\nReply with a number to pick one.' }]);
+    beeper.addUserMessage('1');
+    await runner.tick();
 
-    assert.equal(beeper.sent.length, 2);
-    assert.equal(beeper.sent[0]?.text, '🎵 Mira Vale — Paper Planes at Dawn');
-    const attachment = beeper.sent[1]?.attachment;
+    assert.equal(beeper.sent.length, 3);
+    assert.equal(beeper.sent[1]?.text, '🎵 Mira Vale — Paper Planes at Dawn');
+    const attachment = beeper.sent[2]?.attachment;
     assert.equal(attachment?.type, 'audio');
     assert.equal(attachment?.fileName, 'Mira Vale — Paper Planes at Dawn.mp3');
     assert.equal(attachment?.mimeType, 'audio/mpeg');
@@ -102,10 +105,7 @@ describe('runner over Beeper', () => {
     await runner.tick();
 
     assert.equal(beeper.sent.length, 1);
-    assert.equal(
-      beeper.sent[0]?.text,
-      '🎤 The Night Owls\n1. Blue Horizon\n2. Blue Horizon (Live)\n\nReply with a number to choose.',
-    );
+    assert.equal(beeper.sent[0]?.text, '🎵 1. Blue Horizon — The Night Owls\n2. Blue Horizon (Live) — The Night Owls\n\nReply with a number to pick one.');
 
     beeper.addUserMessage('2');
     await runner.tick();
@@ -135,9 +135,9 @@ describe('runner over Beeper', () => {
     await runner.prime();
     beeper.addUserMessage('search broken link');
     await runner.tick();
-    assert.deepEqual(beeper.sent, [
-      { text: `🎵 I can't send "Nobody — Broken Link": it isn't an audio file (the server says "text/html").` },
-    ]);
+    beeper.addUserMessage('1');
+    await runner.tick();
+    assert.deepEqual(beeper.sent.slice(1), [{ text: `🎵 I can't send "Nobody — Broken Link": it isn't an audio file (the server says "text/html").` }]);
     assert.equal(beeper.uploads.length, 0);
   });
 
@@ -146,10 +146,9 @@ describe('runner over Beeper', () => {
     await runner.prime();
     beeper.addUserMessage('search flaky file');
     await runner.tick();
-    assert.deepEqual(beeper.sent, [
-      { text: '🎵 Nobody — Flaky File' },
-      { text: '🎵 I couldn\'t send "Nobody — Flaky File": the file server answered HTTP 500.' },
-    ]);
+    beeper.addUserMessage('1');
+    await runner.tick();
+    assert.deepEqual(beeper.sent.slice(1), [{ text: '🎵 Nobody — Flaky File' }, { text: '🎵 I couldn\'t send "Nobody — Flaky File": the file server answered HTTP 500.' }]);
     assert.equal(beeper.uploads.length, 0);
     assert.ok(logs.some((line) => line.includes('could not get Nobody — Flaky File ready')));
   });
@@ -161,18 +160,18 @@ describe('runner over Beeper', () => {
 
     beeper.addUserMessage('search paper planes');
     await runner.tick();
-    assert.equal(beeper.sent.length, 2);
+    assert.equal(beeper.sent.length, 1);
 
     // A different request: an identical one this soon would be taken for an echo of the first and ignored.
     beeper.addUserMessage('search paper planes at dawn');
     await runner.tick();
-    assert.equal(beeper.sent.length, 2, 'the second answer is dropped');
+    assert.equal(beeper.sent.length, 1, 'the second answer is dropped');
     assert.ok(logs.some((line) => line.includes('answer limit')));
 
     clock += 61_000;
     beeper.addUserMessage('search blue horizon live');
     await runner.tick();
-    assert.equal(beeper.sent.length, 4);
+    assert.equal(beeper.sent.length, 2);
   });
 
   test('survives a failed poll and answers what arrived meanwhile', async () => {
@@ -186,14 +185,14 @@ describe('runner over Beeper', () => {
 
     beeper.failListing = false;
     await runner.tick();
-    assert.equal(beeper.sent.length, 2);
+    assert.equal(beeper.sent.length, 1);
   });
 
   test('polls on its own after start() and stops cleanly', async () => {
     const { runner } = makeRunner();
     await runner.start();
     beeper.addUserMessage('search paper planes');
-    await waitFor(() => beeper.sent.length >= 2);
+    await waitFor(() => beeper.sent.length >= 1);
 
     await runner.stop();
     const requestsAtStop = beeper.requests.length;

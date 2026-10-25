@@ -389,6 +389,13 @@ describe('looking things up on YouTube Music from the bot', () => {
       audio,
       ask: (text: string) => bot.handle({ from: 'u', messageId: 'm1', text: `search ${text}` }),
       tap: (postback: string) => bot.handle({ from: 'u', messageId: 'm2', postback }),
+      /** A search, then a 👍 on its menu's first song. */
+      pick: async (text: string) => {
+        const menu = await bot.handle({ from: 'u', messageId: 'm1', text: `search ${text}` });
+        const line = menu.find((reply) => reply.kind === 'text' && reply.postback?.startsWith('play:'));
+        assert.ok(line?.kind === 'text', `no song for "${text}": ${JSON.stringify(menu)}`);
+        return bot.handle({ from: 'u', messageId: 'm2', postback: line.postback! });
+      },
     };
   }
 
@@ -411,46 +418,46 @@ describe('looking things up on YouTube Music from the bot', () => {
     assert.deepEqual(youtube.searches.map((search) => search.query), ['blue horizon the night owls']);
   });
 
-  test('a request the catalog cannot answer is answered from YouTube Music: caption, then the song’s address', async () => {
-    const { ask } = setup();
-    const replies = await ask('blue horizon night owls');
-    assert.deepEqual(replies, [
+  test('a request the catalog cannot answer is answered from YouTube Music: a menu, and its song is a caption, then the song’s address', async () => {
+    const { pick } = setup();
+    assert.deepEqual(await pick('blue horizon night owls'), [
       { kind: 'image', url: 'https://yt3.googleusercontent.com/aaaaaaaaaa1=w544-h544-l90-rj', caption: { title: 'Blue Horizon', artist: 'The Night Owls' } },
       { kind: 'audio', url: `${youtube.url}/watch?v=aaaaaaaaaa1`, title: 'The Night Owls — Blue Horizon' },
     ]);
   });
 
-  test('the same request again is answered from the catalog without asking YouTube Music', async () => {
-    const { ask } = setup();
-    await ask('blue horizon night owls');
+  test('the same request again lists the same song, kept in the catalog once', async () => {
+    const { ask, catalog } = setup();
+    const first = await ask('blue horizon night owls');
+    const count = catalog.count();
     const again = await ask('blue horizon night owls');
-    assert.equal(again.length, 2);
-    assert.equal(youtube.searches.length, 1);
+    assert.deepEqual(
+      again.map((reply) => (reply.kind === 'text' ? reply.text : reply.kind)),
+      first.map((reply) => (reply.kind === 'text' ? reply.text : reply.kind)),
+    );
+    assert.equal(catalog.count(), count);
   });
 
-  test('a request that names exactly one of the songs it finds plays that one at once', async () => {
+  test('a request that names exactly one of the songs it finds puts that one first, and sends nothing on its own', async () => {
     const { ask } = setup();
     const replies = await ask('blue horizon');
-    assert.deepEqual(replies[1], { kind: 'audio', url: `${youtube.url}/watch?v=aaaaaaaaaa1`, title: 'The Night Owls — Blue Horizon' });
+    assert.equal(textOf(replies[0]).text, 'Blue Horizon — The Night Owls');
+    assert.ok(!replies.some((reply) => reply.kind === 'audio'));
   });
 
   test('a vague request lists the songs to choose from, and a 👍 on one plays it', async () => {
     const { ask, tap } = setup();
     const replies = await ask('night owls');
-    assert.equal(textOf(replies[0]).text, '🎤 The Night Owls');
-    const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined);
-    assert.deepEqual(choices.map((reply) => reply.text), ['Blue Horizon', 'Blue Horizon (Live)', 'Hidden Song']);
+    const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback?.startsWith('play:') === true);
+    assert.deepEqual(choices.map((reply) => reply.text), ['Blue Horizon — The Night Owls', 'Blue Horizon (Live) — The Night Owls', 'Hidden Song — The Night Owls']);
     const played = await tap(choices[1]!.postback!);
     assert.deepEqual(played[1], { kind: 'audio', url: `${youtube.url}/watch?v=aaaaaaaaaa2`, title: 'The Night Owls — Blue Horizon (Live)' });
   });
 
   test('a song YouTube Music will not play is refused with its reason', async () => {
-    const { ask } = setup();
-    const replies = await ask('locked song');
-    assert.equal(
-      textOf(replies[0]).text,
-      'I can\'t send "Mira Vale — Locked Song": YouTube Music wouldn\'t give me that song (This video is not available in your country).',
-    );
+    const { pick } = setup();
+    const replies = await pick('locked song');
+    assert.equal(textOf(replies[0]).text, 'I can\'t send "Mira Vale — Locked Song": YouTube Music wouldn\'t give me that song (This video is not available in your country).');
   });
 
   test('when YouTube Music is down the bot says so instead of failing', async () => {
@@ -500,14 +507,15 @@ describe('looking things up on YouTube Music from the bot', () => {
   });
 
   test('a song stored earlier is checked against the list again when it is sent, so a change reaches it', async () => {
-    const { ask, tap, catalog } = setup();
-    assert.equal((await ask('blue horizon night owls'))[1]?.kind, 'audio');
+    const { pick, tap, catalog } = setup();
+    assert.equal((await pick('blue horizon night owls'))[1]?.kind, 'audio');
+    const track = catalog.search('blue horizon', 1)[0]!;
 
     // Later the curators flag the group's singer as female, and then block one song.
     zemer.publish((artists) => {
       artists.find((artist) => artist.name === 'The Night Owls')!.female = true;
     });
-    const again = await ask('blue horizon night owls');
+    const again = await tap(`play:${track.id}`);
     assert.equal(textOf(again[0]).text, 'I can\'t send "The Night Owls — Blue Horizon": it has a female singer, which I don\'t send.');
     assert.equal(again.length, 1);
 
@@ -515,13 +523,12 @@ describe('looking things up on YouTube Music from the bot', () => {
       artists.find((artist) => artist.name === 'The Night Owls')!.female = false;
       blocked.global.push('aaaaaaaaaa1');
     });
-    assert.equal(textOf((await ask('blue horizon night owls'))[0]).text, 'I can\'t send "The Night Owls — Blue Horizon": Zemer\'s list blocks that song.');
+    assert.equal(textOf((await tap(`play:${track.id}`))[0]).text, 'I can\'t send "The Night Owls — Blue Horizon": Zemer\'s list blocks that song.');
 
     zemer.publish((artists, blocked) => {
       blocked.global.length = 0;
       artists.splice(artists.findIndex((artist) => artist.name === 'The Night Owls'), 1);
     });
-    const track = catalog.search('blue horizon', 1)[0]!;
     assert.equal(textOf((await tap(`play:${track.id}`))[0]).text, 'I can\'t send "The Night Owls — Blue Horizon": its artist isn\'t on Zemer\'s artist list.');
   });
 
@@ -544,8 +551,8 @@ describe('looking things up on YouTube Music from the bot', () => {
     catalog.add({ title: 'Blue Horizon Remix', artist: 'The Night Owls', url: 'https://www.music-table.com/post/night-owls-remix#0' });
     const { ask } = setup(catalog);
     const replies = await ask('night owls');
-    const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback !== undefined).map((reply) => reply.text);
-    assert.deepEqual(choices, ['Blue Horizon', 'Blue Horizon (Live)', 'Hidden Song', 'Blue Horizon Remix']);
+    const choices = replies.filter((reply): reply is TextReply => reply.kind === 'text' && reply.postback?.startsWith('play:') === true).map((reply) => reply.text);
+    assert.deepEqual(choices, ['Blue Horizon — The Night Owls', 'Blue Horizon (Live) — The Night Owls', 'Hidden Song — The Night Owls', 'Blue Horizon Remix — The Night Owls']);
   });
 });
 
@@ -949,6 +956,12 @@ describe('YouTube Music over Matrix, end to end', () => {
     await runner.prime();
     matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'search blue horizon night owls' });
     await runner.tick();
+    // The menu, then a 👍 on its song.
+    assert.equal(matrix.sent[0]?.content.body, '🎵 Blue Horizon — The Night Owls');
+    const menu = matrix.sent.length;
+    matrix.addReaction(matrix.ghost, matrix.sent[0]!.eventId, '👍');
+    await runner.tick();
+    matrix.sent.splice(0, menu);
 
     assert.equal(matrix.sent.length, 2);
     assert.deepEqual(matrix.sent[0]?.content, { msgtype: 'm.text', body: '🎵 The Night Owls — Blue Horizon' });
@@ -981,6 +994,10 @@ describe('YouTube Music over Matrix, end to end', () => {
     await runner.prime();
     matrix.addMessage(matrix.ghost, { msgtype: 'm.text', body: 'search blue horizon night owls' });
     await runner.tick();
+    const menu = matrix.sent.length;
+    matrix.addReaction(matrix.ghost, matrix.sent[0]!.eventId, '👍');
+    await runner.tick();
+    matrix.sent.splice(0, menu);
 
     assert.equal(matrix.sent.length, 2);
     assert.equal(matrix.sent[1]?.content.msgtype, 'm.audio');
