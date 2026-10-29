@@ -62,6 +62,12 @@ export function rankArtists<T extends { name: string; aka?: string | undefined }
 /** A title without what only says who else is on it: "Achas (feat. X)" is the song "Achas". */
 export const withoutGuests = (title: string): string => title.replace(/\s*[([](?:feat\.?|ft\.?|featuring|with)\s[^)\]]*[)\]]/gi, '').trim() || title;
 
+/** A song as two sources would both spell it (a single "Achas (feat. X)" is the song "Achas"), so the same song from each is told apart from different ones. */
+export const songKey = (song: { title: string; artist: string }): string => `${tokenize(withoutGuests(song.title)).join(' ')}|${tokenize(song.artist).join(' ')}`;
+
+/** What tells a release apart from the others of its kind, whoever lists it: a single is its song, an album its title. */
+export const releaseKey = (kind: 'single' | 'album', release: { title: string; artist: string }): string => `${kind}|${songKey(release)}`;
+
 /** A title without who else is on it or that it was recorded live, for naming it: "Achas (feat. X)", "Achas (Live)". */
 export const plainTitle = (title: string): string => withoutGuests(title).replace(/\s*[([]live[^)\]]*[)\]]/gi, '').trim() || title;
 

@@ -56,6 +56,48 @@ export type ListedTrack = Track & {
   album?: { title: string; songs: number } | undefined;
 };
 
+/**
+ * A release from Zemer's new releases in a list: a single (one song) or an album, which a 👍 opens through Zemer. It has
+ * no song in the catalog: its songs are stored when it is opened, as for any other album found on Zemer.
+ */
+export interface ListedRelease {
+  /** Zemer's album id, which opens it. */
+  releaseId: string;
+  title: string;
+  artist: string;
+  /** How many songs it has: 1 for a single, 0 when the feed doesn't say. */
+  songs: number;
+  releasedAt: string;
+  cover?: string | undefined;
+}
+
+/** What a list holds: a song or music-table.com album from the catalog, or a release from Zemer. */
+export type ListedEntry = ListedTrack | ListedRelease;
+
+/** A release from Zemer's new-releases feed, as the catalog remembers it. */
+export interface NewRelease {
+  /** Zemer's album id (YouTube Music's browse id for it), which opens it. */
+  id: string;
+  title: string;
+  /** Whose release it is, as the feed names them. */
+  artist: string;
+  /** The artist's channel id, which Zemer's artist list is checked by. */
+  artistId: string;
+  cover?: string | undefined;
+  /** ISO time it went up on YouTube Music. */
+  releasedAt: string;
+  /** How many songs it has: 1 for a single, 0 when the feed doesn't say. */
+  songs: number;
+  /** A single's one song: what the blocked-songs list is checked by. */
+  videoId?: string | undefined;
+  /** ISO time this machine first saw it. */
+  firstSeenAt: string;
+  /** ISO time it went out in a daily message, if it did. */
+  announcedAt?: string | undefined;
+  /** ISO time a "new from an artist you follow" alert went out for it, if one did. */
+  alertedAt?: string | undefined;
+}
+
 /** A post on music-table.com as the catalog remembers it: enough to rank it and announce it. */
 export interface SitePost {
   slug: string;
@@ -134,6 +176,20 @@ const SCHEMA = `
     announced_at  TEXT
   );
   CREATE INDEX IF NOT EXISTS site_posts_by_date ON site_posts (published_at);
+  CREATE TABLE IF NOT EXISTS zemer_releases (
+    id            TEXT PRIMARY KEY,
+    title         TEXT NOT NULL,
+    artist        TEXT NOT NULL,
+    artist_id     TEXT NOT NULL,
+    cover         TEXT,
+    released_at   TEXT NOT NULL,
+    songs         INTEGER NOT NULL DEFAULT 0,
+    video_id      TEXT,
+    first_seen_at TEXT NOT NULL,
+    announced_at  TEXT,
+    alerted_at    TEXT
+  );
+  CREATE INDEX IF NOT EXISTS zemer_releases_by_date ON zemer_releases (released_at);
   CREATE TABLE IF NOT EXISTS audio_cache (
     url        TEXT PRIMARY KEY,
     file       TEXT NOT NULL,
@@ -225,6 +281,20 @@ const toSitePost = (row: Record<string, unknown>): SitePost => ({
   firstSeenAt: String(row.first_seen_at),
   ...(typeof row.announced_at === 'string' ? { announcedAt: row.announced_at } : {}),
   ...(typeof row.category_ids === 'string' && row.category_ids ? { categoryIds: row.category_ids.split(',') } : {}),
+  ...(typeof row.alerted_at === 'string' ? { alertedAt: row.alerted_at } : {}),
+});
+
+const toRelease = (row: Record<string, unknown>): NewRelease => ({
+  id: String(row.id),
+  title: String(row.title),
+  artist: String(row.artist),
+  artistId: String(row.artist_id),
+  ...(typeof row.cover === 'string' && row.cover ? { cover: row.cover } : {}),
+  releasedAt: String(row.released_at),
+  songs: Number(row.songs) || 0,
+  ...(typeof row.video_id === 'string' && row.video_id ? { videoId: row.video_id } : {}),
+  firstSeenAt: String(row.first_seen_at),
+  ...(typeof row.announced_at === 'string' ? { announcedAt: row.announced_at } : {}),
   ...(typeof row.alerted_at === 'string' ? { alertedAt: row.alerted_at } : {}),
 });
 
@@ -720,6 +790,69 @@ export class Catalog {
   markAlerted(slugs: string[], at: Date = new Date()): void {
     const mark = this.#db.prepare('UPDATE site_posts SET alerted_at = ? WHERE slug = ?');
     for (const slug of slugs) mark.run(at.toISOString(), slug);
+  }
+
+  // --- Zemer's new releases: the feed of its latest releases, kept up to date by the sync ---
+
+  /** Records a release, or refreshes what may change in it (title, picture, date, size). Says whether it was new here. */
+  saveRelease(release: Omit<NewRelease, 'firstSeenAt' | 'announcedAt' | 'alertedAt'>, now: Date = new Date()): { isNew: boolean } {
+    const known = this.#db.prepare('SELECT 1 FROM zemer_releases WHERE id = ?').get(release.id) !== undefined;
+    this.#db
+      .prepare(
+        `INSERT INTO zemer_releases (id, title, artist, artist_id, cover, released_at, songs, video_id, first_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           title = excluded.title,
+           artist = excluded.artist,
+           artist_id = excluded.artist_id,
+           cover = coalesce(excluded.cover, cover),
+           released_at = excluded.released_at,
+           songs = excluded.songs,
+           video_id = coalesce(excluded.video_id, video_id)`,
+      )
+      .run(release.id, release.title, release.artist, release.artistId, release.cover ?? null, release.releasedAt, release.songs, release.videoId ?? null, now.toISOString());
+    return { isNew: !known };
+  }
+
+  /** Every release kept, newest first. */
+  releases(): NewRelease[] {
+    return this.#db.prepare('SELECT * FROM zemer_releases ORDER BY released_at DESC, id').all().map(toRelease);
+  }
+
+  /** Forgets the releases that came out before `before` (the feed holds only a couple of weeks). Says how many. */
+  pruneReleases(before: Date): number {
+    return Number(this.#db.prepare('DELETE FROM zemer_releases WHERE released_at < ?').run(before.toISOString()).changes);
+  }
+
+  markReleasesAnnounced(ids: string[], at: Date = new Date()): void {
+    const mark = this.#db.prepare('UPDATE zemer_releases SET announced_at = ? WHERE id = ?');
+    for (const id of ids) mark.run(at.toISOString(), id);
+  }
+
+  markReleasesAlerted(ids: string[], at: Date = new Date()): void {
+    const mark = this.#db.prepare('UPDATE zemer_releases SET alerted_at = ? WHERE id = ?');
+    for (const id of ids) mark.run(at.toISOString(), id);
+  }
+
+  /** Releases that came out and were first seen since `since` and have not been alerted yet, newest first. */
+  unalertedReleases(since: Date): NewRelease[] {
+    return this.#db
+      .prepare('SELECT * FROM zemer_releases WHERE alerted_at IS NULL AND first_seen_at >= ? AND released_at >= ? ORDER BY released_at DESC, id')
+      .all(since.toISOString(), since.toISOString())
+      .map(toRelease);
+  }
+
+  /** The artists you follow, as they are compared (their key), with when each follow began. */
+  followedSince(): Array<{ key: string; name: string; since: string }> {
+    return this.#db
+      .prepare('SELECT a.key, a.name, f.since FROM follows f JOIN artists a ON a.id = f.artist_id WHERE f.following = 1')
+      .all()
+      .map((row) => ({ key: String(row.key), name: String(row.name), since: String(row.since) }));
+  }
+
+  /** Whether you've had a song of this release already (a song is on a release once Zemer has opened it). */
+  releaseHad(id: string): boolean {
+    return this.#db.prepare("SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE json_extract(t.album, '$.id') = ? LIMIT 1").get(id) !== undefined;
   }
 
   artistName(artistId: number): string | undefined {

@@ -22,6 +22,7 @@ import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { songSources } from './sources/songs.ts';
 import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerSearchFromEnv } from './sources/zemer.ts';
+import { newReleasesFromEnv } from './sources/zemer-releases.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat, through the mautrix-gmessages bridge and a Matrix room.
@@ -77,6 +78,9 @@ try {
     else if (whitelist.ageMs > 24 * 60 * 60_000) health.problem('whitelist', `Zemer's artist list hasn't updated for a day (${error}). YouTube Music songs are being checked against the old list.`);
   });
   void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs`));
+  // Zemer's new releases (the feed behind the Zemer app's Latest Releases shelf): in "new", the daily message and the alerts,
+  // held to the same list. ZEMER_RELEASES=off turns them off.
+  const releases = newReleasesFromEnv({ catalog, whitelist, log });
 
   // With ONEDRIVE_CLIENT_ID set, every song sent is also saved to the owner's OneDrive (signed in on the setup page).
   const oneDrive = oneDriveFromEnv(process.env, { state: catalog, log });
@@ -113,6 +117,9 @@ try {
     // With no internet at all, that's the one thing said; the site isn't blamed for it.
     onSite: (ok, problem) =>
       ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.has('internet') ? undefined : health.problem('site', problem ?? "music-table.com isn't answering."),
+    releases,
+    onReleases: (ok, problem) =>
+      ok ? health.ok('releases', "Fixed: Zemer's new releases are being read again.") : health.has('internet') ? undefined : health.problem('releases', problem ?? "Zemer's new releases aren't being read."),
     log,
   });
   // Add-ons kept outside this repository, in extensions/ (see src/extensions.ts). One that fails is left out.

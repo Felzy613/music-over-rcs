@@ -36,6 +36,8 @@
 | `YOUTUBE_MUSIC_URL` | `https://music.youtube.com` | Where the YouTube Music lookups go; only the tests change it. |
 | `YOUTUBE_RELAY` | none (`r2` on the cloud host) | `r2` gets each YouTube song's audio by way of the Cloudflare Worker, through the R2 bucket (needs the `R2_*` settings), because YouTube turns the cloud host's address away. Search stays direct. See [How it runs](cloud.md). |
 | `ZEMER_CONTENT_URL` | `https://content.zemer.io` | Where Zemer's artist list is read from; only the tests change it. |
+| `ZEMER_RELEASES` | on | `off` stops reading Zemer's new-releases feed: `new`, the daily message and the alerts are then music-table.com's alone. See [New releases from Zemer](youtube-music.md#new-releases-from-zemer). |
+| `ZEMER_RELEASES_URL` | `https://flipphoneguy.duckdns.org/?page=zemer_releases` | Where that feed is read from (the Zemer app's own address for it); set it if the app moves, and the tests do. |
 | `SONG_SOURCES` | `youtube-music,music-table` | Which source a search asks first. `youtube-music` (or `zemer`) is Zemer's catalog; first (the default), it is asked before your catalog, and music-table.com (the catalog, then the site) is used when it finds nothing that fits; the first to find anything answers. `music-table,youtube-music` asks the site first; leaving one out turns it off for searches. |
 | `MUSIC_TABLE` | on | `off` stops all use of music-table.com: lookups, sync, daily message. |
 | `MUSIC_TABLE_URL` | `https://www.music-table.com` | Where the site lookups go; only the tests change it. |

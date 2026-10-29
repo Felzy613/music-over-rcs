@@ -17,6 +17,7 @@ import { resolvingAudio, type MusicTable } from '../sources/music-table.ts';
 import { songSources } from '../sources/songs.ts';
 import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, type YouTubeMusic } from '../sources/youtube-music.ts';
 import type { ZemerSearch } from '../sources/zemer.ts';
+import type { NewReleases } from '../sources/zemer-releases.ts';
 import type { ZemerWhitelist } from '../sources/zemer-whitelist.ts';
 import { SimulatedChat } from './chat.ts';
 import type { Trace, TraceItem, TraceRun } from './trace.ts';
@@ -30,6 +31,8 @@ export interface SimulatorOptions {
   zemer?: ZemerSearch | undefined;
   /** Zemer's artist list, which YouTube Music results are filtered by. Needed whenever `youTube` is. */
   whitelist?: ZemerWhitelist | undefined;
+  /** Zemer's new releases, which "new" and the daily message list with music-table.com's. */
+  releases?: NewReleases | undefined;
   trace: Trace;
   /** Really download each file the bot sends, as it does for a phone. By default only its type and size are checked. */
   full?: boolean;
@@ -80,7 +83,7 @@ const runSummary = (run: TraceRun) => ({
  * music-table.com lookup the phone setup uses, with a "behind the scenes" panel that shows each step and its time.
  */
 export function createSimulator(options: SimulatorOptions): Simulator {
-  const { catalog, musicTable, youTube, whitelist, zemer, trace } = options;
+  const { catalog, musicTable, youTube, whitelist, zemer, releases, trace } = options;
   const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
   const now = options.now ?? Date.now;
   const maxBytes = options.maxBytes ?? 100 * 1024 * 1024;
@@ -144,7 +147,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
       return result;
     },
     onPlay: (track) => catalog.recordPlay(track.id),
-    browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined),
+    browse: catalogBrowse(catalog, undefined, musicTable ? new Categories({ musicTable, catalog }) : undefined, releases),
     follows: catalogFollows(catalog),
     views: viewsIn(catalog),
     ...sources,
@@ -164,6 +167,7 @@ export function createSimulator(options: SimulatorOptions): Simulator {
         catalog,
         announce: (replies) => activeRunner.announce(replies),
         fetchAudio: audio.fetchAudio,
+        releases,
         log: (line) => trace.add({ label: 'library', detail: clip(line, 160), tone: 'note' }),
       });
       const { replies } = await jobs.previewDigest(new Date(now() - 3 * 24 * 60 * 60_000));

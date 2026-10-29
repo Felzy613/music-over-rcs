@@ -1,7 +1,10 @@
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import { describe } from '../bot.ts';
 import type { Catalog } from '../catalog.ts';
+import { releaseKey } from '../ranking.ts';
 import type { MusicTable } from '../sources/music-table.ts';
+import { splitTitle } from '../sources/titles.ts';
+import type { NewReleases } from '../sources/zemer-releases.ts';
 import type { Reply } from '../types.ts';
 import { prefetch, songsToKeep, type AudioCache } from './audio-cache.ts';
 import type { Categories } from './categories.ts';
@@ -39,6 +42,12 @@ export interface LibraryJobsOptions {
   quiet?: { from: DailyTime; to: DailyTime } | undefined;
   /** How often to look for new posts while you follow anyone: the RSS feed, one small request. */
   watchEveryMs?: number;
+  /** Zemer's new releases, which go in the daily message and the alerts beside music-table.com's. Without it, only the site's do. */
+  releases?: NewReleases | undefined;
+  /** How often Zemer's feed is read (it is rebuilt once an hour, and asking again costs next to nothing). */
+  releasesEveryMs?: number;
+  /** Told whether Zemer's feed answers, once it has been failing long enough to be worth saying. */
+  onReleases?: (ok: boolean, problem?: string) => void;
   /** Told whether the site answers, so a lasting problem can be shown on the Mac. */
   onSite?: (ok: boolean, problem?: string) => void;
   /**
@@ -49,6 +58,19 @@ export interface LibraryJobsOptions {
 }
 
 const HOUR_MS = 60 * 60_000;
+/** A feed that has failed for this long is worth a word; one that fails for a moment is not. */
+const RELEASES_PROBLEM_AFTER_MS = 12 * HOUR_MS;
+/** What the daily message is made of: its replies, and what it covers. */
+interface DigestContents {
+  replies: Reply[];
+  /** The music-table.com posts in it. */
+  slugs: string[];
+  /** The music-table.com posts left out because Zemer has the song: done with all the same. */
+  covered: string[];
+  /** Zemer's releases in it. */
+  releaseIds: string[];
+}
+
 export const STATE = {
   lastSync: 'library.last_sync',
   scanOffset: 'library.scan_offset',
@@ -93,6 +115,8 @@ export class LibraryJobs {
   #archiveAwaySince: number | undefined;
   /** Whether the last new-song alert could not be sent, so a lasting outage is logged once, not every minute. */
   #alertFailing = false;
+  /** Whether Zemer's feed is failing, so that is logged once, and again when it is back. */
+  #releasesFailing = false;
 
   constructor(options: LibraryJobsOptions) {
     this.#o = options;
@@ -134,6 +158,7 @@ export class LibraryJobs {
       if (this.#syncDue()) await this.refresh();
       else if (!this.#keptReady && this.#o.cache) await this.keepReady();
       else await this.#watch();
+      await this.syncReleases();
       if (this.#digestDue()) await this.sendDigest();
       await this.alertFollowed();
       if (!this.#o.catalog.getState(STATE.scanDone)) await this.scanStep();
@@ -201,6 +226,27 @@ export class LibraryJobs {
   }
 
   /**
+   * Reads Zemer's new releases into the catalog, when it has been a while (it is rebuilt hourly, and an answer that hasn't
+   * changed costs next to nothing). A feed that can't be had is logged once, and told only when it stays away for hours:
+   * music-table.com carries on alone meanwhile.
+   */
+  async syncReleases(): Promise<void> {
+    const releases = this.#o.releases;
+    if (!releases) return;
+    const result = await releases.sync(this.#o.releasesEveryMs ?? 30 * 60_000);
+    if (result.ok) {
+      if (this.#releasesFailing) this.#log("Zemer's new releases are being read again");
+      this.#releasesFailing = false;
+      this.#o.onReleases?.(true);
+      return;
+    }
+    if (!this.#releasesFailing) this.#log(`could not read Zemer's new releases (music-table.com's carry on; it is tried again every few minutes): ${result.problem}`);
+    this.#releasesFailing = true;
+    const hours = Math.floor((this.#now().getTime() - result.since.getTime()) / HOUR_MS);
+    if (hours >= RELEASES_PROBLEM_AFTER_MS / HOUR_MS) this.#o.onReleases?.(false, `Zemer's new releases haven't been readable for ${hours} hours (${result.problem}). New music from Zemer isn't in the lists or the daily message meanwhile; music-table.com's is.`);
+  }
+
+  /**
    * While you follow anyone: a look at the site's RSS feed every few minutes (one small request), and a sync when it
    * shows a post the catalog doesn't have, so new songs by the artists you follow come quickly.
    */
@@ -225,8 +271,10 @@ export class LibraryJobs {
     const { catalog } = this.#o;
     const now = this.#now();
     if (this.#inQuietHours(now)) return 0;
-    const posts = catalog.postsToAlert(new Date(now.getTime() - 2 * 24 * HOUR_MS));
-    if (posts.length === 0) return 0;
+    const since = new Date(now.getTime() - 2 * 24 * HOUR_MS);
+    const posts = catalog.postsToAlert(since);
+    const releases = this.#o.releases?.toAlert(since) ?? [];
+    if (posts.length === 0 && releases.length === 0) return 0;
     const replies: Reply[] = [];
     const chips: Array<{ label: string; postback: string }> = [];
     posts.forEach((post, i) => {
@@ -242,6 +290,15 @@ export class LibraryJobs {
       replies.push({ kind: 'text', text: `🔔 New from ${post.artists.join(' & ')}: ${what}`, postback });
       chips.push({ label: `${n}. ${song.title}`.slice(0, 25), postback });
     });
+    // Zemer's: a single is sent when it is picked, an album opens into its songs.
+    for (const release of releases) {
+      const single = release.songs === 1;
+      const postback = `${single ? 'single' : 'album'}:${release.id}`;
+      const what = single ? `${release.artist} — ${release.title}` : `${release.title} · album${release.songs > 0 ? `, ${release.songs} songs` : ''}`;
+      if (release.cover) replies.push({ kind: 'image', url: release.cover, caption: { title: release.title, artist: single ? release.artist : '' }, postback });
+      replies.push({ kind: 'text', text: `🔔 New from ${release.artists.join(' & ')}: ${what}`, postback });
+      chips.push({ label: `${chips.length + 1}. ${release.title}`.slice(0, 25), postback });
+    }
     if (chips.length === 0) return 0;
     replies.push({
       kind: 'text',
@@ -258,8 +315,10 @@ export class LibraryJobs {
     }
     this.#alertFailing = false;
     catalog.markAlerted(posts.map((post) => post.slug), now);
-    this.#log(`alerted ${posts.length} new post${posts.length === 1 ? '' : 's'} by artists you follow`);
-    return posts.length;
+    this.#o.releases?.markAlerted(releases.map((release) => release.id), now);
+    const alerted = posts.length + releases.length;
+    this.#log(`alerted ${alerted} new ${alerted === 1 ? 'release' : 'releases'} by artists you follow`);
+    return alerted;
   }
 
   #inQuietHours(now: Date): boolean {
@@ -336,8 +395,9 @@ export class LibraryJobs {
    * What the daily message would say right now (after a sync), without sending it or marking anything. `since`
    * widens it, to see what a message with more in it looks like.
    */
-  async previewDigest(since?: Date): Promise<{ replies: Reply[]; slugs: string[] }> {
+  async previewDigest(since?: Date): Promise<DigestContents> {
     await this.sync();
+    await this.syncReleases();
     return this.#digest(since);
   }
 
@@ -346,8 +406,10 @@ export class LibraryJobs {
     const { catalog } = this.#o;
     const now = this.#now();
     await this.sync();
-    const { replies, slugs } = this.#digest(since);
+    await this.syncReleases();
+    const { replies, slugs, covered, releaseIds } = this.#digest(since);
     if (replies.length === 0) {
+      catalog.markAnnounced(covered, now);
       catalog.setState(STATE.digestDate, localDay(now));
       this.#log('daily message: nothing new today, so none was sent');
       return 0;
@@ -359,33 +421,49 @@ export class LibraryJobs {
       this.#log(`daily message could not be sent (trying again in 30 minutes): ${err instanceof Error ? err.message : String(err)}`);
       return 0;
     }
-    catalog.markAnnounced(slugs, now);
+    catalog.markAnnounced([...slugs, ...covered], now);
+    this.#o.releases?.markAnnounced(releaseIds, now);
     catalog.setState(STATE.digestDate, localDay(now));
     catalog.setState(STATE.digestSentAt, now.toISOString());
-    this.#log(`daily message sent: ${slugs.length} new post${slugs.length === 1 ? '' : 's'}`);
-    return slugs.length;
+    const sent = slugs.length + releaseIds.length;
+    this.#log(`daily message sent: ${sent} new release${sent === 1 ? '' : 's'}`);
+    return sent;
   }
 
-  #digest(sinceOverride?: Date): { replies: Reply[]; slugs: string[] } {
+  #digest(sinceOverride?: Date): DigestContents {
     const { catalog, musicTable } = this.#o;
     const now = this.#now();
     const sentAt = catalog.getState(STATE.digestSentAt);
     // Since the last message (with a margin for posts the site dated a little earlier), or the last day for the first.
     const since = sinceOverride ?? (sentAt ? new Date(Date.parse(sentAt) - 6 * HOUR_MS) : new Date(now.getTime() - 24 * HOUR_MS));
+    // Zemer's new releases. A song both have is Zemer's: music-table.com's copy of one Zemer has (announced or not, so a song
+    // isn't announced twice) is left out, and counts as announced.
+    const releases = this.#o.releases?.toAnnounce(since) ?? [];
+    const theirs = new Set((this.#o.releases?.list() ?? []).filter((release) => Date.parse(release.releasedAt) > since.getTime() - 3 * 24 * HOUR_MS).map((release) => releaseKey(release.songs === 1 ? 'single' : 'album', release)));
     const items: DigestItem[] = [];
+    const covered: string[] = [];
     for (const post of catalog.postsToAnnounce(since)) {
       if (post.audioFiles === 0) {
         items.push({ post });
         continue;
       }
       const song = catalog.byUrl(musicTable.trackUrl(post, 0));
-      if (song) items.push({ post, song });
+      if (!song) continue;
+      const album = post.audioFiles > 1;
+      const key = releaseKey(album ? 'album' : 'single', { title: album ? splitTitle(post.title).title || post.title : song.title, artist: song.artist });
+      if (theirs.has(key)) covered.push(post.slug);
+      else items.push({ post, song });
     }
     // The time of year: a pointer to its list, and (in Sefirah and the Three Weeks) vocal songs first.
     const season = seasonOn(now);
     const vocalId = season?.category === 'vocal' ? this.#o.categories?.knownId('vocal') : undefined;
     const vocal = vocalId ? (item: DigestItem) => item.post.categoryIds?.includes(vocalId) ?? false : undefined;
-    return { replies: buildDigest(items, { date: now, seasonHint: season?.hint, vocal }), slugs: items.map((item) => item.post.slug) };
+    return {
+      replies: buildDigest(items, { date: now, seasonHint: season?.hint, vocal, releases }),
+      slugs: items.map((item) => item.post.slug),
+      covered,
+      releaseIds: releases.map((release) => release.id),
+    };
   }
 
   #syncDue(): boolean {

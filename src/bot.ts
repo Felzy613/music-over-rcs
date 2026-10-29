@@ -1,14 +1,14 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { artistKey } from './artists.ts';
 import type { AudioCheck } from './audio-check.ts';
-import type { ListedTrack } from './catalog.ts';
+import type { ListedEntry } from './catalog.ts';
 import type { Browse, ListPage } from './library/browse.ts';
 import { categoryFor } from './library/category-list.ts';
 import type { Follows } from './library/follows.ts';
 import { seasonOn } from './library/seasons.ts';
 import { albumLine, artistLine, closingLine, creditNeeded, FIRST_PAGE, helpText, NEXT_PAGE, orList, shortCredit, shownTitle, songLine } from './menu.ts';
 import { parseQuery, tokenize } from './query.ts';
-import { foldEditions, rankAlbums, rankArtists, rankSongs, songTier, withoutGuests } from './ranking.ts';
+import { foldEditions, rankAlbums, rankArtists, rankSongs, songKey, songTier } from './ranking.ts';
 import { editDistance } from './sources/relevance.ts';
 import { splitTitle } from './sources/titles.ts';
 import { timed, type Trace } from './timeline.ts';
@@ -241,8 +241,7 @@ function chipLabel(n: number, title: string): string {
   return chars.length <= MAX_CHIP_LABEL ? chars.join('') : `${chars.slice(0, MAX_CHIP_LABEL - 1).join('')}…`;
 }
 
-/** A song as two sources would both spell it (a single "Achas (feat. X)" is the song "Achas"), so the same song from each is told apart from different ones. */
-const sameSong = (track: { title: string; artist: string }): string => `${tokenize(withoutGuests(track.title)).join(' ')}|${tokenize(track.artist).join(' ')}`;
+const sameSong = songKey;
 
 /** Both lists, without repeats (the same song twice counts as one: the first list's copy stays), the first one's order first, at most `limit`. */
 function merge(first: Track[], second: Track[], limit: number): Track[] {
@@ -366,7 +365,7 @@ export function createBot(deps: BotDeps): Bot {
   const now = deps.now ?? (() => new Date());
   const views = deps.views ?? memoryViews();
   const help = (): string => {
-    const text = helpText({ browse: Boolean(deps.browse), follows: Boolean(deps.follows), finder: Boolean(deps.finder || deps.albums) });
+    const text = helpText({ browse: Boolean(deps.browse), follows: Boolean(deps.follows), finder: Boolean(deps.finder || deps.albums), releases: Boolean(deps.browse?.refreshNew) });
     const word = deps.assistant?.word;
     return word ? `${text}\n${word} <message> — ask ${deps.assistant!.name}; the answer comes back here` : text;
   };
@@ -732,15 +731,17 @@ export function createBot(deps: BotDeps): Bot {
     const browse = deps.browse!;
     if (view.key.kind !== 'list') return [];
     const listPage = view.key.page;
-    const fetch = async (limit: number, offset: number): Promise<ListedTrack[]> =>
-      listPage.kind === 'trending'
-        ? browse.trending(limit, offset)
-        : listPage.kind === 'new'
-          ? browse.newest(limit, offset)
-          : listPage.kind === 'category'
-            ? ((await browse.category?.(listPage.category ?? '', limit, offset)) ?? [])
-            : browse.artistSongs(listPage.artistId ?? -1, limit, offset);
-    let got: ListedTrack[];
+    const fetch = async (limit: number, offset: number): Promise<ListedEntry[]> => {
+      if (listPage.kind === 'trending') return browse.trending(limit, offset);
+      if (listPage.kind === 'new') {
+        // The first page reads Zemer's feed again if it is a few minutes old; the pages after it go on with what that found.
+        if (offset === 0) await browse.refreshNew?.();
+        return browse.newest(limit, offset);
+      }
+      if (listPage.kind === 'category') return (await browse.category?.(listPage.category ?? '', limit, offset)) ?? [];
+      return browse.artistSongs(listPage.artistId ?? -1, limit, offset);
+    };
+    let got: ListedEntry[];
     try {
       got = await step('list', fetch(LIST_SIZE + 1, listPage.shown));
     } catch (err) {
@@ -752,9 +753,14 @@ export function createBot(deps: BotDeps): Bot {
     const hasMore = got.length > LIST_SIZE;
     view.key = { kind: 'list', page: { ...listPage, shown: listPage.shown + songs.length, title: heading } };
     const today = now();
-    const line = (track: ListedTrack): string => {
+    const line = (track: ListedEntry): string => {
       const when = shortDate(track.releasedAt, today);
       const date = when ? ` · ${when}` : '';
+      if ('releaseId' in track) {
+        // Zemer's: a single is a song's line, an album its own.
+        if (track.songs === 1) return `${songLine(track, true)}${date}`;
+        return `💿 ${track.title}${track.artist ? ` — ${shortCredit(track.artist)}` : ''}${track.songs > 0 ? ` · ${plural(track.songs, 'song')}` : ''}${date}`;
+      }
       if (track.album) {
         const parts = splitTitle(track.album.title);
         const title = parts.title || track.album.title;
@@ -762,11 +768,14 @@ export function createBot(deps: BotDeps): Bot {
       }
       return `${songLine(track, listPage.kind !== 'artist')}${date}`;
     };
-    // Picking an album lists its songs; picking a song sends it.
-    const pick = (track: ListedTrack): string => (track.album && track.post ? `post:${track.post}` : `play:${track.id}`);
-    for (const track of songs) {
-      view.shown.push({ kind: track.album ? 'album' : 'song', id: pick(track), postback: pick(track), label: track.album ? splitTitle(track.album.title).title || track.title : shownTitle(track.title) });
-    }
+    // Picking an album lists its songs; picking a song sends it. Zemer's are opened by Zemer: a single is sent, an album listed.
+    const pick = (track: ListedEntry): string => {
+      if ('releaseId' in track) return `${track.songs === 1 ? 'single' : 'album'}:${track.releaseId}`;
+      return track.album && track.post ? `post:${track.post}` : `play:${track.id}`;
+    };
+    const kindOf = (track: ListedEntry): ShownLine['kind'] => ('releaseId' in track ? (track.songs === 1 ? 'song' : 'album') : track.album ? 'album' : 'song');
+    const labelOf = (track: ListedEntry): string => ('releaseId' in track ? track.title : track.album ? splitTitle(track.album.title).title || track.title : shownTitle(track.title));
+    for (const track of songs) view.shown.push({ kind: kindOf(track), id: pick(track), postback: pick(track), label: labelOf(track) });
     views.save(view);
     return [
       { kind: 'text', text: listPage.shown === 0 ? heading : `${heading} (continued)` },
@@ -791,7 +800,7 @@ export function createBot(deps: BotDeps): Bot {
     const season = seasonOn(now());
     const withSeason = (heading: string) => (season ? `${heading}\n${season.hint}` : heading);
     if (TRENDING.has(phrase)) return openList({ kind: 'trending', shown: 0 }, withSeason('🔥 Trending on music-table.com'), 'Nothing is trending yet: the catalog is still being filled. Try again in a few minutes.');
-    if (NEWEST.has(phrase)) return openList({ kind: 'new', shown: 0 }, withSeason('🆕 New on music-table.com'), 'No new songs yet: the catalog is still being filled. Try again in a few minutes.');
+    if (NEWEST.has(phrase)) return openList({ kind: 'new', shown: 0 }, withSeason(`🆕 New on ${browse.newOn ?? 'music-table.com'}`), 'No new songs yet: the catalog is still being filled. Try again in a few minutes.');
     const category = browse.category ? categoryFor(phrase) : undefined;
     if (category) {
       return openList(

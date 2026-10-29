@@ -3,6 +3,7 @@ import type { AudioCheck } from '../audio-check.ts';
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import type { Catalog } from '../catalog.ts';
 import type { MusicTable } from '../sources/music-table.ts';
+import type { NewReleases } from '../sources/zemer-releases.ts';
 import type { Reply, Track } from '../types.ts';
 import { AudioCache, cachedCheck, cachedFetch, taggedFetch } from './audio-cache.ts';
 import { catalogBrowse, type Browse } from './browse.ts';
@@ -39,6 +40,10 @@ export interface LibraryOptions {
   quiet?: { from: DailyTime; to: DailyTime } | undefined;
   /** Told whether the site answers (for alerts on the Mac). */
   onSite?: (ok: boolean, problem?: string) => void;
+  /** Zemer's new releases: "new" lists them with the site's, and the daily message and the alerts carry them. */
+  releases?: NewReleases | undefined;
+  /** Told when Zemer's feed has been failing for hours (with what is wrong) and when it works again (undefined). */
+  onReleases?: (ok: boolean, problem?: string) => void;
   /** A cloud folder (OneDrive) every song sent is also saved to, in the background, sorted and tagged. */
   cloudFolder?: Drive | undefined;
   /** The most to save to it in a calendar month, in bytes (it shares the host's outbound traffic with the songs sent). Undefined for no limit. */
@@ -115,6 +120,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
   const at = options.digestAt;
   const parts = [
     musicTable ? (at ? `daily new-music message at ${String(at.hour).padStart(2, '0')}:${String(at.minute).padStart(2, '0')}` : 'daily message off') : '',
+    options.releases ? "Zemer's new releases in the lists, the daily message and the alerts" : '',
     cache ? (limited ? `up to ${options.prefetchMb} MB of songs kept ready` : 'songs kept ready, no size limit') : 'no songs kept ready',
     cache ? `sorted by artist and album${cache.archiveDir ? ` in ${cache.archiveDir} whenever it's there` : ''}` : '',
     archive ? (options.cloudFolder?.connected() ? 'songs sent are saved to OneDrive' : 'OneDrive is set up but not signed in') : '',
@@ -133,7 +139,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
     prepareImage: createPictures({ log }),
     archive,
     onPlay: (track) => catalog.recordPlay(track.id),
-    browse: catalogBrowse(catalog, undefined, categories),
+    browse: catalogBrowse(catalog, undefined, categories, options.releases),
     follows: catalogFollows(catalog),
     start(announce) {
       if (!musicTable) return;
@@ -147,6 +153,8 @@ export function setUpLibrary(options: LibraryOptions): Library {
         log,
         categories,
         quiet: options.quiet,
+        releases: options.releases,
+        ...(options.onReleases ? { onReleases: options.onReleases } : {}),
         ...(options.onSite ? { onSite: options.onSite } : {}),
         ...(options.onArchive ? { onArchive: options.onArchive } : {}),
       });

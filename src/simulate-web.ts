@@ -6,6 +6,7 @@ import { Trace } from './simulator/trace.ts';
 import { musicTableFromEnv } from './sources/music-table.ts';
 import { youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerSearchFromEnv } from './sources/zemer.ts';
+import { newReleasesFromEnv } from './sources/zemer-releases.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // A Google-Messages-style chat in your browser, wired to the real bot: the same runner, catalog, music-table.com
@@ -30,9 +31,10 @@ const youTube = youTubeMusicFromEnv();
 const zemer = youTube && zemerSearchFromEnv();
 const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
 void whitelist?.warm();
+const releases = newReleasesFromEnv({ catalog, whitelist });
 const maxMb = Number(process.env.MAX_DOWNLOAD_MB) || 100;
 
-const simulator = createSimulator({ catalog, musicTable, youTube, zemer, whitelist, trace, full: flag('full'), maxBytes: maxMb * 1024 * 1024 });
+const simulator = createSimulator({ catalog, musicTable, youTube, zemer, whitelist, releases, trace, full: flag('full'), maxBytes: maxMb * 1024 * 1024 });
 try {
   const { url } = await simulator.listen(port);
   console.log(`Message simulator: ${url}`);

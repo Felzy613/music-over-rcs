@@ -13,6 +13,7 @@ import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { songSources } from './sources/songs.ts';
 import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
 import { zemerSearchFromEnv } from './sources/zemer.ts';
+import { newReleasesFromEnv } from './sources/zemer-releases.ts';
 import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
 
 // Answers song requests typed into one Google Messages chat (your "message yourself" chat), through Beeper Desktop.
@@ -61,6 +62,8 @@ try {
     else if (whitelist.ageMs > 24 * 60 * 60_000) health.problem('whitelist', `Zemer's artist list hasn't updated for a day (${error}). YouTube Music songs are being checked against the old list.`);
   });
   void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs`));
+  // Zemer's new releases (the feed behind the Zemer app's Latest Releases shelf), held to the same list. ZEMER_RELEASES=off turns them off.
+  const releases = newReleasesFromEnv({ catalog, whitelist, log });
 
   // Songs kept on disk (the most played, the newest, the most viewed), album art, and the daily new-music message.
   const library = setUpLibrary({
@@ -74,6 +77,8 @@ try {
     onArchive: (problem) => (problem ? health.problem('archive', problem) : health.ok('archive', 'Fixed: the songs folder on the drive can be used again.')),
     quiet: config.quiet,
     onSite: (ok, problem) => (ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.problem('site', problem ?? "music-table.com isn't answering.")),
+    releases,
+    onReleases: (ok, problem) => (ok ? health.ok('releases', "Fixed: Zemer's new releases are being read again.") : health.problem('releases', problem ?? "Zemer's new releases aren't being read.")),
     log,
   });
   const sources = songSources({ catalog, musicTable, youTube, whitelist, zemer });

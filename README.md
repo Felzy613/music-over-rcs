@@ -33,21 +33,22 @@ Every message starts with a command, so a song's name is never taken for one.
 | 👍 on any line of an earlier menu | Back to that menu: `songs more` and numbers go on with it |
 | `zemer` and a song, like `zemer lipa vnusni` | The same as `search`, on Zemer alone: no falling back to music-table.com (`youtube` and `yt` still work too) |
 | `trending` | What's popular on music-table.com right now |
-| `new` | The newest releases |
+| `new` | The newest releases, from Zemer and music-table.com |
 | `chanukah`, `purim`, `wedding` or `vocal` | That list, most popular first |
 | `more` | The next ten of a music-table.com list |
 | `all` | Every song on the list on screen (up to 20), with 5 seconds between audio files |
 | `follow shwekey` | New songs by that artist as soon as they're out (`following` lists them, `unfollow shwekey` stops) |
 | `help` | Every command, in one message |
 
-Each morning (09:00 unless you change it) it sends a **daily new-music message**: one picture of the new releases' covers, then a line for each. It sends names and pictures, not songs; 👍 the ones you want, or text `all`.
+Each morning (09:00 unless you change it) it sends a **daily new-music message**: one picture of the new releases' covers (Zemer's and music-table.com's), then a line for each. It sends names and pictures, not songs; 👍 the ones you want, or text `all`.
 
-**Artists you follow** don't wait for the morning: a new song by one of them comes on its own within about 15 minutes of going up (between 22:00 and 07:00 it waits for the morning). After you've had three songs by an artist, the bot follows them for you and says so.
+**Artists you follow** don't wait for the morning: a new song by one of them comes on its own, within about 15 minutes of going up on music-table.com and within a couple of hours of appearing in Zemer's new releases (between 22:00 and 07:00 it waits for the morning). After you've had three songs by an artist, the bot follows them for you and says so.
 
 **It knows the calendar.** Around Chanukah and Purim the lists point you to `chanukah` and `purim`; during Sefirah and the Three Weeks they point you to `vocal`, and the daily message puts the a cappella songs first.
 
 ## What it does behind the scenes
 
+- **Zemer's new releases.** The bot reads the feed behind the Zemer app's Latest Releases shelf (the last two weeks from the artists on Zemer's list, rebuilt every hour) and puts it among music-table.com's in `new`, the daily message and the alerts. A song both have is listed once, as Zemer's. If the feed can't be reached, music-table.com's carry on alone.
 - **Zemer first, music-table.com behind it.** Zemer's catalog has whole albums as well as singles, so a search asks it first and lists what it finds there whenever anything fits; music-table.com, which mostly has new singles, answers only what Zemer doesn't have. Everything from Zemer is checked against Zemer's artist list again, on the bot's side, when it is found and again when it is sent.
 - **Knows the whole site.** On its first run it reads all of music-table.com (about 3,600 posts: 5,000+ songs by 1,000+ artists) into a local catalog, in the background, and then keeps it current every three hours, for its lists and the daily message.
 - **Answers while it sends.** A request made while a song or album is on its way is answered at once if the answer is text (a menu, an album's songs); any songs you ask for meanwhile come after the ones already on their way, in the order you asked.

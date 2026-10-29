@@ -73,7 +73,7 @@ export function closingLine(more: Category[], hasAlbums: boolean, hasSongs: bool
 }
 
 /** The whole help, as one message: every command (a message has to start with one), as far as this bot has them. */
-export function helpText(has: { browse: boolean; follows: boolean; finder: boolean }): string {
+export function helpText(has: { browse: boolean; follows: boolean; finder: boolean; releases?: boolean }): string {
   return [
     'Start each message with a command:',
     'search <words> — artists, albums and songs',
@@ -89,7 +89,11 @@ export function helpText(has: { browse: boolean; follows: boolean; finder: boole
     '👍 any line of an earlier list — back to that list',
     'all — every song on the list (up to 20)',
     ...(has.finder ? ['zemer <words> — Zemer only'] : []),
-    ...(has.browse ? ['trending · new · chanukah · purim · wedding · vocal — music-table.com lists'] : []),
+    ...(has.browse
+      ? has.releases
+        ? ['new — the newest releases, from Zemer and music-table.com', 'trending · chanukah · purim · wedding · vocal — music-table.com lists']
+        : ['trending · new · chanukah · purim · wedding · vocal — music-table.com lists']
+      : []),
     ...(has.follows ? ['follow / unfollow <artist> · following'] : []),
   ].join('\n');
 }

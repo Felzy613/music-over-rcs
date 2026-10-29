@@ -107,7 +107,7 @@ zemer lipa vnusni
 | Text | List |
 | --- | --- |
 | `trending` (or `top`, `popular`, `hot`) | Releases from the last month with the most views for their age, so a new hit beats an older song with a few more views |
-| `new` (or `latest`, `new music`) | The newest releases |
+| `new` (or `latest`, `new music`, `new releases`) | The newest releases, from Zemer and music-table.com together |
 | `more` (or `next`) | The next ten of the last list |
 
 ```text
@@ -119,6 +119,19 @@ zemer lipa vnusni
 ```
 
 `more` shows the next ten, and every song shown so far can still be 👍'd.
+
+**`new` has Zemer's new releases in it.** Zemer's own *Latest Releases* (what the Zemer app shows on its home tab: the last two weeks from the artists on Zemer's list, read from the feed the Zemer team builds every hour) are listed with music-table.com's, newest first:
+
+```text
+🎵 🆕 New on Zemer and music-table.com
+🎵 Other Song — Someone Else · Oct 28
+🎵 חתונה בזריחה — David Ben Arza · Oct 28
+🎵 Bakol — Yisroel Meth · Oct 27
+💿 A Color War EP — Camp M & N · 2 songs · Oct 26
+🎵 Oldest — Old Band · Oct 20
+```
+
+A 👍 on one of Zemer's singles sends it (like a single in a search menu); on one of its albums (💿) it opens the album's songs, with its 📦 zip. A song or album that both have is listed once, as Zemer's ("If both have it, rather use Zemer"). Zemer's releases are held to [Zemer's artist list](youtube-music.md#zemers-artist-list) like everything from Zemer (no female singers), and `new` reads the feed again first when its last answer is more than 15 minutes old, waiting at most 4 seconds for it (a slow read carries on in the background). If the feed can't be reached, `new` lists music-table.com's alone, with no word about it. The heading names Zemer only when its feed is on (`ZEMER_RELEASES=off` turns it off).
 
 ## Holiday and other lists
 
@@ -151,7 +164,7 @@ The first time you ask for one it reads the whole category from the site (a few 
 | `following` (or `who do i follow`, `my artists`) | The artists you follow |
 | `unfollow shwekey` (or `stop following shwekey`) | Stops |
 
-When a new post by an artist you follow goes up on music-table.com, the bot sends it on its own, usually within 15 minutes: its card, then a line, then how to get it.
+When a new post by an artist you follow goes up on music-table.com, the bot sends it on its own, usually within 15 minutes: its card, then a line, then how to get it. The same for a new release of theirs in Zemer's feed (`🔔 New from Yoely Weiss: Yoely Weiss — Brand New`, or `… Title · album, 9 songs` for an album), within a couple of hours: the feed is rebuilt every hour and the bot reads it every 30 minutes.
 
 ```text
 [the cover, with "Brand New · Yoely Weiss" drawn under it]
@@ -162,13 +175,13 @@ When a new post by an artist you follow goes up on music-table.com, the bot send
 Like the daily message, it's the name and the picture, not the song: tap 👍 on the card or the line. Several at once each get their own card and line.
 
 - **Quiet hours.** Nothing comes between 22:00 and 07:00 (see `QUIET_HOURS` in [Configuration](configuration.md)); what came out overnight is sent at 07:00, if it's under two days old.
-- **Only what you don't have.** A song you already got (you texted for it first, or picked it from a list) isn't announced, and neither is anything that was out before you followed the artist.
+- **Only what you don't have.** A song you already got (you texted for it first, or picked it from a list) isn't announced, and neither is anything that was out before you followed the artist. (An artist is known by their name in either alphabet, as Zemer's list has it.)
 - **The bot follows for you.** After you've had three different songs by an artist, it follows them and says so once, under the song: `🔔 You've had a few songs by Yoely Weiss, so I'll send you their new ones as soon as they're out. (Text "unfollow yoely weiss" to stop.)` After an unfollow it never does that for the same artist again. `following` marks these "(from your plays)".
 - While you follow anyone, the bot looks at the site's RSS feed every 15 minutes (one small request) instead of only syncing every three hours. Following no one, it doesn't.
 
 ## The daily new-music message
 
-At 09:00 each day (see `DIGEST_TIME` in [Configuration](configuration.md)) the bot sends what came out on music-table.com since the last one:
+At 09:00 each day (see `DIGEST_TIME` in [Configuration](configuration.md)) the bot sends what came out on Zemer (its new releases) and on music-table.com since the last one:
 
 ```text
 🎵 New music · Monday, Oct 5
@@ -183,6 +196,7 @@ At 09:00 each day (see `DIGEST_TIME` in [Configuration](configuration.md)) the b
 
 - It sends names and pictures, **never the songs themselves**. Tap 👍 on a song's line to get it, or text `all` for every song (that works all day).
 - The picture holds up to nine covers; every song gets its line either way.
+- Zemer's releases are in the same list, newest first among the rest: a single as `Title — Artist · single`, an album as `💿 Title — Artist · 9 songs` (a 👍 opens it); the heading says `on Zemer and music-table.com` (`on Zemer`, or `on music-table.com`, when only one has anything). A music-table.com post for a song Zemer has is left out of the message.
 - Posts that are only a video (no MP3) are listed at the end under "Also new, video only".
 - A day with nothing new sends nothing.
 - The first time it runs it waits for the next 09:00 rather than sending in the middle of the day. If the host was down at 09:00 it sends when it's back, once.

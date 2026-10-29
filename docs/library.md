@@ -9,6 +9,7 @@ Everything the bot knows lives in one SQLite file, the **catalog** (`CATALOG_DB`
 | **Songs**: title, artist credit, address, album art, the post it's from, release date | Answering requests without searching the site |
 | **Artists**, split out of each credit ("Mendy Weiss, Yoely Davidowitz & Yoely Samuel" is three) | Artist lists |
 | **Posts** from music-table.com: title, kind (single, video, wedding), the site's categories, publish date, views, picture, how many MP3s, whether it was announced | Trending, new, holiday lists, the daily message, alerts |
+| **Releases** from Zemer's new-releases feed: title, artist and their channel id, picture, when it went up, how many songs, whether it was announced or alerted (kept 45 days; no songs of theirs are stored until one is opened) | `new`, the daily message, alerts |
 | **Plays**: each song sent to you, and when | Keeping your most played songs ready; following an artist after three of their songs |
 | **Artists you follow**, whether you chose them or your plays did, and the ones you unfollowed | New-song alerts |
 | **Songs kept ready**: which files are on disk, and when each was last used | Sending without downloading |
@@ -30,6 +31,7 @@ Page links (a video site's watch page, say) are refused on purpose. `check` test
 
 - **Sync, every three hours:** one request for the 48 newest releases (their categories, album art, view counts and dates), plus one for the page of each release the catalog hasn't seen, for its files. New MP3s become songs; view counts are refreshed, which is what keeps `trending` current. A failed sync is tried again an hour later.
 - **The whole site, once:** on its first run the bot reads every release (several thousand, in pages of 48, plus each release's page once), a few pages a minute in the background, and picks up where it left off after a restart. After that the sync keeps it current. `npm run library -- scan` reads it all at once, pausing a second between requests (about two minutes).
+- **Zemer's new releases, every 30 minutes:** one request for the feed behind the Zemer app's Latest Releases shelf (a 304 when it hasn't changed), held to Zemer's artist list ([New releases from Zemer](youtube-music.md#new-releases-from-zemer)). They go in `new`, the daily message and the alerts beside the site's.
 - **While you follow anyone, the feed every 15 minutes:** one small request for the RSS feed; when it shows a post the catalog doesn't have, a sync right away. That's what makes alerts quick. Following no one, this doesn't run.
 - **A holiday list, the first time you ask:** the bot reads the whole category from the site's list (`chanukah`, `purim`, `weddings`, `vocal`; up to 10 pages of 48, Weddings being the biggest) and, after that, its two newest pages at most once a day.
 
