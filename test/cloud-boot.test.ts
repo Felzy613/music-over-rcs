@@ -328,6 +328,13 @@ describe('the boot sequence', () => {
     assert.equal(env('bot').HOST, '127.0.0.1', 'and on this machine only');
     assert.equal(env('bot').PREFETCH_MB, '0', 'nothing is kept on a disk that is wiped on every restart');
     assert.equal(env('bridge').GOMEMLIMIT, '64MiB');
+    assert.equal(env('bridge').GMESSAGES_ALL_CHATS, undefined, 'the bridge keeps to the self-chat unless told otherwise');
+  });
+
+  test('GMESSAGES_ALL_CHATS reaches the bridge, to bridge every chat again', async () => {
+    const s = setUp({ env: { GMESSAGES_ALL_CHATS: '1' } });
+    await boot(s.deps);
+    assert.equal(s.specs.find((spec) => spec.name === 'bridge')!.env!.GMESSAGES_ALL_CHATS, '1');
   });
 
   test('the bot’s own port is not the one Render watches, whatever PORT is', async () => {

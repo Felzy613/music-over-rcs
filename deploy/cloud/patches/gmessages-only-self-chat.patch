@@ -1,0 +1,223 @@
+Ours (Music over RCS, 2026-10-30), applied to 186284e after gmessages-dedup-dm-txn.patch: the bridge handles only the
+"message yourself" chat, the one-to-one chat with one of the phone's own numbers (the SIM numbers Google Messages gives
+the bridge, the same test as the bot's ownChatRooms). Every other conversation is dropped as it arrives: its updates,
+messages, typing and its entry in the conversation-list sync. GMESSAGES_ALL_CHATS=1 turns it off; a phone that hasn't
+told the bridge any of its numbers keeps every chat. Test: pkg/connector/selfchat_test.go.
+
+Why: the bridge made a room for every chat on the phone and copied every message into the homeserver, whose database
+churn Litestream then uploaded to R2. On 2026-10-28 03:00-04:00 UTC that was about 75 MB of backups next to one 6.6 MB
+song, and with it the service went over Render's 5 GB of monthly traffic on 2026-10-29. It also asked the phone about
+chats nobody reads here (conversation details, contacts, media).
+
+diff --git a/pkg/connector/chatsync.go b/pkg/connector/chatsync.go
+index ee4a5ba..6ee4cef 100644
+--- a/pkg/connector/chatsync.go
++++ b/pkg/connector/chatsync.go
+@@ -88,6 +88,9 @@ func (gc *GMClient) SyncConversations(ctx context.Context, lastDataReceived time
+ 	}
+ 	for _, conv := range resp.GetConversations() {
+ 		gc.chatInfoCache.GetOrSet(conv.ConversationID, conv)
++		if gc.skipConversation(conv) {
++			continue
++		}
+ 		gc.syncConversation(ctx, conv, "sync")
+ 	}
+ 	return
+diff --git a/pkg/connector/handlegmessages.go b/pkg/connector/handlegmessages.go
+index 98bb694..292ddbf 100644
+--- a/pkg/connector/handlegmessages.go
++++ b/pkg/connector/handlegmessages.go
+@@ -148,6 +148,9 @@ func (gc *GMClient) handleGMEvent(rawEvt any) {
+ 		}
+ 		gc.noDataReceivedRecently = false
+ 		gc.lastDataReceived = time.Now()
++		if gc.skipConversation(evt) {
++			return
++		}
+ 		gc.syncConversation(ctx, evt, "event")
+ 	//case *gmproto.Message:
+ 	case *libgm.WrappedMessage:
+@@ -223,6 +226,9 @@ func (gc *GMClient) handleGMEvent(rawEvt any) {
+ 				Msg("Didn't find participant ID for typing notification")
+ 			return
+ 		}
++		if gc.skipConversation(chatInfo) {
++			return
++		}
+ 		gc.Main.br.QueueRemoteEvent(gc.UserLogin, &simplevent.Typing{
+ 			EventMeta: simplevent.EventMeta{
+ 				Type: bridgev2.RemoteEventTyping,
+@@ -271,6 +277,9 @@ func (gc *GMClient) handleMessageQueue(ctx context.Context) {
+ 		case <-ctx.Done():
+ 			return
+ 		case msg := <-gc.messageQueue:
++			if gc.skipConversationID(ctx, msg.GetConversationID()) {
++				continue
++			}
+ 			gc.Main.br.QueueRemoteEvent(gc.UserLogin, &MessageEvent{
+ 				WrappedMessage: msg,
+ 				g:              gc,
+diff --git a/pkg/connector/selfchat.go b/pkg/connector/selfchat.go
+new file mode 100644
+index 0000000..94f5694
+--- /dev/null
++++ b/pkg/connector/selfchat.go
+@@ -0,0 +1,87 @@
++package connector
++
++// Only the "message yourself" chat, a patch of Music over RCS's (deploy/cloud/patches/gmessages-only-self-chat.patch).
++// The bot lives in that one chat. Every other chat cost the host database writes (and their backups to R2, the bulk of
++// its monthly traffic) and cost the phone the bridge's requests about chats nobody reads here. So a conversation that
++// isn't a one-to-one chat with one of the phone's own numbers is dropped as it arrives: no room, no messages, no media,
++// no typing. GMESSAGES_ALL_CHATS=1 turns this off, and a phone that hasn't told the bridge any of its numbers keeps
++// every chat, so the self-chat is never lost to a SIM that doesn't say its number.
++
++import (
++	"context"
++	"os"
++	"strings"
++
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
++)
++
++var allChats = os.Getenv("GMESSAGES_ALL_CHATS") == "1"
++
++// ownNumbers are the phone's numbers, as Google Messages told the bridge about its SIMs.
++func (gc *GMClient) ownNumbers() []string {
++	if gc.Meta == nil {
++		return nil
++	}
++	var numbers []string
++	for _, sim := range gc.Meta.GetSIMs() {
++		if number := sim.GetSIMData().GetFormattedPhoneNumber(); number != "" {
++			numbers = append(numbers, number)
++		}
++	}
++	return numbers
++}
++
++// digitsOf is a phone number's digits as they can be compared: a leading 0 (a trunk or an international prefix) says
++// nothing about the number.
++func digitsOf(number string) string {
++	var b strings.Builder
++	for _, r := range number {
++		if r >= '0' && r <= '9' {
++			b.WriteRune(r)
++		}
++	}
++	return strings.TrimLeft(b.String(), "0")
++}
++
++// sameNumber says whether two ways of writing a phone number are the same number ("+1 (555) 123-4567" and
++// "5551234567"): the shorter must end the longer and have at least eight digits. The bot's sameNumber does the same.
++func sameNumber(a, b string) bool {
++	short, long := digitsOf(a), digitsOf(b)
++	if len(short) > len(long) {
++		short, long = long, short
++	}
++	return len(short) >= 8 && strings.HasSuffix(long, short)
++}
++
++// isSelfChat says whether a conversation is the chat with yourself: one-to-one, with one of your own numbers at the
++// other end.
++func isSelfChat(conv *gmproto.Conversation, own []string) bool {
++	other := getOtherUserPhone(conv)
++	if other == "" {
++		return false
++	}
++	for _, number := range own {
++		if sameNumber(other, number) {
++			return true
++		}
++	}
++	return false
++}
++
++// skipConversation says whether to drop everything about this conversation.
++func (gc *GMClient) skipConversation(conv *gmproto.Conversation) bool {
++	if allChats || conv == nil {
++		return false
++	}
++	own := gc.ownNumbers()
++	return len(own) > 0 && !isSelfChat(conv, own)
++}
++
++// skipConversationID is skipConversation for an event that carries only the conversation's ID (a message). It asks the
++// phone about a conversation it hasn't seen (once; the answer is kept), and lets through one it can't learn about.
++func (gc *GMClient) skipConversationID(ctx context.Context, conversationID string) bool {
++	if allChats || len(gc.ownNumbers()) == 0 {
++		return false
++	}
++	return gc.skipConversation(gc.getChatInfoWithFetch(ctx, conversationID))
++}
+diff --git a/pkg/connector/selfchat_test.go b/pkg/connector/selfchat_test.go
+new file mode 100644
+index 0000000..7783ac9
+--- /dev/null
++++ b/pkg/connector/selfchat_test.go
+@@ -0,0 +1,65 @@
++package connector
++
++import (
++	"testing"
++
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
++)
++
++func participant(number string, isMe bool) *gmproto.Participant {
++	return &gmproto.Participant{ID: &gmproto.SmallInfo{Number: number}, IsMe: isMe, IsVisible: true}
++}
++
++func clientWithSIMs(numbers ...string) *GMClient {
++	sims := map[string]*gmproto.SIMCard{}
++	for i, number := range numbers {
++		sims[string(rune('a'+i))] = &gmproto.SIMCard{SIMData: &gmproto.SIMData{FormattedPhoneNumber: number}}
++	}
++	return &GMClient{Meta: &UserLoginMetadata{simMetadata: sims}}
++}
++
++func TestSameNumber(t *testing.T) {
++	cases := []struct {
++		a, b string
++		same bool
++	}{
++		{"+1 (555) 123-4567", "5551234567", true},
++		{"+15551234567", "+1 555-123-4567", true},
++		{"+972 54-123-4567", "054-123-4567", true},
++		{"+15551234567", "+15551234568", false},
++		{"1234567", "+15551234567", false}, // too few digits to say
++		{"", "+15551234567", false},
++	}
++	for _, c := range cases {
++		if got := sameNumber(c.a, c.b); got != c.same {
++			t.Errorf("sameNumber(%q, %q) = %v, want %v", c.a, c.b, got, c.same)
++		}
++	}
++}
++
++func TestSkipConversation(t *testing.T) {
++	own := "+1 555-123-4567"
++	self := &gmproto.Conversation{ConversationID: "1", Participants: []*gmproto.Participant{participant("+15551234567", true), participant("+15551234567", false)}}
++	friend := &gmproto.Conversation{ConversationID: "2", Participants: []*gmproto.Participant{participant("+15551234567", true), participant("+15559876543", false)}}
++	group := &gmproto.Conversation{ConversationID: "3", IsGroupChat: true, Participants: []*gmproto.Participant{participant("+15551234567", false), participant("+15559876543", false)}}
++
++	gc := clientWithSIMs(own)
++	if gc.skipConversation(self) {
++		t.Error("the chat with yourself was skipped")
++	}
++	if !gc.skipConversation(friend) {
++		t.Error("a chat with someone else was kept")
++	}
++	if !gc.skipConversation(group) {
++		t.Error("a group chat was kept")
++	}
++
++	// A phone that hasn't said its number keeps every chat, so the self-chat can't be lost.
++	unknown := clientWithSIMs("")
++	if unknown.skipConversation(friend) || unknown.skipConversation(self) {
++		t.Error("a chat was skipped although the phone's numbers aren't known")
++	}
++	if clientWithSIMs(own).skipConversation(nil) {
++		t.Error("an unknown conversation was skipped")
++	}
++}

@@ -11,6 +11,8 @@ ARG LITESTREAM_VERSION=0.5.17
 # stream-media.patch passes a file from the homeserver to Google through a file on disk, encrypted as it is sent (about
 # 4 MB of memory for a 100 MB album zip, against about 4 times the file without it), and logs where its time goes.
 # dedup-dm-txn.patch is upstream's fix (dbbd04de) for the DM dedup that held the bridge's database lock 5 s at a time.
+# only-self-chat.patch keeps the bridge to the "message yourself" chat (GMESSAGES_ALL_CHATS=1 bridges every chat again):
+# the other chats were most of the host's monthly traffic, through the homeserver's database backups.
 # Their tests run here, so a new BRIDGE_REF that breaks either fails the build.
 FROM golang:1-bookworm AS bridge
 ARG BRIDGE_REF

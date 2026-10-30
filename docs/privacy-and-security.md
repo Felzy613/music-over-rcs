@@ -17,8 +17,9 @@ The bot runs on Render, with a Cloudflare Worker and an R2 bucket beside it ([Ho
 
 Pairing gives the bridge your whole Google Messages account, and the bridge acts as you:
 
-- **Right after you link it**, it makes a Matrix room for each of your 25 most recent conversations: a name, a phone number and a picture, but no old messages (backfill is off).
-- **From then on, while it runs**, every message sent or received in *any* chat is relayed into that chat's room. The bot only ever reads and writes the one room you chose, but Synapse stores all of them, and the R2 backup holds them too.
+- **Only your "message yourself" chat is copied** (since 2026-10-30, `deploy/cloud/patches/gmessages-only-self-chat.patch`): a conversation that isn't a one-to-one chat with one of the phone's own numbers is dropped as it arrives, so other chats get no room, no messages and no media on the host. A phone that doesn't tell the bridge any of its numbers keeps every chat, and so does `GMESSAGES_ALL_CHATS=1`.
+- **Before that**, the bridge made a Matrix room for each of your 25 most recent conversations (a name, a phone number and a picture) and relayed every message in *any* chat into Synapse; those rooms and messages are still in the homeserver's database (and its R2 backup) from then, though nothing is added to them.
+- **The bridge still sees every chat.** Google Messages hands a linked session every new message; the patch only keeps the bridge from storing them or asking the phone about them.
 - **Nothing expires today.** Uploaded media is deleted a day after it arrives, but messages stay until you delete the rooms or the databases. If that is more than you want, the fix is a retention policy in `synapseConfig` (`src/cloud/provision.ts`), for example purging messages after a week.
 
 ## What leaves

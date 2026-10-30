@@ -2,14 +2,25 @@
 # The settings come from the environment (R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_REGION, which
 # the host sets to auto unless told otherwise).
 #
-# sync-interval is every 60 s on purpose: the default of one second makes a request to R2 for every change, and the
-# homeserver writes all day, which would use up R2's free million writes a month in a few days.
+# Every byte sent to R2 counts toward Render's 5 GB of outbound traffic a month (the service was suspended for going over
+# it on 2026-10-29), so the changes go up in few, large pieces:
+# - monitor-interval is how often Litestream reads what changed into a file to upload (by default every second). A page the
+#   homeserver rewrites a hundred times in five minutes goes up once, not a hundred times. The price is that a host killed
+#   outright (not stopped: a stop uploads what is left) loses up to five minutes of changes.
+# - sync-interval is how often those files are sent; every 60 s, so one is never kept waiting long. Sending it more often
+#   would use up R2's free million writes a month, since the homeserver writes all day.
+# - One merge level, hourly, where the default has three (30 s, 5 min, 1 h), each of which uploads the same changes again:
+#   about 75 MB of backups in a busy hour on 2026-10-28, for about 2.5 MB of pages that had actually changed.
+levels:
+  - interval: 1h
+
 snapshot:
   interval: 24h
   retention: 72h
 
 dbs:
   - path: /data/synapse/homeserver.db
+    monitor-interval: 5m
     replica:
       type: s3
       bucket: ${R2_BUCKET}
@@ -20,6 +31,7 @@ dbs:
       secret-access-key: ${R2_SECRET_ACCESS_KEY}
       sync-interval: 60s
   - path: /data/gmessages/mautrix-gmessages.db
+    monitor-interval: 5m
     replica:
       type: s3
       bucket: ${R2_BUCKET}
@@ -30,6 +42,7 @@ dbs:
       secret-access-key: ${R2_SECRET_ACCESS_KEY}
       sync-interval: 60s
   - path: /data/catalog.db
+    monitor-interval: 5m
     replica:
       type: s3
       bucket: ${R2_BUCKET}

@@ -257,7 +257,7 @@ export async function boot(deps: BootDeps): Promise<Booted> {
         ? [{ name: 'litestream', command: config.bins.litestream, args: ['replicate', '-config', config.litestreamConfig], env: { ...base, ...pick(deps.env, ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']), R2_REGION: deps.env.R2_REGION?.trim() || 'auto' }, stopRank: 4 } satisfies ChildSpec]
         : []),
       { name: 'synapse', command: config.bins.python, args: ['-m', 'synapse.app.homeserver', '-c', paths.synapseConfig], cwd: paths.synapseDir, env: { ...base, PYTHONUNBUFFERED: '1' }, stopRank: 3 },
-      { name: 'bridge', command: config.bins.bridge, args: ['-c', paths.bridgeConfig], cwd: paths.bridgeDir, env: { ...base, GOMEMLIMIT: deps.env.GOMEMLIMIT ?? '64MiB' }, ready: homeserverUp, pidFile: join(config.runDir, 'bridge.pid'), stopRank: 2 },
+      { name: 'bridge', command: config.bins.bridge, args: ['-c', paths.bridgeConfig], cwd: paths.bridgeDir, env: { ...base, ...pick(deps.env, ['GMESSAGES_ALL_CHATS']), GOMEMLIMIT: deps.env.GOMEMLIMIT ?? '64MiB' }, ready: homeserverUp, pidFile: join(config.runDir, 'bridge.pid'), stopRank: 2 },
       { name: 'bot', command: config.bins.node, args: ['--disable-warning=ExperimentalWarning', '--expose-gc', `--max-old-space-size=${deps.env.BOT_HEAP_MB ?? '120'}`, join(config.appDir, 'src', 'cloud-main.ts')], cwd: config.appDir, env: botEnv, stopRank: 1 },
     ];
     deps.supervisor.start(specs);
