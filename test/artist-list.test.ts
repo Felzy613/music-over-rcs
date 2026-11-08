@@ -4,7 +4,7 @@ import { createBot, waitingArtistsReplies } from '../src/bot.ts';
 import { Catalog } from '../src/catalog.ts';
 import { createNewReleases, ZemerReleases } from '../src/sources/zemer-releases.ts';
 import { YouTubeMusic, youTubeGate } from '../src/sources/youtube-music.ts';
-import { ZemerWhitelist, ZemerWhitelistError } from '../src/sources/zemer-whitelist.ts';
+import { ZemerWhitelist, ZemerWhitelistError, zemerWhitelistFromEnv } from '../src/sources/zemer-whitelist.ts';
 import type { Reply } from '../src/types.ts';
 import { createWaitingNotice } from '../src/waiting-notice.ts';
 import { startMockZemerContent, type MockArtist, type MockZemerContent } from './helpers/mock-zemer-content.ts';
@@ -536,5 +536,108 @@ describe('telling the owner about waiting artists', () => {
     setFailing(false);
     await check();
     assert.equal(sent.length, 1);
+  });
+});
+
+// From 2026-11-08 the bot does not ask Zemer's content server at all unless ZEMER_CONTENT_URL is set: it was not going to open
+// again, and every ask only ended in a refusal and a mailed problem. The saved copy is the list and the owner keeps it current.
+describe('Zemer’s artist list when the bot no longer asks Zemer’s server', () => {
+  let content: MockZemerContent;
+  before(async () => {
+    content = await startMockZemerContent(LISTED);
+  });
+  after(() => content.close());
+  beforeEach(() => content.reset(LISTED));
+
+  /** A saved copy, as an earlier run that could still read the list left it. */
+  async function savedCopy() {
+    const state = memory();
+    await new ZemerWhitelist({ baseUrl: content.url, state, checkEveryMs: 0, retryAfterMs: 0 }).ready();
+    content.requests = [];
+    return state;
+  }
+
+  test('filters with the saved copy and never makes a request, however long it runs', async () => {
+    let clock = 1_000_000;
+    const state = await savedCopy();
+    const list = new ZemerWhitelist({ baseUrl: content.url, state, offline: true, checkEveryMs: 0, now: () => clock });
+    assert.equal(list.offline, true);
+    assert.equal(list.frozen, true, 'new artists wait for the owner, as with a locked server');
+    await list.ready();
+    clock += 30 * 24 * 60 * 60_000;
+    await list.ready();
+    await list.warm();
+    assert.equal(list.allows('x', [night]), true);
+    assert.equal(list.allows('x', [rina]), false, 'Zemer’s female flag in the saved copy still holds');
+    assert.equal(list.allows('x', [newcomer]), false, 'anyone it does not know is hidden');
+    assert.equal(content.requests.length, 0, 'Zemer’s server was not asked');
+  });
+
+  test('watching reports nothing and asks nothing, so no problem is ever raised', async () => {
+    const state = await savedCopy();
+    const list = new ZemerWhitelist({ baseUrl: content.url, state, offline: true });
+    const outcomes: Array<string | undefined> = [];
+    const stop = list.watch((error) => outcomes.push(error), 10);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    stop();
+    assert.deepEqual(outcomes, []);
+    assert.equal(content.requests.length, 0);
+  });
+
+  test('the console’s refresh buttons say so instead of asking, forced or not', async () => {
+    const state = await savedCopy();
+    const list = new ZemerWhitelist({ baseUrl: content.url, state, offline: true });
+    for (const force of [false, true]) {
+      const done = await list.refreshNow({ force });
+      assert.equal(done.ok, false);
+      assert.equal(done.skipped, true);
+      assert.match(done.message, /no longer asks Zemer's server/);
+    }
+    assert.equal(content.requests.length, 0);
+    const report = list.report();
+    assert.equal(report.offline, true);
+    assert.equal(report.frozen, true);
+    assert.equal(report.nextAttemptAt, null);
+    assert.equal(report.size.artists, LISTED.length);
+  });
+
+  test('with no saved copy there is no list, said plainly and without asking', async () => {
+    const list = new ZemerWhitelist({ baseUrl: content.url, state: memory(), offline: true });
+    await assert.rejects(list.ready(), (err: unknown) => err instanceof ZemerWhitelistError && /no saved copy/.test(err.message) && !err.refused);
+    assert.equal(list.loaded, false);
+    assert.equal(content.requests.length, 0);
+  });
+
+  test('the owner still decides: a release’s artist waits, an allow lets them through, a block hides anyone', async () => {
+    const state = await savedCopy();
+    const list = new ZemerWhitelist({ baseUrl: content.url, state, offline: true });
+    assert.equal(list.consider(newcomer, 'Newcomer Band'), true);
+    assert.deepEqual(list.pending(), [{ id: newcomer, name: 'Newcomer Band' }]);
+    assert.equal(list.allows('x', [newcomer]), false);
+    assert.deepEqual(list.allow('Newcomer Band'), [{ id: newcomer, name: 'Newcomer Band' }]);
+    assert.equal(list.allows('x', [newcomer]), true);
+    list.block('The Night Owls');
+    assert.equal(list.allows('x', [night]), false);
+    // …and they are still there after a restart.
+    const again = new ZemerWhitelist({ baseUrl: content.url, state, offline: true });
+    assert.equal(again.allows('x', [newcomer]), true);
+    assert.equal(again.allows('x', [night]), false);
+    assert.equal(content.requests.length, 0);
+  });
+
+  test('zemerWhitelistFromEnv is offline unless ZEMER_CONTENT_URL is set, and then it asks that server', async () => {
+    const state = await savedCopy();
+    const idle = zemerWhitelistFromEnv({}, { state });
+    assert.equal(idle.offline, true);
+    await idle.ready();
+    assert.equal(idle.allows('x', [night]), true);
+    assert.equal(content.requests.length, 0);
+
+    const live = zemerWhitelistFromEnv({ ZEMER_CONTENT_URL: content.url }, { checkEveryMs: 0, retryAfterMs: 0 });
+    assert.equal(live.offline, false);
+    assert.equal(live.frozen, false);
+    await live.ready();
+    assert.equal(live.allows('x', [night]), true);
+    assert.ok(content.requests.includes('/whitelist/version'), 'the live one asked');
   });
 });

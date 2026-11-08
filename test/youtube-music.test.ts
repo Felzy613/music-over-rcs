@@ -1184,8 +1184,13 @@ describe('Zemer’s artist list', () => {
     assert.equal(outcomes.length, seen, 'stopped');
   });
 
-  test('zemerWhitelistFromEnv can be pointed elsewhere', () => {
-    assert.equal(zemerWhitelistFromEnv({}).baseUrl, 'https://content.zemer.io');
-    assert.equal(zemerWhitelistFromEnv({ ZEMER_CONTENT_URL: 'http://localhost:9/' }).baseUrl, 'http://localhost:9');
+  test('zemerWhitelistFromEnv never asks Zemer unless it is pointed at a server', () => {
+    // Zemer's content server answers only its own app: by default the saved copy is the list and nothing is asked.
+    assert.equal(zemerWhitelistFromEnv({}).offline, true);
+    assert.equal(zemerWhitelistFromEnv({ ZEMER_CONTENT_URL: '  ' }).offline, true);
+    const live = zemerWhitelistFromEnv({ ZEMER_CONTENT_URL: 'http://localhost:9/' });
+    assert.equal(live.baseUrl, 'http://localhost:9');
+    assert.equal(live.offline, false);
+    assert.equal(zemerWhitelistFromEnv({ ZEMER_CONTENT_URL: 'https://content.zemer.io' }).offline, false, 'asking Zemer again is one setting');
   });
 });

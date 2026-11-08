@@ -10,8 +10,11 @@ import { SourceError } from '../bot.ts';
 // the blocked list. With no list to filter by there is no answer rather than an unfiltered one, as in Zemer.
 //
 // Since early November 2026 content.zemer.io answers only the signed official app (Cloudflare turns everything else
-// away with HTTP 403), and that is Zemer's to decide: nothing here imitates the app. When the server refuses, the list
-// is frozen at its last good copy and the owner keeps it up to date from the chat:
+// away with HTTP 403), and that is Zemer's to decide: nothing here imitates the app. It was not going to open again, so
+// from 2026-11-08 the bot does not ask it at all unless ZEMER_CONTENT_URL is set (`offline`, the default in
+// `zemerWhitelistFromEnv`): the saved copy is the list, for good, and the owner keeps it up to date from the chat. (A
+// server that refuses a bot that does ask is handled the same way, frozen until it answers; that is the live mode.)
+//   The list is then frozen at its last good copy and the owner keeps it up to date from the chat:
 //   - an artist that Zemer's public releases feed shows but the copy doesn't know is *waiting*: Zemer has put them on its
 //     list, but the feed doesn't say whether they are a woman, so their songs stay hidden until the owner says ("allow");
 //   - "block" hides an artist the copy lets through (someone Zemer has since taken off, or a song that leaks);
@@ -41,6 +44,7 @@ const RETRY_AFTER_MS = 60_000;
 /** After the server has turned the bot away (HTTP 401 or 403), it is left alone this long: asking again changes nothing. */
 const REFUSED_RETRY_MS = 3 * 60 * 60_000;
 const WATCH_EVERY_MS = 10 * 60_000;
+const OFFLINE_MESSAGE = "The bot no longer asks Zemer's server for its artist list (it answers only Zemer's own app), so the saved copy is the list. Set ZEMER_CONTENT_URL=https://content.zemer.io in Render and restart to ask again.";
 /** A channel id as YouTube writes it. The releases feed is not ours, so nothing else becomes a waiting artist. */
 const CHANNEL_ID = /^UC[\w-]{10,60}$/;
 const MAX_WAITING = 200;
@@ -143,6 +147,11 @@ export interface ZemerWhitelistOptions {
   retryAfterMs?: number;
   /** How long a server that turned the bot away is left alone. */
   refusedRetryMs?: number;
+  /**
+   * Never ask Zemer's server: the saved copy (plus the owner's decisions) is the list. `ready` and `watch` make no request,
+   * so nothing can turn the bot away or raise a problem, and the list counts as frozen so new artists wait for the owner.
+   */
+  offline?: boolean;
   now?: () => number;
 }
 
@@ -180,6 +189,7 @@ export class ZemerWhitelist {
   #patience: number;
   #retryAfter: number;
   #refusedRetry: number;
+  #offline: boolean;
   #now: () => number;
   #artists = new Map<string, WhitelistedArtist>();
   /** The artists by name, made when first asked for and again after the list or the owner's decisions change. */
@@ -210,6 +220,7 @@ export class ZemerWhitelist {
     this.#patience = options.patienceMs ?? PATIENCE_MS;
     this.#retryAfter = options.retryAfterMs ?? RETRY_AFTER_MS;
     this.#refusedRetry = options.refusedRetryMs ?? REFUSED_RETRY_MS;
+    this.#offline = options.offline === true;
     this.#now = options.now ?? Date.now;
     this.#restore();
     this.#restoreOwner();
@@ -220,7 +231,12 @@ export class ZemerWhitelist {
    * owner's decisions: it can't learn what Zemer changes, so a new artist waits for the owner's word.
    */
   get frozen(): boolean {
-    return this.#refusedAt !== undefined;
+    return this.#offline || this.#refusedAt !== undefined;
+  }
+
+  /** Whether the bot never asks Zemer's server (see `ZemerWhitelistOptions.offline`): the saved copy is the list. */
+  get offline(): boolean {
+    return this.#offline;
   }
 
   /** How many artists the owner has allowed and blocked, and how many are waiting for a word. */
@@ -250,6 +266,10 @@ export class ZemerWhitelist {
    * goes on with the list it has, which is the last good one: a failed check never empties or replaces it.
    */
   async ready(): Promise<void> {
+    if (this.#offline) {
+      if (this.loaded) return;
+      throw new ZemerWhitelistError("There is no saved copy of Zemer's artist list and the bot no longer asks Zemer's server for one");
+    }
     if (!this.loaded) {
       // Turned away and nothing to filter by: say so again without asking again, a search at a time.
       if (this.#refusedAt !== undefined && this.#lastError && this.#now() < this.#retryAt) throw this.#lastError;
@@ -268,6 +288,8 @@ export class ZemerWhitelist {
    * Returns a function that stops it.
    */
   watch(onCheck?: (error: string | undefined) => void, everyMs = WATCH_EVERY_MS): () => void {
+    // Offline there is nothing to check: no request is made, and nothing is reported.
+    if (this.#offline) return () => {};
     this.#watching ??= setInterval(() => {
       // A server that has turned the bot away is not asked again until its wait is over; the last answer is reported.
       if (this.#refusedAt !== undefined && this.#lastError && this.#now() < this.#retryAt) {
@@ -586,6 +608,7 @@ export class ZemerWhitelist {
   report(): {
     loaded: boolean;
     frozen: boolean;
+    offline: boolean;
     refusedSince: number | null;
     lastError: string | null;
     checkedAt: number | null;
@@ -599,6 +622,7 @@ export class ZemerWhitelist {
     return {
       loaded: this.loaded,
       frozen: this.frozen,
+      offline: this.#offline,
       refusedSince: this.#refusedAt ?? null,
       lastError: this.#lastError?.message ?? null,
       checkedAt: this.loaded && this.#checkedAt > 0 ? this.#checkedAt : null,
@@ -616,6 +640,7 @@ export class ZemerWhitelist {
    * try is made now, and a refusal starts the three hours again. Never rejects.
    */
   async refreshNow(options: { force?: boolean } = {}): Promise<{ ok: boolean; skipped: boolean; message: string }> {
+    if (this.#offline) return { ok: false, skipped: true, message: OFFLINE_MESSAGE };
     const now = this.#now();
     if (!options.force && now < this.#retryAt) {
       const minutes = Math.ceil((this.#retryAt - now) / 60_000);
@@ -642,6 +667,7 @@ export class ZemerWhitelist {
   }
 
   #refresh(): Promise<void> {
+    if (this.#offline) return Promise.reject(new ZemerWhitelistError(OFFLINE_MESSAGE));
     this.#flight ??= this.#fetchList()
       .catch((err: unknown) => {
         const refused = err instanceof ZemerWhitelistError && err.refused;
@@ -818,8 +844,11 @@ export class ZemerWhitelist {
   }
 }
 
-/** ZEMER_CONTENT_URL points it somewhere else (tests). */
+/**
+ * Without ZEMER_CONTENT_URL the server is never asked: the saved copy is the list (Zemer's content server answers only its own
+ * app now). Setting it makes the list live again, from that address (`https://content.zemer.io`, or a test's mock).
+ */
 export function zemerWhitelistFromEnv(env: NodeJS.ProcessEnv = process.env, options: ZemerWhitelistOptions = {}): ZemerWhitelist {
   const baseUrl = env.ZEMER_CONTENT_URL?.trim();
-  return new ZemerWhitelist(baseUrl ? { ...options, baseUrl } : options);
+  return new ZemerWhitelist(baseUrl ? { ...options, baseUrl } : { offline: true, ...options });
 }

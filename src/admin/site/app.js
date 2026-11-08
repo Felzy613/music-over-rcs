@@ -248,8 +248,8 @@
     return h('li', {}, h('div', { class: 'grow' }, h('b', {}, label), h('div', { class: 'muted' }, note), holder), h('div', { class: 'actions' }, run));
   }
 
-  function actionsCard(state, only, title = 'Actions') {
-    return card(title, h('ul', { class: 'list' }, ACTIONS.map((entry) => actionRow(entry, state, only))));
+  function actionsCard(state, only, title = 'Actions', skip = []) {
+    return card(title, h('ul', { class: 'list' }, ACTIONS.filter((entry) => !skip.includes(entry[0])).map((entry) => actionRow(entry, state, only))));
   }
 
   // ---------- pages ----------
@@ -306,6 +306,7 @@
         'Traffic this month',
         h('meter', { min: 0, max: t.planMb, high: t.alertMb, low: t.alertMb * 0.6, optimum: 0, value: t.totalMb }),
         h('p', {}, `${num(t.totalMb)} MB sent (${num(t.sentMb)} MB of songs and pictures, ${num(t.savedMb)} MB saved to OneDrive).`),
+        Array.isArray(t.people) && t.people.length > 0 ? h('p', { class: 'muted' }, `Of the songs, ${t.people.map((one) => `${num(one.sentMb)} MB went to ${one.id}`).join(', ')}; the rest to you.`) : null,
         h('p', { class: 'muted' }, `The bot raises an alert at ${num(t.alertMb)} MB. Render's free plan includes about ${num(t.planMb)} MB a month for everything the container sends, backups included.`),
       ),
     ];
@@ -316,13 +317,11 @@
         list
           ? [
               dl([
-                ['State', list.frozen ? badge('frozen: Zemer turned the bot away', 'warn') : list.loaded ? badge('live', 'ok') : badge('no list yet', 'bad')],
-                ['Last confirmed', list.checkedAt ? `${when(list.checkedAt)} (${ago(list.checkedAt)})` : '—'],
-                ['Version', list.gate],
+                ['State', list.offline ? (list.loaded ? badge('saved list: Zemer is not asked', 'ok') : badge('no saved list', 'bad')) : list.frozen ? badge('frozen: Zemer turned the bot away', 'warn') : list.loaded ? badge('live', 'ok') : badge('no list yet', 'bad')],
+                ...(list.offline ? [] : [['Last confirmed', list.checkedAt ? `${when(list.checkedAt)} (${ago(list.checkedAt)})` : '—'], ['Version', list.gate]]),
                 ['Artists', `${num(list.size.artists)} on the saved copy, ${num(list.size.blocked)} blocked songs`],
                 ['You', `${list.owner.allowed} allowed, ${list.owner.blocked} blocked, ${list.owner.waiting} waiting, ${list.owner.allowedSongs} songs allowed, ${list.owner.unblockedSongs} songs unblocked`],
-                ['Last error', list.lastError],
-                ['Asked again', list.nextAttemptAt ? `not before ${when(list.nextAttemptAt)}` : 'when due'],
+                ...(list.offline ? [] : [['Last error', list.lastError], ['Asked again', list.nextAttemptAt ? `not before ${when(list.nextAttemptAt)}` : 'when due']]),
               ]),
               list.owner.waiting > 0 ? h('p', {}, h('a', { href: '#artists' }, `${list.owner.waiting} artist${list.owner.waiting === 1 ? ' is' : 's are'} waiting for your word`)) : null,
             ]
@@ -381,7 +380,8 @@
 
     const timings = Array.isArray(s.timings) ? s.timings : [];
     out.push(h('div', { class: 'grid' }, cards));
-    out.push(actionsCard(d.actions));
+    // The bot never asks Zemer's artist list (the default), so there is nothing to refresh or force.
+    out.push(actionsCard(d.actions, undefined, 'Actions', list && list.offline ? ['refresh-list', 'refresh-list-force'] : []));
     out.push(card('Recent requests', timings.length === 0 ? h('p', { class: 'muted' }, 'None yet since the last start.') : h('div', { class: 'log' }, timings.slice().reverse().map((line) => h('div', {}, String(line))))));
     return out;
   };
@@ -421,17 +421,14 @@
     out.push(
       card(
         "Zemer's artist list",
-        r.frozen ? h('div', { class: 'notice' }, "Zemer's server answers only its own app, so this is the last copy the bot saved. New artists wait for your word below.") : null,
+        r.frozen ? h('div', { class: 'notice' }, r.offline ? "Zemer's server answers only its own app, so the bot no longer asks it: this saved copy is the list, and you keep it up to date. New artists wait for your word below." : "Zemer's server answers only its own app, so this is the last copy the bot saved. New artists wait for your word below.") : null,
         dl([
-          ['State', r.frozen ? badge('frozen', 'warn') : r.loaded ? badge('live', 'ok') : badge('no list', 'bad')],
-          ['Last confirmed', r.checkedAt ? `${when(r.checkedAt)} (${ago(r.checkedAt)})` : '—'],
-          ['Version', r.gate],
-          ['Frozen since', r.refusedSince ? when(r.refusedSince) : undefined],
-          ['Last error', r.lastError],
-          ['Next ask', r.nextAttemptAt ? when(r.nextAttemptAt) : 'when due'],
+          ['State', r.offline ? (r.loaded ? badge('saved list', 'ok') : badge('no saved list', 'bad')) : r.frozen ? badge('frozen', 'warn') : r.loaded ? badge('live', 'ok') : badge('no list', 'bad')],
+          ...(r.offline ? [] : [['Last confirmed', r.checkedAt ? `${when(r.checkedAt)} (${ago(r.checkedAt)})` : '—'], ['Version', r.gate], ['Frozen since', r.refusedSince ? when(r.refusedSince) : undefined], ['Last error', r.lastError], ['Next ask', r.nextAttemptAt ? when(r.nextAttemptAt) : 'when due']]),
           ['Saved copy', `${num(r.size.artists)} artists, ${num(r.size.blocked)} blocked songs`],
         ]),
-        h('ul', { class: 'list' }, ACTIONS.filter((a) => a[0].startsWith('refresh-list')).map((entry) => actionRow(entry, {}, null))),
+        // Nothing to refresh when the bot never asks Zemer's server.
+        r.offline ? null : h('ul', { class: 'list' }, ACTIONS.filter((a) => a[0].startsWith('refresh-list')).map((entry) => actionRow(entry, {}, null))),
       ),
     );
 

@@ -65,11 +65,12 @@ const log = (line: string): void => {
   ring.add(`${new Date().toISOString()} ${line}`);
   console.log(line);
 };
-const whitelist = new ZemerWhitelist({ baseUrl: content.url, state: catalog, checkEveryMs: 0, retryAfterMs: 0 });
-await whitelist.ready();
-// Zemer's server turns the bot away from now on, as the real one does: the list is the saved copy.
+// A copy of Zemer's list as the bot saved it while Zemer's server still answered it…
+await new ZemerWhitelist({ baseUrl: content.url, state: catalog, checkEveryMs: 0, retryAfterMs: 0 }).ready();
+// …and the list as the bot runs now: Zemer's server answers only its own app, so it is never asked and the saved copy is the list.
 content.refusing = true;
-await whitelist.refreshNow({ force: true });
+const whitelist = new ZemerWhitelist({ baseUrl: content.url, state: catalog, offline: true });
+await whitelist.ready();
 const releases = createNewReleases({ feed: new ZemerReleases({ url: `${feed.url}/?page=zemer_releases` }), whitelist, catalog, log });
 const youTube = new YouTubeMusic({ baseUrl: youMock.url, log });
 const admin = new AdminConsole();
@@ -139,7 +140,7 @@ admin.provide({
     node: process.version,
     room: '!demo:localhost',
     bridge: { state: 'CONNECTED', rcsEnabled: true },
-    problems: [{ key: 'whitelist', message: "Zemer's artist list now answers only its own app, so the bot keeps the last copy it saved. Artists Zemer adds wait for your word.", since: new Date(Date.now() - 6 * 3600_000).toISOString() }],
+    problems: [{ key: 'releases', message: "Zemer's new releases have not been readable for 12 hours (made-up), so \"new\" and the daily message are music-table.com's alone.", since: new Date(Date.now() - 6 * 3600_000).toISOString() }],
     tracks: catalog.count(),
     timings: ['timeline: "search achas" phone→seen 1.2s · bot 1.0s (youtube 0.21s) · 12 msgs first +1.0s last +4.3s · at Google +5.1s', 'song: "Hold On" 4.2 MB fetch 5.0s tag 0.30s upload 0.60s'],
     oneDrive: { connected: true, savedThisMonthMb: 312, monthlyLimitMb: 1500 },
@@ -217,7 +218,7 @@ await new Promise<void>((resolve, reject) => {
 });
 const url = `http://127.0.0.1:${(web.address() as AddressInfo).port}/admin/`;
 console.log(`Admin console demo: ${url}`);
-console.log(`Made-up data only; Zemer's list is "frozen" as it is for real. Sign in with any user name and the password "${TOKEN}" (or start with --auto). Press Ctrl+C to stop.`);
+console.log(`Made-up data only; Zemer's artist list is the saved copy and is never asked, as it is for real. Sign in with any user name and the password "${TOKEN}" (or start with --auto). Press Ctrl+C to stop.`);
 if (args.includes('--open')) spawn('open', [url], { stdio: 'ignore', detached: true }).unref();
 
 const shutdown = async (): Promise<void> => {

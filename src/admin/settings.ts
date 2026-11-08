@@ -111,7 +111,7 @@ export const SETTINGS: readonly SettingSpec[] = [
   { key: 'YOUTUBE_MUSIC', group: MUSIC, label: 'YouTube Music', note: 'off stops all use of Zemer and YouTube Music.', default: 'on' },
   { key: 'ZEMER_SEARCH', group: MUSIC, label: "Zemer's catalog search", note: 'off asks YouTube Music\'s own search instead of search.zemer.io.', default: 'on' },
   { key: 'ZEMER_SEARCH_URL', group: MUSIC, label: "Zemer's search address", note: 'Only the tests change it.', default: 'https://search.zemer.io' },
-  { key: 'ZEMER_CONTENT_URL', group: MUSIC, label: "Zemer's artist list address", note: 'Only the tests change it.', default: 'https://content.zemer.io' },
+  { key: 'ZEMER_CONTENT_URL', group: MUSIC, label: "Zemer's artist list address", note: "Empty: Zemer's server is never asked and the saved list is the list (it answers only Zemer's own app). Set https://content.zemer.io to ask it again; the tests point it at a mock.", default: 'empty (never asked)' },
   { key: 'ZEMER_RELEASES', group: MUSIC, label: "Zemer's new releases", note: 'off leaves "new", the daily message and the alerts to music-table.com.', default: 'on' },
   { key: 'ZEMER_RELEASES_URL', group: MUSIC, label: 'New-releases feed address', note: 'Where the releases feed is read from.', default: 'https://flipphoneguy.duckdns.org/?page=zemer_releases' },
   { key: 'YOUTUBE_MUSIC_URL', group: MUSIC, label: 'YouTube Music address', note: 'Only the tests change it.', default: 'https://music.youtube.com' },

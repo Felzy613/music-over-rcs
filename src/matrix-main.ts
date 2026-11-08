@@ -78,14 +78,15 @@ try {
   // On a server (ALERT_URL set) problems are also sent to the alert Worker, which emails them.
   const health = new Health({ notify: allNotify(macNotify, alertFromEnv(process.env, log)), log, save: (problems) => catalog.setState('health.problems', JSON.stringify(problems)) });
   catalog.setState('health.problems', '[]');
-  // Zemer's artist list is what YouTube Music songs are filtered by, and it changes through the day: kept current while the
-  // bot runs, with a note on the Mac if it goes a day without updating (the last good list is used meanwhile).
+  // Zemer's artist list is what YouTube Music songs are filtered by. Zemer's server no longer answers the bot, so by default
+  // (ZEMER_CONTENT_URL unset) the saved copy is the list and nothing is asked or watched; with the URL set it changes through
+  // the day and is kept current while the bot runs, with a note if it goes a day without updating (the last good list is used meanwhile).
   const stopWatching = whitelist?.watch((error) => {
     if (error === undefined) health.ok('whitelist', "Fixed: Zemer's artist list is updating again.");
     else if (whitelist.frozen) health.problem('whitelist', `Zemer's artist list now answers only its own app, so the bot keeps the last copy it saved. Artists Zemer adds wait for your word (text "pending"); text "block" and a name to hide anyone.`);
     else if (whitelist.ageMs > 24 * 60 * 60_000) health.problem('whitelist', `Zemer's artist list hasn't updated for a day (${error}). YouTube Music songs are being checked against the old list.`);
   });
-  void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs${whitelist.frozen ? ' (frozen: the server turns the bot away)' : ''}; you allowed ${whitelist.owner.allowed}, blocked ${whitelist.owner.blocked}, ${whitelist.owner.waiting} waiting`));
+  void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs${whitelist.offline ? " (the saved copy: Zemer's server is not asked)" : whitelist.frozen ? ' (frozen: the server turns the bot away)' : ''}; you allowed ${whitelist.owner.allowed}, blocked ${whitelist.owner.blocked}, ${whitelist.owner.waiting} waiting`));
   // Zemer's new releases (the feed behind the Zemer app's Latest Releases shelf): in "new", the daily message and the alerts,
   // held to the same list. ZEMER_RELEASES=off turns them off.
   const releases = newReleasesFromEnv({ catalog, whitelist, log });
