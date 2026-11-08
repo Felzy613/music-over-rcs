@@ -16,7 +16,10 @@ import { s3FromEnv } from './cloud/s3.ts';
 import { archivedThisMonth, peopleTraffic, sentByEveryone, sentThisMonth } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { parseCloudBudget, personBudgetOrDefault } from './config.ts';
-import { peopleFromEnv, tagLine, type Person } from './people.ts';
+import { parsePeople, peopleFromEnv, tagLine, type Person } from './people.ts';
+import { hostRestarter } from './cloud/host-restart.ts';
+import { PeopleList } from './cloud/people-list.ts';
+import { PeopleDesk } from './cloud/people-desk.ts';
 import { MemoryWatch } from './cloud/memory.ts';
 import { recentTimelines } from './timeline.ts';
 
@@ -230,6 +233,19 @@ function chooseRoom(room: string, person?: string): void {
 const sendTestAlert = bucket ? () => outboxNotify({ s3: bucket, log })('Test alert', 'This is a test from the management console. If you can read it, alerts work.') : undefined;
 const oneDriveSignIn = oneDrive ? { status: oneDriveReport, start: async () => ({ ...(await oneDrive.startLogin()) }) } : undefined;
 const people = (): Array<{ id: string }> => configuredPeople.map(({ id }) => ({ id }));
+
+// The People tab's part: who is set in Render (the host says so in PEOPLE_IN_RENDER; run outside the host, everything in PEOPLE counts), who was
+// added in the console (the bucket's list), and the restart that sets a change up. Without the bucket the list cannot be kept and Add says why.
+const ownerAccount = env.MATRIX_USER?.trim() || 'me';
+const peopleDesk = new PeopleDesk({
+  fromRender: env.PEOPLE_IN_RENDER !== undefined ? parsePeople(env.PEOPLE_IN_RENDER, { reserved: [ownerAccount] }).people.map((one) => one.id) : configuredPeople.map(({ id }) => id),
+  running: configuredPeople.map(({ id }) => id),
+  reserved: [ownerAccount],
+  list: bucket ? new PeopleList({ store: bucket, reserved: [ownerAccount] }) : undefined,
+  restarter: hostRestarter(env, { log }),
+  bootId: startedAt,
+  log,
+});
 const connect: ConnectDeps = {
   state: connectState,
   pair: pairWindow,
@@ -241,7 +257,7 @@ const connect: ConnectDeps = {
   oneDrive: oneDriveSignIn,
   testAlert: sendTestAlert,
 };
-adminConsole.provide({ catalog, env, status: statusReport, startedAt, log, settings: liveSettings, signIn, connect, ...(oneDrive ? { oneDrive: oneDriveReport } : {}) });
+adminConsole.provide({ catalog, env, status: statusReport, startedAt, log, settings: liveSettings, signIn, connect, people: peopleDesk, ...(oneDrive ? { oneDrive: oneDriveReport } : {}) });
 
 const web = createCloudWeb({
   adminToken: env.ADMIN_TOKEN?.trim() || undefined,

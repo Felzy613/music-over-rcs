@@ -864,7 +864,7 @@
   }
 
   pages.connect = async (state, stillHere) => {
-    // Whose phone this page is about: nobody named is you; a person (PEOPLE in Render) is linked here too, with the owner pasting for them.
+    // Whose phone this page is about: nobody named is you; a person (added on the People tab) is linked here too, with the owner pasting for them.
     const who = state.person || undefined;
     const route = (name) => (who ? `${name}?person=${encodeURIComponent(who)}` : name);
     const asked = (body = {}) => (who ? { ...body, person: who } : body);
@@ -1106,7 +1106,7 @@
       );
     }
 
-    // --- taking a person off the host (a person only): their link to Google is cut from their own window, BEFORE they leave PEOPLE ---
+    // --- taking a person off the host (a person only): their link to Google is cut from their own window, BEFORE they are removed from the list ---
     function paintRemove() {
       removeCard.hidden = !who;
       if (!who) return;
@@ -1117,7 +1117,7 @@
       const unlink = action(`Unlink ${who}`, async () => {
         const id = loginId.value.trim();
         if (!id || /\s/.test(id) || id.length > 200) throw new Error('Type the login id exactly as the bridge listed it (no spaces).');
-        if (!(await confirmPlain(`Unlink ${who}?`, `This signs ${who}'s Google Messages out of the bridge: the bot stops being able to text them, and their link to Google is cut. Do it before ${who} is taken out of PEOPLE in Render.`, 'Unlink'))) return;
+        if (!(await confirmPlain(`Unlink ${who}?`, `This signs ${who}'s Google Messages out of the bridge: the bot stops being able to text them, and their link to Google is cut. Do it before ${who} is removed on the People tab.`, 'Unlink'))) return;
         toast((await api('connect/send', asked({ text: `logout ${id}` }))).message);
         loginId.value = '';
         await pollLog();
@@ -1125,14 +1125,14 @@
       fill(
         removeCard,
         h('h2', {}, `Take ${who} off this host`),
-        h('p', { class: 'muted' }, `Do these in order. Unlink FIRST: once ${who} is out of PEOPLE in Render the host no longer has their account, and their link to Google can no longer be cut from here.`),
+        h('p', { class: 'muted' }, `Do these in order. Unlink FIRST: once ${who} is removed from the list the bot no longer has a window to the bridge for them, and their link to Google can no longer be cut from here.`),
         h(
           'ol',
           { class: 'steps' },
           h('li', {}, h('b', {}, 'Ask the bridge for their logins. '), 'It lists them below.', h('div', { class: 'row gap' }, showLogins, action('Read its answer', pollLog, { kind: 'quiet' }))),
           h('li', {}, h('b', {}, 'Unlink. '), 'Type the login id it listed, then press the button.', loginId, h('div', { class: 'row gap' }, unlink)),
           h('li', {}, h('b', {}, 'Check. '), 'The badge in step 1 reads "not linked" and the bridge says it signed out.'),
-          h('li', {}, h('b', {}, 'Then take them out of PEOPLE in Render. '), `That restarts the host (about a minute). ${who} also signs this session out in Google: Google Messages on their phone, Device pairing, and their Google account, Security, Your devices.`),
+          h('li', {}, h('b', {}, 'Then remove them on the '), h('a', { href: '#people' }, 'People tab'), h('b', {}, '. '), `That restarts the bot (about a minute); a name set in PEOPLE in Render is taken out there instead. ${who} also signs this session out in Google: Google Messages on their phone, Device pairing, and their Google account, Security, Your devices.`),
         ),
         h('h3', {}, 'What the bridge says'),
         removeLog,
@@ -1185,7 +1185,7 @@
 
     const chatCard = h('section', { class: 'card' }, chatHead, chatBody);
     const linkCard = h('section', { class: 'card' }, linkHead, linkBody);
-    // Whose phone: you, or one of the people who use the bot (PEOPLE in Render). Each is a page of their own, with their own account and chat.
+    // Whose phone: you, or one of the people who use the bot (the People tab). Each is a page of their own, with their own account and chat.
     state.people = d.people || [];
     const choose = (id) => {
       state.person = id;
@@ -1205,50 +1205,239 @@
     return [selector, checklist, linkCard, chatCard, driveCard, alertCard, removeCard, h('div', { class: 'row' }, action('Refresh now', () => refresh(), { kind: 'quiet' }))];
   };
 
-  // --- People: who else uses the bot (read only: who is in PEOPLE is Render's environment, and this page has no control that edits it) ---
+  // --- People: who else uses the bot. Add and remove them here: the list is kept in the bucket (not in Render), and a change takes effect when the bot restarts. ---
 
   const STEP_TEXT = { 'not-linked': ['not linked', ''], 'no-number': ['no phone number', 'bad'], 'waiting-for-chat': ['waiting for their chat', 'warn'], 'chat-missing': ['chat did not arrive', 'bad'], onboarded: ['set up', 'ok'] };
 
-  pages.people = async (state) => {
-    const d = await api('people');
-    if (d.people.length === 0) {
+  const RESTART_ASK = 'This restarts the bot for about a minute. Continue?';
+  /** How long the page keeps looking for the host to come back before it says it is taking longer than expected. */
+  const RESTART_SLOW_MS = 6 * 60 * 1000;
+
+  /** Asks the host to restart (the owner has confirmed already) and moves the page to its "restarting" state. */
+  async function restartHost(state, manage, added, removed) {
+    await api('people/restart', { confirm: true });
+    state.restarting = { bootId: manage.bootId, since: Date.now(), added, removed };
+    render();
+  }
+
+  /** Looks for the host to answer again with a new start (its bootId changes at every start), every few seconds, for as long as this tab is the one shown. */
+  function watchRestart(state, stillHere, paintElapsed) {
+    const tick = async () => {
+      if (!state.restarting || !stillHere()) return;
+      try {
+        const d = await api('people');
+        // The page is drawn again, and notices there that the host has started afresh.
+        if (d.manage && d.manage.bootId !== state.restarting.bootId) return render();
+      } catch {
+        // the host is down while it restarts: that is what is expected
+      }
+      if (!stillHere() || !state.restarting) return;
+      paintElapsed();
+      setTimeout(tick, 3000);
+    };
+    setTimeout(tick, 3000);
+  }
+
+  pages.people = async (state, stillHere) => {
+    let d;
+    try {
+      d = await api('people');
+    } catch (err) {
+      // While the host restarts it does not answer: the page says so instead of failing.
+      if (!state.restarting) throw err;
+    }
+    // The host has started afresh since the restart was asked for: the wait is over.
+    if (state.restarting && d && d.manage && d.manage.bootId !== state.restarting.bootId) {
+      state.afterRestart = { added: state.restarting.added, removed: state.restarting.removed };
+      state.restarting = undefined;
+    }
+
+    // --- the host is restarting to apply a change: nothing to do but wait ---
+    if (state.restarting) {
+      const elapsed = h('span', {}, '');
+      const slow = h('div', {});
+      const paintElapsed = () => {
+        const seconds = Math.round((Date.now() - state.restarting.since) / 1000);
+        elapsed.textContent = `${seconds} s so far.`;
+        slow.replaceChildren(
+          Date.now() - state.restarting.since > RESTART_SLOW_MS
+            ? h(
+                'div',
+                { class: 'notice bad' },
+                h('p', {}, 'This is taking longer than expected. Look at the service in Render (Events and Logs) to see how the start is going. This page keeps checking.'),
+                // The restart may never have happened (the bot would still answer, as the same start): the page can be let go of.
+                h('div', { class: 'row' }, action('Stop waiting', () => { state.restarting = undefined; render(); }, { kind: 'quiet' })),
+              )
+            : '',
+        );
+      };
+      paintElapsed();
+      watchRestart(state, stillHere, paintElapsed);
       return [
         card(
-          'People',
-          h('p', {}, 'Nobody besides you uses the bot.'),
-          h('p', { class: 'muted' }, 'To add someone, put their name (lower case letters and digits, 2 to 16 of them) in PEOPLE in the service\'s environment on Render; that restarts the host. Then link their phone on the Connect tab, with them next to you. This page only shows who is there: it changes nothing in Render.'),
+          'Restarting…',
+          h('p', {}, 'The bot is restarting to apply the change. It is away for about a minute. This page looks again every few seconds and updates itself when the host answers.'),
+          h('progress', {}),
+          h('p', { class: 'muted' }, elapsed),
+          slow,
+          h('div', { class: 'row' }, action('Look now', () => render(), { kind: 'quiet' })),
         ),
       ];
     }
-    const rows = d.people.map((one) => {
-      const step = one.onboarding ? STEP_TEXT[one.onboarding.step] || [one.onboarding.step, ''] : ['unknown', ''];
+
+    const manage = d.manage && !d.manage.error ? d.manage : null;
+    const running = new Map(d.people.map((one) => [one.id, one]));
+
+    // --- a restart that has just finished: what is true now ---
+    const finished = state.afterRestart;
+    state.afterRestart = undefined;
+    const arrivals = finished
+      ? [
+          ...finished.added.map((id) => h('div', { class: 'notice ok' }, `${id} is set up on the host. Next: link their phone on `, h('a', { href: `#connect:${id}` }, `${id}'s Connect page`), ', with them next to you.')),
+          ...finished.removed.map((id) => h('div', { class: 'notice ok' }, `${id} has left the list: the bot no longer runs anything for them.`)),
+        ]
+      : [];
+
+    // --- the list as it stands ---
+    const entries = manage ? manage.entries : d.people.map((one) => ({ id: one.id, source: 'render', state: 'running', addedAt: null }));
+    const canChange = Boolean(manage && manage.canChange);
+    const restartable = Boolean(manage && manage.restart.available);
+
+    const removeButton = (entry) =>
+      action('Remove', async () => {
+        const waiting = entry.state === 'adding';
+        const ok = await confirmPlain(
+          `Remove ${entry.id}?`,
+          waiting
+            ? `${entry.id} was added but has not been set up yet, so there is nothing to log out. They are taken out of the list.`
+            : `Log ${entry.id} out of Google first: open their Connect page and use "Take ${entry.id} off this host". If you skip that, their login stays connected to the bridge and keeps using traffic. ${RESTART_ASK}`,
+          waiting ? 'Remove' : 'Remove and restart',
+        );
+        if (!ok) return;
+        const done = await api('people/remove', { name: entry.id, confirm: true });
+        if (!done.pendingRestart || !restartable) {
+          toast(done.message);
+          return render();
+        }
+        try {
+          await restartHost(state, manage, [], [entry.id]);
+        } catch (err) {
+          toast(`${entry.id} is out of the list, but the restart could not be asked for: ${err.message}`, true);
+          render();
+        }
+      }, { kind: 'danger', small: true });
+
+    const rows = entries.map((entry) => {
+      const one = running.get(entry.id);
+      const step = one && one.onboarding ? STEP_TEXT[one.onboarding.step] || [one.onboarding.step, ''] : ['unknown', ''];
+      const waiting = entry.state !== 'running';
+      // Under the name, so that it is seen on a phone without scrolling the table sideways.
+      const control = !manage
+        ? null
+        : entry.source === 'render'
+          ? h('div', {}, badge('set in Render', ''), h('div', { class: 'muted' }, 'taken out only there'))
+          : entry.state === 'removing'
+            ? h('div', { class: 'muted' }, 'removed')
+            : canChange
+              ? h('div', {}, removeButton(entry))
+              : null;
       return h(
         'tr',
         {},
-        h('td', {}, h('a', { href: `#connect:${one.id}` }, one.id)),
-        h('td', {}, one.phase === 'running' ? badge('answering', 'ok') : badge(one.phase || 'unknown', one.phase === 'room-missing' ? 'bad' : 'warn')),
-        h('td', {}, one.bridge ? badge(one.bridge, one.bridge === 'CONNECTED' ? 'ok' : 'warn') : badge('not linked', '')),
-        h('td', {}, one.simNumber === true ? badge('yes', 'ok') : one.simNumber === false ? badge('no', one.bridge === 'CONNECTED' ? 'bad' : '') : badge('unknown', '')),
-        h('td', {}, badge(step[0], step[1])),
-        h('td', {}, one.sentThisMonthMb === null ? '—' : `${num(one.sentThisMonthMb)} MB${one.monthlyLimitMb === null ? ' (no limit)' : ` of ${num(one.monthlyLimitMb)} MB`}`),
+        h('td', {}, one ? h('a', { href: `#connect:${entry.id}` }, entry.id) : entry.id, control),
+        h('td', {}, entry.state === 'adding' ? badge('waiting for the restart', 'warn') : entry.state === 'removing' ? badge('leaving at the restart', 'warn') : one ? (one.phase === 'running' ? badge('answering', 'ok') : badge(one.phase || 'unknown', one.phase === 'room-missing' ? 'bad' : 'warn')) : badge('unknown', '')),
+        h('td', {}, waiting || !one ? '—' : one.bridge ? badge(one.bridge, one.bridge === 'CONNECTED' ? 'ok' : 'warn') : badge('not linked', '')),
+        h('td', {}, waiting || !one ? '—' : one.simNumber === true ? badge('yes', 'ok') : one.simNumber === false ? badge('no', one.bridge === 'CONNECTED' ? 'bad' : '') : badge('unknown', '')),
+        h('td', {}, waiting || !one ? '—' : badge(step[0], step[1])),
+        h('td', {}, waiting || !one || one.sentThisMonthMb === null ? '—' : `${num(one.sentThisMonthMb)} MB${one.monthlyLimitMb === null ? ' (no limit)' : ` of ${num(one.monthlyLimitMb)} MB`}`),
       );
     });
+
+    // --- changes saved but not in use until the host restarts ---
+    const adding = entries.filter((entry) => entry.state === 'adding').map((entry) => entry.id);
+    const leaving = entries.filter((entry) => entry.state === 'removing').map((entry) => entry.id);
+    const pending =
+      manage && manage.pendingRestart
+        ? h(
+            'div',
+            { class: 'notice' },
+            h('p', {}, h('b', {}, 'Saved, but not in use yet. '), adding.length > 0 ? `${adding.join(', ')} ${adding.length === 1 ? 'is' : 'are'} set up when the bot restarts. ` : '', leaving.length > 0 ? `${leaving.join(', ')} ${leaving.length === 1 ? 'leaves' : 'leave'} when the bot restarts. ` : ''),
+            restartable
+              ? h(
+                  'div',
+                  { class: 'row' },
+                  action('Restart now', async () => {
+                    if (!(await confirmPlain('Restart the bot?', `The list has changes that take effect at a restart. ${RESTART_ASK}`, 'Restart'))) return;
+                    await restartHost(state, manage, adding, leaving);
+                  }),
+                )
+              : h('p', { class: 'muted' }, manage.restart.whyNot || 'This host cannot restart itself from here.'),
+          )
+        : null;
+
+    // --- adding ---
+    const nameBox = h('input', { type: 'text', id: 'person-name', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', maxlength: '16', placeholder: 'for example: alice', disabled: !canChange });
+    const addButton = action('Add person', async () => {
+      const name = nameBox.value.trim().toLowerCase();
+      if (!name) throw new Error('Type a name first.');
+      // The host checks the name again; this only spares a confirmation for a name that is sure to be refused.
+      if (!/^[a-z][a-z0-9]{1,15}$/.test(name)) throw new Error('Use lower-case letters and digits, 2 to 16 of them, starting with a letter (no spaces).');
+      if (name === 'me' || name === 'owner' || name.startsWith('gmessages')) throw new Error(`"${name}" is not allowed: not "me" or "owner", and nothing starting "gmessages".`);
+      if (!(await confirmPlain(`Add ${name}?`, `${name} is added to the list and set up when the bot restarts. ${RESTART_ASK}`, 'Add and restart'))) return;
+      const done = await api('people/add', { name });
+      nameBox.value = '';
+      if (!done.pendingRestart || !restartable) {
+        toast(done.pendingRestart ? `${done.message} This host cannot restart itself from here, so restart the service in Render.` : done.message);
+        return render();
+      }
+      try {
+        await restartHost(state, manage, [done.id], []);
+      } catch (err) {
+        toast(`${done.id} is saved, but the restart could not be asked for: ${err.message}`, true);
+        render();
+      }
+    });
+    addButton.disabled = !canChange;
+    const addForm = h(
+      'form',
+      {},
+      h('label', { for: 'person-name' }, 'Name'),
+      nameBox,
+      h('p', { class: 'muted' }, 'Use lower-case letters and digits, 2 to 16 of them, starting with a letter. Not "me" or "owner", and nothing starting "gmessages".'),
+      h('div', { class: 'row' }, addButton),
+    );
+    addForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!addButton.disabled) addButton.click();
+    });
+
     const notes = d.people.flatMap((one) => [
       one.onboarding && one.onboarding.warn && one.onboarding.message ? h('div', { class: 'notice bad' }, one.onboarding.message) : null,
       one.error ? h('div', { class: 'notice bad' }, `${one.id}: ${one.error}`) : null,
       ...one.problems.map((p) => h('div', { class: 'notice' }, p.message)),
     ]);
+
     return [
+      ...arrivals,
       card(
-        'People besides you',
-        h('p', { class: 'muted' }, 'Each has their own Matrix account, Google Messages login and chat. They share the song catalog and your artist rules (their texts cannot change those). Select a name to open their Connect page.'),
-        h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Person', 'Chat', 'Google Messages', 'Phone number', 'Set up', 'Songs this month'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))),
-        h('p', { class: 'muted' }, `Songs sent this month: ${num(d.ownerSentThisMonthMb)} MB to you, ${num(d.totalSentThisMonthMb)} MB to everybody (Render's free plan includes about 5,000 MB a month for the whole host).`),
+        entries.length === 0 ? 'People' : 'People besides you',
+        h('p', { class: 'muted' }, entries.length === 0 ? 'Nobody besides you uses the bot.' : 'Each has their own Matrix account, Google Messages login and chat. They share the song catalog and your artist rules (their texts cannot change those). Select a name to open their Connect page.'),
+        manage && manage.error ? h('div', { class: 'notice bad' }, manage.error) : null,
+        !manage && !d.manage ? h('div', { class: 'notice' }, 'Adding and removing people is not available yet: the bot is still starting.') : null,
+        entries.length === 0 ? null : h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Person', 'Chat', 'Google Messages', 'Phone number', 'Set up', 'Songs this month'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))),
+        entries.length === 0 ? null : h('p', { class: 'muted' }, `Songs sent this month: ${num(d.ownerSentThisMonthMb)} MB to you, ${num(d.totalSentThisMonthMb)} MB to everybody (Render's free plan includes about 5,000 MB a month for the whole host).`),
+      ),
+      pending,
+      card(
+        'Add a person',
+        manage && !manage.canChange ? h('div', { class: 'notice bad' }, manage.whyNot) : null,
+        h('p', { class: 'muted' }, 'The name goes in a list the host keeps for you. The bot then restarts (about a minute) and makes their account. After that you link their phone on the Connect tab, with them next to you.'),
+        addForm,
       ),
       ...notes.filter(Boolean),
       card(
-        'Adding or removing someone',
-        h('p', { class: 'muted' }, 'Add: put their name in PEOPLE in Render (that restarts the host), then link them on the Connect tab with them next to you. Remove: unlink them first on their Connect page (it has the steps), and only then take the name out of PEOPLE: afterwards the host has no account for them and their link to Google can no longer be cut from here.'),
+        'Taking someone off',
+        h('p', { class: 'muted' }, 'Log them out of Google first: on their Connect page, "Take them off this host" has the steps. Remove them here only after that; once they are out of the list the bot has no window to the bridge for them, and their link to Google can no longer be cut from here. If you skip it, their login stays connected to the bridge and keeps using traffic. Names set in PEOPLE in Render are taken out there.'),
       ),
     ];
   };

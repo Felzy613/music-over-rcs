@@ -609,6 +609,6 @@ describe('the People view of the console', () => {
     for (const name of ['onboarding', 'simNumber']) assert.ok(main.includes(name), `cloud-main reports ${name}`);
     assert.match(page, /\['people', 'People'\]/);
     assert.match(page, /#connect:\$\{/);
-    assert.ok(!/api\('people', \{/.test(page), 'the People page only reads');
+    assert.ok(!/api\('people', \{/.test(page), 'the People page changes things only through people/add, people/remove and people/restart');
   });
 });

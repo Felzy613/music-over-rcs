@@ -79,7 +79,7 @@ There are three ways to run it:
 | Album art, daily message, lists | Yes | Yes | Not wired in |
 | Official? | No: the bridge reverse-engineers Google Messages for web | No: the same kind of bridge | Yes |
 
-**More than one person (built, not live yet).** With `PEOPLE=name` in Render's environment the host can also serve someone else from their own "message yourself" chat and their own Google account: their own searches, follows, daily message and alerts, the same artist rules as yours (they cannot change them), and songs sent one file at a time, taking turns with yours. It is built and tested but not deployed, and parts of it stay unproven until tried with a real second phone: the bridge accepting a second login, the extra traffic against Render's 5 GB, and whether Google tolerates a second pairing from the same address. [How it runs](docs/cloud.md#other-people-people) has the steps and the list.
+**More than one person (deployed with nobody added, not tried live).** You add a name on the console's People tab (nothing to set in Render; the names are kept in the R2 bucket and the host restarts itself) and the host can also serve someone else from their own "message yourself" chat and their own Google account: their own searches, follows, daily message and alerts, the same artist rules as yours (they cannot change them), and songs sent one file at a time, taking turns with yours. It is built and tested, and parts of it stay unproven until tried with a real second phone: the bridge accepting a second login, the extra traffic against Render's 5 GB, and whether Google tolerates a second pairing from the same address. [How it runs](docs/cloud.md#other-people-people) has the steps and the list.
 
 ## Get started
 

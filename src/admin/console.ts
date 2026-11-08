@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Catalog } from '../catalog.ts';
+import type { PeopleAdmin } from '../cloud/people-desk.ts';
 import type { Follows } from '../library/follows.ts';
 import type { LibraryJobs } from '../library/jobs.ts';
 import { parseQuery } from '../query.ts';
@@ -58,6 +59,8 @@ export interface AdminDeps {
   signIn: SignIn;
   /** The Connect page's part of the host: linking Google Messages, the chat, OneDrive's sign-in. */
   connect: ConnectDeps;
+  /** The People tab's part of the host: the list of people (kept in the bucket) and the restart that sets a change up. */
+  people: PeopleAdmin;
   /** The OneDrive archive's report, when it is set up. */
   oneDrive(): Record<string, unknown>;
   now(): number;
@@ -135,6 +138,12 @@ const STANDING_TEXT = {
 } as const;
 
 const text = (value: unknown, max = 200): string => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max) : '');
+
+/** A refusal from the people list or the restart (they carry the HTTP status to answer with) as the console's own error; anything else is left alone. */
+function refusal(err: unknown): unknown {
+  const status = (err as { status?: unknown } | null)?.status;
+  return err instanceof Error && typeof status === 'number' && status >= 400 && status < 600 ? new AdminError(status, err.message) : err;
+}
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -316,12 +325,20 @@ export class AdminConsole implements AdminRouter {
   }
 
   /**
-   * The people besides the owner, read only: where each stands, what they were sent this month, and whether their phone gave the bridge its number
-   * and their own chat arrived (the onboarding gate). Taken from the host's status field by field, so nothing else that report may hold reaches the
-   * page; the console has no control here that edits Render (who is in PEOPLE is Render's environment).
+   * The people besides the owner: where each stands, what they were sent this month, and whether their phone gave the bridge its number and their
+   * own chat arrived (the onboarding gate). Taken from the host's status field by field, so nothing else that report may hold reaches the page.
+   * `manage` is the list itself (who is set in Render, who was added here, who waits for the restart); the changes are the `people/…` routes below.
+   * The console has no control that edits Render: names in PEOPLE there are shown as such and cannot be removed here.
    */
   async #people(): Promise<unknown> {
     const status = await this.#need('status', 'The status')();
+    // The list as the owner keeps it here (src/cloud/people-desk.ts): who is set in Render, who was added in the console, who is waiting for the restart.
+    let manage: unknown = null;
+    try {
+      manage = (await this.#deps.people?.overview()) ?? null;
+    } catch (err) {
+      manage = { error: err instanceof Error ? text(err.message, 300) : 'The list could not be read.' };
+    }
     const word = (value: unknown, max = 300): string | null => (typeof value === 'string' && value !== '' ? text(value, max) : null);
     const count = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
     const list = Array.isArray(status.people) ? (status.people as Array<Record<string, any>>) : [];
@@ -347,6 +364,7 @@ export class AdminConsole implements AdminRouter {
       }),
       ownerSentThisMonthMb: count(status.sentThisMonthMb),
       totalSentThisMonthMb: count(status.sentTotalThisMonthMb),
+      manage,
     };
   }
 
@@ -481,6 +499,12 @@ export class AdminConsole implements AdminRouter {
         return this.#connectOneDrive(body);
       case 'connect/test-alert':
         return this.#connectTestAlert(body);
+      case 'people/add':
+        return this.#addPerson(body);
+      case 'people/remove':
+        return this.#removePerson(body);
+      case 'people/restart':
+        return this.#restartHost(body);
       case 'account/set':
         return this.#setAccount(body);
       case 'account/clear':
@@ -744,6 +768,67 @@ export class AdminConsole implements AdminRouter {
     await testAlert();
     this.audit.add({ what: 'left a test alert' });
     return { ok: true, message: 'Left a test alert. The Worker mails it within five minutes.' };
+  }
+
+  // --- the people who use the bot (src/cloud/people-desk.ts) ---
+
+  async #addPerson(body: Record<string, unknown>): Promise<unknown> {
+    const people = this.#need('people', 'The list of people');
+    let done;
+    try {
+      done = await people.add(body.name);
+    } catch (err) {
+      throw refusal(err);
+    }
+    // The name and nothing else: no password or token exists on this side, and none is written here.
+    this.audit.add({ what: 'added a person', detail: done.id, to: done.pendingRestart ? 'saved; set up at the next restart' : 'saved' });
+    return {
+      ok: true,
+      id: done.id,
+      pendingRestart: done.pendingRestart,
+      restartAvailable: done.restartAvailable,
+      message: done.pendingRestart
+        ? `${done.id} is saved. The bot has to restart (about a minute) to set ${done.id} up; then link their phone on the Connect tab.`
+        : `${done.id} is back in the list. They were still running, so nothing needs to restart.`,
+    };
+  }
+
+  async #removePerson(body: Record<string, unknown>): Promise<unknown> {
+    const people = this.#need('people', 'The list of people');
+    if (body.confirm !== true) throw new AdminError(400, "Confirm first: log the person out of Google on their Connect page, then remove them. Nothing was changed.");
+    let done;
+    try {
+      done = await people.remove(body.name);
+    } catch (err) {
+      throw refusal(err);
+    }
+    this.audit.add({ what: 'removed a person', detail: done.id, to: done.pendingRestart ? 'out of the list; leaves at the next restart' : 'out of the list' });
+    return {
+      ok: true,
+      id: done.id,
+      wasRunning: done.wasRunning,
+      pendingRestart: done.pendingRestart,
+      restartAvailable: done.restartAvailable,
+      message: done.pendingRestart ? `${done.id} is out of the list. The bot has to restart (about a minute) for them to leave.` : `${done.id} is out of the list. They had not been set up yet, so nothing needs to restart.`,
+    };
+  }
+
+  /**
+   * Restarts the whole host so the list takes effect. The answer goes out first; the host is asked a few seconds later. Never without the
+   * confirmation in the body, never twice at once, and only when something is waiting for it.
+   */
+  async #restartHost(body: Record<string, unknown>): Promise<unknown> {
+    const people = this.#need('people', 'The list of people');
+    if (body.confirm !== true) throw new AdminError(400, 'Confirm the restart first: it stops the bot for about a minute. Nothing was restarted.');
+    let done;
+    try {
+      done = await people.restart();
+    } catch (err) {
+      throw refusal(err);
+    }
+    this.audit.add({ what: 'restarted the host', detail: 'to apply the list of people', to: `asked to restart in ${done.inSeconds} s` });
+    this.#deps.log?.('admin console: the host is being restarted to apply the list of people');
+    return { ok: true, inSeconds: done.inSeconds, message: 'Restarting: the bot is away for about a minute.' };
   }
 
   // --- the owner's own user name and password ---

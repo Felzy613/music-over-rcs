@@ -3,12 +3,16 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { boot, readCloudConfig, type Booted, type BootSys } from '../../src/cloud/boot.ts';
 import { openFrontDoor, type FrontDoor } from '../../src/cloud/front-door.ts';
+import { RESTART_EXIT_CODE, RESTART_SIGNAL } from '../../src/cloud/host-restart.ts';
 import { s3LeaseStore } from '../../src/cloud/lease.ts';
+import { PEOPLE_OBJECT } from '../../src/cloud/people-list.ts';
 import { s3FromEnv } from '../../src/cloud/s3.ts';
 import { LeaseClient, Supervisor } from '../../src/cloud/supervise.ts';
 
 // The container's PID 1 work: see docs/cloud.md. It takes the lease, restores the databases, writes the settings and keeps
-// the replicator, homeserver, bridge and bot running; on SIGTERM it stops them in order and lets the lease go.
+// the replicator, homeserver, bridge and bot running; on SIGTERM it stops them in order and lets the lease go. The bot can ask it to restart
+// (SIGUSR2, from the management console after the people list changed): it stops the same way and then exits with a failure code, so the
+// container ends and Render starts it again, which is a deploy's start (src/cloud/host-restart.ts).
 const log = (line: string) => console.log(`${new Date().toISOString()} [host] ${line}`);
 
 let config;
@@ -63,12 +67,14 @@ const signingKey = bucket
       },
     }
   : undefined;
+// The people added from the console are read here once, at the very start (src/cloud/people-list.ts); a failure is the boot sequence's to log.
+const savedPeople = bucket ? { get: async () => (await bucket.get(PEOPLE_OBJECT))?.text } : undefined;
 // Render allows 30 s between SIGTERM and SIGKILL, and four processes are stopped one after another.
 const supervisor = new Supervisor({ log, graceMs: 6000 });
 
 let booted: Booted | undefined;
 let terminating = false;
-const terminate = async (signal: string): Promise<void> => {
+const terminate = async (signal: string, exitCode = 0): Promise<void> => {
   if (terminating) return;
   terminating = true;
   log(`${signal} received`);
@@ -76,14 +82,21 @@ const terminate = async (signal: string): Promise<void> => {
     if (booted) await booted.shutdown();
     else await lease?.release();
   } finally {
-    process.exit(0);
+    process.exit(exitCode);
   }
 };
 process.on('SIGTERM', () => void terminate('SIGTERM'));
 process.on('SIGINT', () => void terminate('SIGINT'));
+// The console asked for a restart: the same orderly stop, then a failure exit so that the container ends and is started again. While the
+// processes stop, the front door's page says so instead of "starting".
+process.on(RESTART_SIGNAL, () => {
+  if (terminating) return;
+  door.setPhase('restarting, as the console asked');
+  void terminate(`${RESTART_SIGNAL} (restart asked for by the console)`, RESTART_EXIT_CODE);
+});
 
 try {
-  booted = await boot({ config, env: process.env, log, sys, supervisor, lease, onLost: () => process.exit(1), onPhase: (text) => door.setPhase(text), signingKey });
+  booted = await boot({ config, env: process.env, log, sys, supervisor, lease, onLost: () => process.exit(1), onPhase: (text) => door.setPhase(text), signingKey, ...(savedPeople ? { savedPeople } : {}) });
   log(`up as ${config.holder}`);
 } catch (err) {
   console.error(`cannot start: ${err instanceof Error ? err.message : String(err)}`);

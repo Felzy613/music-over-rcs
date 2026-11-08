@@ -52,7 +52,7 @@ Pairing gives the bridge your whole Google Messages account, and the bridge acts
 
 ## Other people on the host
 
-If `PEOPLE` names someone else ([How it runs](cloud.md#other-people-people); built, not deployed), the host holds their **Google Messages session** (the cookies they pasted, as the bridge's login) in the bridge's database and its R2 backups, as it holds yours, and it acts as them. What that means for them, and what to tell them before you link them:
+If someone else has been added (on the console's People tab, or in `PEOPLE`; [How it runs](cloud.md#other-people-people); deployed with nobody added), the host holds their **Google Messages session** (the cookies they pasted, as the bridge's login) in the bridge's database and its R2 backups, as it holds yours, and it acts as them. What that means for them, and what to tell them before you link them:
 
 **What is stored, and where**
 
@@ -72,7 +72,7 @@ If `PEOPLE` names someone else ([How it runs](cloud.md#other-people-people); bui
 
 **Tell them beforehand** that you can read their requests; that the link to Google is unofficial and can drop; that the service is on free plans and can be down or suspended; that the artist rules are yours and not theirs to change; and that a monthly limit applies.
 
-**Taking them off:** unlink them from their own window first, then drop their name from `PEOPLE`; their Google session leaves the bridge with the unlink and stays in the backups for at least 72 hours. Their messages stay in the homeserver's database until you delete them.
+**Taking them off:** unlink them from their own window first, then remove them on the People tab (or take a name set in `PEOPLE` out of Render); their Google session leaves the bridge with the unlink and stays in the backups for at least 72 hours. Their messages stay in the homeserver's database until you delete them.
 
 ## The bridge and the bot act as you
 

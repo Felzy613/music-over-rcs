@@ -1,15 +1,18 @@
 import { spawn } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { AdminAccount, Sessions, sessionBinding } from '../src/admin/account.ts';
-import { AdminConsole, type ConnectDeps } from '../src/admin/console.ts';
+import { AdminConsole, type AdminRouter, type ConnectDeps } from '../src/admin/console.ts';
 import { LogRing, secretValues } from '../src/admin/log-ring.ts';
 import { SignIn } from '../src/admin/sign-in.ts';
 import { Catalog } from '../src/catalog.ts';
 import { Onboarding } from '../src/cloud/onboarding.ts';
+import type { HostRestarter } from '../src/cloud/host-restart.ts';
+import { PeopleDesk, type PeopleAdmin } from '../src/cloud/people-desk.ts';
+import { PEOPLE_OBJECT, PeopleList, mergePeople, readSavedPeople, serializePeople } from '../src/cloud/people-list.ts';
 import { createCloudWeb } from '../src/cloud/web.ts';
 import { catalogFollows } from '../src/library/follows.ts';
 import { LibraryJobs } from '../src/library/jobs.ts';
-import { personOf } from '../src/people.ts';
+import { parsePeople, personOf } from '../src/people.ts';
 import { MusicTable } from '../src/sources/music-table.ts';
 import { YouTubeMusic } from '../src/sources/youtube-music.ts';
 import { createNewReleases, ZemerReleases } from '../src/sources/zemer-releases.ts';
@@ -18,6 +21,7 @@ import { startMockMusicTable } from '../test/helpers/mock-music-table.ts';
 import { artistId, startMockYouTubeMusic } from '../test/helpers/mock-youtube-music.ts';
 import { startMockZemerContent, type MockArtist } from '../test/helpers/mock-zemer-content.ts';
 import { startMockZemerReleases } from '../test/helpers/mock-zemer-releases.ts';
+import { FakeBucket } from '../test/helpers/fake-bucket.ts';
 
 // The management console (docs/admin.md) on made-up data, with no accounts and no network: the real console and door in front of
 // the mock servers the tests use (a Zemer artist list that has turned the bot away, YouTube Music, Zemer's releases feed,
@@ -119,12 +123,65 @@ ring.add('YouTube Music: downloading abc failed: HTTP 403', 'warn');
 ring.add('could not read Zemer\'s new releases: the feed answered HTTP 500', 'error');
 
 const startedAt = Date.now() - 3 * 3600_000 - 125_000;
+
+// The People tab. dina is "set in Render" (it cannot be removed here), alice was added in the console two days ago (her name is in a bucket kept in
+// memory). Adding or removing someone and confirming the restart only PRETENDS to restart: the console answers 503 for a few seconds, then the host
+// is "back" with the saved list. Nothing real is restarted, saved or sent.
+const DEMO_RENDER = ['dina'];
+const demoBucket = new FakeBucket();
+await demoBucket.s3.put(PEOPLE_OBJECT, serializePeople([{ id: 'alice', addedAt: new Date(Date.now() - 2 * 86400_000).toISOString() }]));
+let demoRunning = ['dina', 'alice'];
+let demoBootId = startedAt;
+let hostDown = false;
+let restartPending = false;
+const demoRestarter: HostRestarter = {
+  available: () => ({ ok: true }),
+  pending: () => restartPending,
+  request() {
+    restartPending = true;
+    log('demo: the host would be asked to restart in 3 s (nothing real is restarted)');
+    setTimeout(() => {
+      hostDown = true;
+      log('demo: the host is "restarting"…');
+      setTimeout(async () => {
+        const saved = readSavedPeople((await demoBucket.s3.get(PEOPLE_OBJECT))?.text, { reserved: ['me'] }).people;
+        demoRunning = mergePeople(parsePeople(DEMO_RENDER.join(' ')).people, saved, { reserved: ['me'] }).people.map((one) => one.id);
+        demoBootId = Date.now();
+        restartPending = false;
+        desk = buildDesk();
+        hostDown = false;
+        log('demo: the host is back');
+      }, 8000);
+    }, 3000);
+    return { inSeconds: 3 };
+  },
+};
+const buildDesk = (): PeopleDesk => new PeopleDesk({ fromRender: DEMO_RENDER, running: demoRunning, reserved: ['me'], list: new PeopleList({ store: demoBucket.s3, reserved: ['me'] }), restarter: demoRestarter, bootId: demoBootId, log });
+let desk = buildDesk();
+const peopleAdmin: PeopleAdmin = { overview: () => desk.overview(), add: (name) => desk.add(name), remove: (name) => desk.remove(name), restart: () => desk.restart() };
+/** A person who is running but has never linked a phone (everyone but alice, who goes through the whole gate). */
+const stranger = (id: string) => ({
+  id,
+  phase: 'setup',
+  roomMissing: false,
+  room: null,
+  roomGone: null,
+  error: null,
+  bridge: { state: undefined },
+  simNumber: null,
+  onboarding: { step: 'not-linked', onboarded: false, warn: false, message: 'Not linked to Google Messages yet.' },
+  problems: [],
+  sentThisMonthMb: 0,
+  monthlyLimitMb: 1000,
+});
+const strangerSays = new Map<string, Array<{ at: string; text: string }>>();
 admin.provide({
   catalog,
   env,
   startedAt,
   log,
   ring,
+  people: peopleAdmin,
   settings,
   signIn,
   whitelist,
@@ -148,7 +205,7 @@ admin.provide({
     oneDrive: { connected: true, savedThisMonthMb: 312, monthlyLimitMb: 1500 },
     sentThisMonthMb: 1900,
     sentTotalThisMonthMb: 1900 + 86,
-    people: [alice()],
+    people: demoRunning.map((id) => (id === 'alice' ? alice() : stranger(id))),
     edge: { lease: { holder: 'srv-demo-instance', expiresAt: Date.now() + 40_000 }, watchdog: Date.now() - 90_000, alertsWaiting: 0 },
   }),
 });
@@ -186,6 +243,10 @@ function alice() {
 }
 const connect: ConnectDeps = {
   async state(person) {
+    if (person !== undefined && person !== 'alice') {
+      const one = stranger(person);
+      return { phase: one.phase, botEnabled: true, room: null, roomGone: null, bridge: one.bridge, problems: [], person, error: null, simNumber: null, onboarding: one.onboarding };
+    }
     if (person === 'alice') {
       const one = alice();
       return { phase: one.phase, botEnabled: true, room: one.room, roomGone: null, bridge: one.bridge, problems: [], person: 'alice', error: null, simNumber: one.simNumber, onboarding: one.onboarding };
@@ -201,6 +262,12 @@ const connect: ConnectDeps = {
   },
   pair: {
     async send(text, person) {
+      if (person !== undefined && person !== 'alice') {
+        const lines = strangerSays.get(person) ?? [];
+        strangerSays.set(person, lines);
+        lines.push({ at: new Date().toISOString(), text: `Demo bridge: ${person} is not linked in this demo (only alice goes through the whole walk).` });
+        return;
+      }
       if (person === 'alice') {
         const reply = (line: string): void => void aliceSays.push({ at: new Date().toISOString(), text: line });
         if (text === 'login google') reply('Demo bridge: open https://messages.google.com/web in a private window, start signing in, and copy the request the page makes as cURL. Then send it to me here.');
@@ -224,13 +291,13 @@ const connect: ConnectDeps = {
       }
     },
     async log(person) {
-      return person === 'alice' ? aliceSays : bridgeSays;
+      return person === 'alice' ? aliceSays : person !== undefined ? (strangerSays.get(person) ?? []) : bridgeSays;
     },
   },
-  rooms: (phone, person) => (person === 'alice' ? (aliceChat ? ['!alice:localhost'] : []) : phone && phone.length < 9 ? [] : ['!selfchat:localhost']),
+  rooms: (phone, person) => (person === 'alice' ? (aliceChat ? ['!alice:localhost'] : []) : person !== undefined ? [] : phone && phone.length < 9 ? [] : ['!selfchat:localhost']),
   setRoom: (room) => void (chosenRoom = room),
-  knownPhone: (person) => (person === 'alice' ? undefined : '5551234567'),
-  people: () => [{ id: 'alice' }],
+  knownPhone: (person) => (person !== undefined ? undefined : '5551234567'),
+  people: () => demoRunning.map((id) => ({ id })),
   oneDrive: {
     status: () => ({ connected: driveLogin === 'done', savedThisMonthMb: 312, monthlyLimitMb: 1500, login: driveLogin === 'pending' ? { state: 'pending', verificationUri: 'https://microsoft.com/devicelogin', userCode: 'ABCD1234' } : { state: driveLogin } }),
     async start() {
@@ -243,15 +310,26 @@ const connect: ConnectDeps = {
 };
 admin.provide({ connect });
 
+// While the pretend restart lasts the console's API answers 503 "starting", as the real front door does, so the page's "restarting…" state can be seen.
+const door: AdminRouter = {
+  handle: async (req, res) => {
+    if (hostDown && (req.url ?? '').startsWith('/admin/api/')) {
+      res.writeHead(503, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '5', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ error: 'starting', phase: 'restarting (demo)' }));
+      return true;
+    }
+    return admin.handle(req, res);
+  },
+};
 const web = createCloudWeb({
   adminToken: TOKEN,
-  admin,
+  admin: door,
   signIn,
   status: () => ({}),
   pair: { send: async () => {}, log: async () => [] },
   rooms: () => [],
   setRoom: () => {},
-  people: () => [{ id: 'alice' }],
+  people: () => demoRunning.map((id) => ({ id })),
   canImport: () => false,
   importCatalog: () => ({}),
 });

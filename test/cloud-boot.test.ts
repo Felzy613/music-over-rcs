@@ -40,7 +40,7 @@ interface Setup {
   restoreOverlap(): number;
 }
 
-function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; keysCode?: number; signingKey?: BootDeps['signingKey']; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string }; accountFor?: (user: string, attempt: number) => { code: number; output: string } | Promise<{ code: number; output: string }> } = {}): Setup {
+function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; keysCode?: number; signingKey?: BootDeps['signingKey']; savedPeople?: BootDeps['savedPeople']; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string }; accountFor?: (user: string, attempt: number) => { code: number; output: string } | Promise<{ code: number; output: string }> } = {}): Setup {
   const env = { ...ENV, ...options.env } as NodeJS.ProcessEnv;
   if (options.backup === false) for (const name of ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) delete env[name];
   const config = readCloudConfig(env);
@@ -122,6 +122,8 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
     onLost: () => void events.push('onLost'),
     onPhase: (text) => void phases.push(text),
     ...(options.signingKey ? { signingKey: options.signingKey } : {}),
+    ...(options.savedPeople ? { savedPeople: options.savedPeople } : {}),
+    pid: 4242,
     renewEveryMs: 10,
   };
   // The lease is granted at once unless a test wants to hold it back.
@@ -638,5 +640,237 @@ describe('people besides the owner', () => {
       // The files it writes are the homeserver's and the bridge's settings, not the bot's.
       for (const [path, text] of s.files) for (const password of everyPassword) assert.ok(!text.includes(password), `${path} has a password`);
     });
+  });
+});
+
+describe('people added in the console (the saved list in the bucket)', () => {
+  const registrations = (s: Setup) => s.commands.filter((c) => c.command.endsWith('register_new_matrix_user')).map((c) => c.args[c.args.indexOf('-u') + 1]!);
+  const botOf = (s: Setup) => s.specs.find((spec) => spec.name === 'bot')!;
+  const bridgeConfigOf = (s: Setup) => s.files.get(pathsFor('/data').bridgeConfig)!;
+  const logs = (s: Setup) => s.events.filter((event) => event.startsWith('log ')).map((event) => event.slice(4));
+  const saved = (...entries: unknown[]) => JSON.stringify({ version: 1, people: entries });
+  /** A stand-in for the bucket's object: what it holds (or the error it gives), and how many times it was asked. */
+  const object = (value: string | undefined | Error | Array<string | undefined | Error>) => {
+    const answers = Array.isArray(value) ? [...value] : [value];
+    let asked = 0;
+    return {
+      asked: () => asked,
+      store: {
+        get: async () => {
+          asked++;
+          const answer = answers.length > 1 ? answers.shift() : answers[0];
+          if (answer instanceof Error) throw answer;
+          return answer;
+        },
+      },
+    };
+  };
+
+  describe('with nothing saved and nothing in PEOPLE, the owner’s start is what it always was', () => {
+    test('the same files, the same commands, the same log and the same environment for the bot, whether the bucket has no list or the host has no bucket', async () => {
+      const plain = setUp({ backup: false });
+      await boot(plain.deps);
+      await settle();
+      const none = object(undefined);
+      const absent = setUp({ savedPeople: none.store });
+      await boot(absent.deps);
+      await settle();
+      const plainWithBucket = setUp();
+      await boot(plainWithBucket.deps);
+      await settle();
+      // A bucket with no list changes nothing the host does: every file written, every command run and every line logged is the same.
+      assert.deepEqual([...absent.files], [...plainWithBucket.files]);
+      assert.deepEqual(absent.commands, plainWithBucket.commands);
+      // The one read of the list happens while the lease is waited for, so the lease's two lines fall a step earlier among the settings' first lines; nothing else moves.
+      const withoutLease = (events: string[]): string[] => events.filter((event) => !event.startsWith('lease.'));
+      assert.deepEqual(withoutLease(absent.events), withoutLease(plainWithBucket.events));
+      assert.deepEqual(absent.events.filter((event) => event.startsWith('lease.')), plainWithBucket.events.filter((event) => event.startsWith('lease.')));
+      assert.deepEqual(botOf(absent).env, botOf(plainWithBucket).env);
+      assert.equal(none.asked(), 1, 'one small read, once');
+      // And the settings written are the same ones a host with no bucket writes.
+      for (const path of [pathsFor('/data').bridgeConfig, pathsFor('/data').bridgeRegistration, pathsFor('/data').synapseConfig]) assert.equal(absent.files.get(path), plain.files.get(path), path);
+      assert.match(bridgeConfigOf(absent), /permissions:\n {8}"@me:localhost": admin$/);
+      assert.deepEqual(registrations(absent), ['me']);
+      for (const name of ['PEOPLE', 'PEOPLE_PASSWORDS', 'PEOPLE_IN_RENDER']) assert.equal(name in botOf(absent).env!, false, `${name} is not handed over`);
+    });
+
+    test('an empty saved list, and one with only blanks, are the same as none: nothing is logged', async () => {
+      for (const text of [saved(), '', '   \n', JSON.stringify({ people: [] })]) {
+        const s = setUp({ savedPeople: object(text).store });
+        await boot(s.deps);
+        await settle();
+        assert.deepEqual(registrations(s), ['me'], JSON.stringify(text));
+        assert.ok(!logs(s).some((line) => /people|PEOPLE/i.test(line)), `${JSON.stringify(text)}: ${logs(s).join(' | ')}`);
+        assert.equal('PEOPLE' in botOf(s).env!, false);
+      }
+    });
+
+    test('a host with no bucket never looks for a list', async () => {
+      const s = setUp({ backup: false });
+      await boot(s.deps);
+      assert.ok(!logs(s).some((line) => /saved|console/.test(line)));
+    });
+  });
+
+  describe('with people saved', () => {
+    test('they are set up like the people in PEOPLE: a bridge permission, an account, a password for the bot', async () => {
+      const s = setUp({ savedPeople: object(saved({ id: 'alice', addedAt: '2026-11-08T12:00:00.000Z' }, 'bob')).store });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s), ['me', 'alice', 'bob']);
+      assert.match(bridgeConfigOf(s), /permissions:\n {8}"@me:localhost": admin\n {8}"@alice:localhost": user\n {8}"@bob:localhost": user$/);
+      const env = botOf(s).env!;
+      assert.equal(env.PEOPLE, 'alice,bob');
+      assert.deepEqual([...parsePeoplePasswords(env.PEOPLE_PASSWORDS)], [['alice', personPassword(ENV.SECRET_KEY, 'alice')], ['bob', personPassword(ENV.SECRET_KEY, 'bob')]]);
+      assert.equal(env.PEOPLE_IN_RENDER, '', 'none of them was named in Render');
+      assert.ok(logs(s).includes('people added in the console: alice, bob'));
+      assert.equal(logs(s).filter((line) => /could not|damaged|JSON/.test(line)).length, 0);
+    });
+
+    test('they are merged with PEOPLE: the names in Render first, each name once, and the bot is told which came from Render', async () => {
+      const s = setUp({ env: { PEOPLE: 'zed alice' }, savedPeople: object(saved('alice', 'bob', 'zed', 'carol')).store });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s), ['me', 'zed', 'alice', 'bob', 'carol']);
+      assert.equal(botOf(s).env!.PEOPLE, 'zed,alice,bob,carol');
+      assert.equal(botOf(s).env!.PEOPLE_IN_RENDER, 'zed,alice');
+      assert.ok(logs(s).includes('people added in the console: bob, carol'));
+      assert.equal((bridgeConfigOf(s).match(/"@alice:localhost": user/g) ?? []).length, 1, 'one permission line each');
+    });
+
+    test('a value for PEOPLE_IN_RENDER or HOST_PID set by hand is replaced; the bot is told the host’s own id', async () => {
+      const s = setUp({ env: { PEOPLE: 'zed', PEOPLE_IN_RENDER: 'mallory', HOST_PID: '1' }, savedPeople: object(saved('bob')).store });
+      await boot(s.deps);
+      assert.equal(botOf(s).env!.PEOPLE_IN_RENDER, 'zed');
+      assert.equal(botOf(s).env!.HOST_PID, '4242');
+      const plain = setUp({ env: { PEOPLE_IN_RENDER: 'mallory' } });
+      await boot(plain.deps);
+      assert.equal('PEOPLE_IN_RENDER' in botOf(plain).env!, false, 'with no people a hand-set value is not passed on');
+    });
+
+    test('the settings are written, with the saved names in them, while the lease is still being waited for', async () => {
+      const s = setUp({ savedPeople: object(saved('alice')).store, holdLease: true });
+      const booting = boot(s.deps);
+      await settle(60);
+      assert.match(bridgeConfigOf(s), /"@alice:localhost": user/, 'the permission is written before the lease is granted');
+      assert.ok(!s.events.includes('lease.granted'));
+      assert.ok(!s.events.includes('supervisor.start'));
+      s.grantLease();
+      await booting;
+      await settle();
+      assert.deepEqual(registrations(s), ['me', 'alice']);
+    });
+
+    test('the list is read once, before any file is written', async () => {
+      const list = object(saved('alice'));
+      const s = setUp({ savedPeople: list.store });
+      await boot(s.deps);
+      assert.equal(list.asked(), 1);
+      assert.ok(at(s.events, 'log people added') < at(s.events, 'write ' + pathsFor('/data').synapseConfig));
+    });
+  });
+
+  describe('a list that cannot be used never stops the host', () => {
+    const startedAlone = async (s: Setup): Promise<void> => {
+      await boot(s.deps);
+      await settle();
+      assert.ok(s.events.includes('supervisor.start'), 'the host started');
+      assert.deepEqual(registrations(s), ['me'], 'with the owner’s account');
+      assert.match(bridgeConfigOf(s), /permissions:\n {8}"@me:localhost": admin$/);
+      assert.equal('PEOPLE_PASSWORDS' in botOf(s).env!, false);
+    };
+
+    test('damaged JSON: one line says so, and PEOPLE is used alone', async () => {
+      for (const text of ['{"people": [', 'not json', '[]', '{"people":"alice"}', 'x'.repeat(20_000)]) {
+        const s = setUp({ savedPeople: object(text).store });
+        await startedAlone(s);
+        const said = logs(s).filter((line) => line.includes('config/people.json'));
+        assert.equal(said.length, 1, `${text.slice(0, 20)}: ${logs(s).join(' | ')}`);
+        assert.match(said[0]!, /carrying on with the names in PEOPLE$/);
+        assert.ok(!said[0]!.includes('alice') && !said[0]!.includes('xxxx'), 'the content is not echoed');
+      }
+    });
+
+    test('damaged JSON with names in PEOPLE: those still work', async () => {
+      const s = setUp({ env: { PEOPLE: 'zed' }, savedPeople: object('not json').store });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s), ['me', 'zed']);
+      assert.equal(botOf(s).env!.PEOPLE, 'zed');
+      assert.equal(botOf(s).env!.PEOPLE_IN_RENDER, 'zed');
+    });
+
+    test('the bucket cannot be read: it is tried again once, then one line says so, and PEOPLE is used alone', async () => {
+      const list = object(new Error('R2 refused reading config/people.json (HTTP 500)'));
+      const s = setUp({ savedPeople: list.store });
+      await startedAlone(s);
+      assert.equal(list.asked(), 2);
+      const said = logs(s).filter((line) => line.includes('could not read the people added in the console'));
+      assert.deepEqual(said, ['could not read the people added in the console from the backup (R2 refused reading config/people.json (HTTP 500)); carrying on with the names in PEOPLE']);
+    });
+
+    test('a first failure and then an answer: the answer is used, and nothing is said', async () => {
+      const list = object([new Error('socket hang up'), saved('alice')]);
+      const s = setUp({ savedPeople: list.store });
+      await boot(s.deps);
+      await settle();
+      assert.equal(list.asked(), 2);
+      assert.deepEqual(registrations(s), ['me', 'alice']);
+      assert.ok(!logs(s).some((line) => /could not read the people/.test(line)));
+    });
+
+    test('a name in the list that cannot be used is left out and said; the others are kept', async () => {
+      const s = setUp({ savedPeople: object(saved('alice', 'Bad Name', 'me', 'gmessagesbot', 'bob')).store });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s), ['me', 'alice', 'bob']);
+      assert.equal(logs(s).filter((line) => line.startsWith('the saved list of people:') && line.endsWith('; left out')).length, 3);
+    });
+
+    test('a name that is the owner’s Matrix account is not a person', async () => {
+      const s = setUp({ env: { MATRIX_USER: 'dave' }, savedPeople: object(saved('dave', 'alice')).store });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s), ['dave', 'alice']);
+      assert.match(bridgeConfigOf(s), /"@dave:localhost": admin\n {8}"@alice:localhost": user$/);
+    });
+  });
+
+  describe('a stored name cannot reach the bridge’s settings or a command line as anything but a name', () => {
+    test('YAML and shell tricks in the list are left out; the permissions are only ever the owner’s and the real names', async () => {
+      const nasty = ['alice"\n        "@evil:localhost": admin\n        "x', 'alice; touch /tmp/pwned', '$(id)', 'bob`id`', 'carol:admin', 'dave\n- type: file', 'eve', '../../etc'];
+      const s = setUp({ savedPeople: object(saved(...nasty)).store });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s), ['me', 'eve']);
+      const config = bridgeConfigOf(s);
+      assert.doesNotMatch(config, /evil|pwned|\$\(|`|\.\.\//);
+      const permissions = config.slice(config.indexOf('permissions:'));
+      assert.deepEqual(permissions.split('\n').filter((line) => /@.*: (admin|user)/.test(line)).map((line) => line.trim()), ['"@me:localhost": admin', '"@eve:localhost": user']);
+      for (const c of s.commands) for (const arg of c.args) assert.doesNotMatch(arg, /pwned|evil/);
+    });
+
+    test('one stored entry that would split into two names is left out whole', async () => {
+      const s = setUp({ savedPeople: object(saved('alice bob', 'carol,dave')).store });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s), ['me']);
+    });
+  });
+
+  test('no more people than the host takes are set up, however long the list is', async () => {
+    const names = Array.from({ length: 30 }, (_, i) => `person${i}`);
+    const s = setUp({ savedPeople: object(saved(...names)).store });
+    await boot(s.deps);
+    await settle(60);
+    assert.equal(registrations(s).length, 1 + 10);
+  });
+
+  test('stopping the host while it waits for the lease still lets go of it, with people saved', async () => {
+    const s = setUp({ savedPeople: object(saved('alice')).store });
+    const booted = await boot(s.deps);
+    await booted.shutdown();
+    assert.ok(s.events.includes('lease.release'));
+    assert.ok(s.events.includes('supervisor.stop'));
   });
 });

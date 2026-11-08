@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,7 +8,9 @@ import { after, before, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { writeBridgeDb } from './helpers/bridge-db.ts';
 import { startMockMatrix, type MockMatrix } from './helpers/mock-matrix.ts';
+import { startFakeS3, type FakeS3Server } from './helpers/fake-s3-server.ts';
 import { listen, readBuffer, type Listening } from './helpers/servers.ts';
+import { PEOPLE_OBJECT, serializePeople } from '../src/cloud/people-list.ts';
 
 // The cloud host's entry (src/cloud-main.ts) run for real, as a process, against mock homeservers (behind one address, as the real one is), a
 // mock bridge and a bridge-database fixture, from a folder with no .env. With nobody in PEOPLE it starts exactly as it always did (the owner's
@@ -423,6 +425,137 @@ describe('the cloud host’s entry (src/cloud-main.ts)', () => {
       assert.equal(await exited, 0);
       assert.equal(state('matrix.room:alice'), ALICE_ROOM);
       assert.equal(state('matrix.room'), undefined, 'the owner’s room is the one given in MATRIX_ROOM_ID, and is not rewritten');
+    });
+  });
+  // The console's People tab on the real entry: the routes, the list in the bucket, and the signal to the host's process (a stand-in that only
+  // writes down that it was signalled).
+  describe('the People tab: the list in the bucket and the host’s restart', () => {
+    let s3: FakeS3Server;
+    before(async () => {
+      s3 = await startFakeS3();
+    });
+    after(async () => {
+      await s3.close();
+    });
+    beforeEach(() => {
+      s3.objects.clear();
+      s3.requests.length = 0;
+    });
+
+    /** A process standing for the host: it records the signal the console sends it. */
+    function standInHost() {
+      const marker = join(folder, 'host-signalled.txt');
+      const script = join(folder, 'host.mjs');
+      writeFileSync(script, `import { writeFileSync } from 'node:fs';\nprocess.on('SIGUSR2', () => writeFileSync(${JSON.stringify(marker)}, String(Date.now())));\nsetInterval(() => {}, 1000);\n`);
+      const host = spawn(process.execPath, [script], { stdio: 'ignore' });
+      running.push(host);
+      return { pid: host.pid!, signalled: () => existsSync(marker), host };
+    }
+    const withBucket = (env: Record<string, string>, hostPid?: number): Record<string, string> => ({
+      ...env,
+      R2_ENDPOINT: s3.url,
+      R2_BUCKET: 'mors-state',
+      R2_ACCESS_KEY_ID: 'id',
+      R2_SECRET_ACCESS_KEY: 'secret',
+      ...(hostPid ? { HOST_PID: String(hostPid) } : {}),
+    });
+
+    test('add saves the name in the bucket and restarts nothing; restart needs the confirmation, answers first, signals the host later, and only once', async () => {
+      const stand = standInHost();
+      const db = bridgeDatabase({ alice: false });
+      const { child, output, exited, json, post } = run(withBucket(baseEnv(db), stand.pid));
+      await until(() => /signed in as @me:localhost, watching room/.test(output.out), () => `the bot to start in ${output.out}${output.err}`);
+
+      const before = await json('/admin/api/people');
+      assert.deepEqual([before.people, before.manage.entries, before.manage.canChange, before.manage.restart.available, before.manage.pendingRestart], [[], [], true, true, false]);
+
+      assert.equal((await post('/admin/api/people/add', { name: 'Alice' })).status, 200);
+      assert.deepEqual(JSON.parse(s3.objects.get(PEOPLE_OBJECT)!.body).people.map((one: { id: string }) => one.id), ['alice']);
+      const after = await json('/admin/api/people');
+      assert.deepEqual(after.manage.entries.map((entry: { id: string; source: string; state: string }) => `${entry.id}:${entry.source}:${entry.state}`), ['alice:console:adding']);
+      assert.equal(after.manage.pendingRestart, true);
+      assert.equal(stand.signalled(), false, 'adding restarts nothing by itself');
+
+      assert.equal((await post('/admin/api/people/restart', {})).status, 400, 'no confirmation, no restart');
+      const answered = Date.now();
+      const done = await post('/admin/api/people/restart', { confirm: true });
+      assert.equal(done.status, 200);
+      assert.equal(((await done.json()) as { inSeconds: number }).inSeconds, 3);
+      assert.equal(stand.signalled(), false, 'the page has its answer before the host is asked');
+      assert.equal((await post('/admin/api/people/restart', { confirm: true })).status, 409, 'a second one while it is on its way');
+      assert.equal((await post('/admin/api/people/add', { name: 'bob' })).status, 409, 'and no change to the list');
+      await until(() => stand.signalled(), 'the host to be signalled');
+      assert.ok(Date.now() - answered >= 2500, 'a few seconds after the answer');
+      const audit = ((await json('/admin/api/audit')).entries as Array<{ what: string; detail?: string }>).map((entry) => `${entry.what}${entry.detail ? `: ${entry.detail}` : ''}`);
+      assert.deepEqual(audit, ['restarted the host: to apply the list of people', 'added a person: alice']);
+      assert.ok(!output.out.includes('secret'), 'no secret in the log');
+      child.kill('SIGTERM');
+      assert.equal(await exited, 0);
+      stand.host.kill('SIGKILL');
+    });
+
+    test('a name set in Render is shown as Render’s and cannot be removed; a name saved in the bucket is the console’s and can; each is told apart from what is running', async () => {
+      s3.objects.set(PEOPLE_OBJECT, { body: serializePeople([{ id: 'bob', addedAt: '2026-11-08T12:00:00.000Z' }]), etag: '"saved"' });
+      const db = bridgeDatabase();
+      // What the host hands the bot: the merged list in PEOPLE, and which of those Render named.
+      const env = withBucket({ ...baseEnv(db), PEOPLE: 'alice', PEOPLE_PASSWORDS: `alice:${aliceMock.password}`, PEOPLE_IN_RENDER: 'alice' });
+      const { child, output, exited, json, post } = run(env);
+      await until(() => /\[alice\] signed in as @alice:localhost/.test(output.out) && /Z signed in as @me:localhost/.test(output.out), () => `both chats in ${output.out}${output.err}`);
+      const view = await json('/admin/api/people');
+      assert.deepEqual(view.manage.entries.map((entry: { id: string; source: string; state: string }) => `${entry.id}:${entry.source}:${entry.state}`), ['alice:render:running', 'bob:console:adding']);
+      assert.deepEqual(view.people.map((one: { id: string; phase: string }) => [one.id, one.phase]), [['alice', 'running']]);
+      const refused = await post('/admin/api/people/remove', { name: 'alice', confirm: true });
+      assert.equal(refused.status, 409);
+      assert.match(((await refused.json()) as { error: string }).error, /set in the PEOPLE variable in Render/);
+      assert.equal((await post('/admin/api/people/remove', { name: 'bob' })).status, 400, 'without the confirmation');
+      assert.equal((await post('/admin/api/people/remove', { name: 'bob', confirm: true })).status, 200);
+      assert.deepEqual(JSON.parse(s3.objects.get(PEOPLE_OBJECT)!.body).people, []);
+      assert.equal((await post('/admin/api/people/restart', { confirm: true })).status, 409, 'nothing is waiting any more');
+      child.kill('SIGTERM');
+      assert.equal(await exited, 0);
+    });
+
+    test('without the bucket the list cannot be kept and the page is told why in plain words; without HOST_PID the host cannot be asked', async () => {
+      const db = bridgeDatabase({ alice: false });
+      const { child, output, exited, json, post } = run(baseEnv(db));
+      await until(() => /signed in as @me:localhost, watching room/.test(output.out), () => `the bot to start in ${output.out}${output.err}`);
+      const view = await json('/admin/api/people');
+      assert.equal(view.manage.canChange, false);
+      assert.match(view.manage.whyNot, /R2 settings/);
+      assert.equal(view.manage.restart.available, false);
+      const add = await post('/admin/api/people/add', { name: 'alice' });
+      assert.equal(add.status, 409);
+      assert.match(((await add.json()) as { error: string }).error, /PEOPLE in Render still works/);
+      child.kill('SIGTERM');
+      assert.equal(await exited, 0);
+    });
+
+    test('with a bucket but no HOST_PID the name is saved and the restart says to use Render', async () => {
+      const db = bridgeDatabase({ alice: false });
+      const { child, output, exited, json, post } = run(withBucket(baseEnv(db)));
+      await until(() => /signed in as @me:localhost, watching room/.test(output.out), () => `the bot to start in ${output.out}${output.err}`);
+      const added = await json('/admin/api/people').then(() => post('/admin/api/people/add', { name: 'alice' }));
+      assert.equal(added.status, 200);
+      assert.equal(((await added.json()) as { restartAvailable: boolean }).restartAvailable, false);
+      const restart = await post('/admin/api/people/restart', { confirm: true });
+      assert.equal(restart.status, 409);
+      assert.match(((await restart.json()) as { error: string }).error, /Restart the service in Render/);
+      child.kill('SIGTERM');
+      assert.equal(await exited, 0);
+    });
+
+    test('a list in the bucket that cannot be read is said on the tab and nothing can be changed, while the bot answers as ever', async () => {
+      s3.unreadable.add(PEOPLE_OBJECT);
+      const db = bridgeDatabase({ alice: false });
+      const { child, output, exited, json, post } = run(withBucket(baseEnv(db)));
+      await until(() => /signed in as @me:localhost, watching room/.test(output.out), () => `the bot to start in ${output.out}${output.err}`);
+      await answersHelp(ownerMock, 'the owner');
+      const view = await json('/admin/api/people');
+      assert.equal(view.manage.canChange, false);
+      assert.match(view.manage.whyNot, /could not be read from R2/);
+      assert.equal((await post('/admin/api/people/add', { name: 'alice' })).status, 503);
+      child.kill('SIGTERM');
+      assert.equal(await exited, 0);
     });
   });
 });

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { formatPeoplePasswords, parsePeople, type Person } from '../people.ts';
+import { mergePeople, readSavedPeople } from './people-list.ts';
 import { bridgeRegistration, patchBridgeConfig, pathsFor, personPassword, SYNAPSE_LOG_CONFIG, synapseConfig, type BridgeOptions, type CloudPaths } from './provision.ts';
 import type { ChildSpec, LeaseState } from './supervise.ts';
 
@@ -16,8 +17,9 @@ export interface CloudConfig {
   user: string;
   password: string;
   /**
-   * The other people who use the bot (PEOPLE), in the order listed: each gets a Matrix account here, a bridge permission, and a password
-   * derived from `master` that the host hands the bot. Empty (the usual case) means only the owner; nothing below changes anything then.
+   * The other people who use the bot named in the PEOPLE variable, in the order listed. `boot()` adds the ones saved from the console
+   * (`BootDeps.savedPeople`); each of them all gets a Matrix account here, a bridge permission, and a password derived from `master` that
+   * the host hands the bot. Empty (the usual case) means only the owner; nothing below changes anything then.
    */
   people: Person[];
   /** What was wrong with the names in PEOPLE that were left out, one sentence each, for the log (a typo in Render must not stop the host). */
@@ -112,6 +114,14 @@ export interface BootDeps {
    * tenth of a CPU is 15 to 20 seconds of Python while the bot is away.
    */
   signingKey?: { get(): Promise<string | undefined>; put(text: string): Promise<void> };
+  /**
+   * The people added from the console's People tab, as stored (src/cloud/people-list.ts): the text of one small object in the bucket, or
+   * nothing when there is none. Read once, at the very start, and added to the names in PEOPLE. It can never stop the start: a failure
+   * to read it is logged and the names in PEOPLE are used alone. Without it (no bucket) only PEOPLE counts, exactly as before.
+   */
+  savedPeople?: { get(): Promise<string | undefined> };
+  /** This host's own process id, which the bot is told (HOST_PID) so the console can ask the host to restart; default `process.pid`. */
+  pid?: number;
   renewEveryMs?: number;
 }
 
@@ -147,15 +157,43 @@ export async function boot(deps: BootDeps): Promise<Booted> {
 
   const phase = (text: string): void => deps.onPhase?.(text);
   for (const problem of config.peopleProblems) log(problem);
-  const bridge: BridgeOptions = {
+  // Everyone besides the owner: the names in PEOPLE, then the ones added from the console. Set at the start of `provision()`, which is
+  // the first thing that needs them; until then (and always, when nothing was added) it is what PEOPLE said.
+  let people: Person[] = config.people;
+  const bridgeOptions = (): BridgeOptions => ({
     domain: config.serverName,
     homeserverUrl: HOMESERVER,
     appserviceUrl: BRIDGE,
     port: config.ports.bridge,
     master: config.master,
     user: config.user,
-    people: config.people,
+    people,
     databaseUri: `file:${paths.bridgeDb}?_txlock=immediate`,
+  });
+
+  // The people added from the console are kept in the bucket (src/cloud/people-list.ts). This never throws, never waits more than the
+  // bucket client's own timeout twice, and says nothing when there is nothing saved: an R2 hiccup or a damaged object must not keep the
+  // owner's bot from starting, so the names in PEOPLE are used alone and one line says why.
+  const addSavedPeople = async (): Promise<void> => {
+    const store = deps.savedPeople;
+    if (!store) return;
+    let text: string | undefined;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        text = await store.get();
+        break;
+      } catch (err) {
+        if (attempt >= 2) return void log(`could not read the people added in the console from the backup (${err instanceof Error ? err.message : String(err)}); carrying on with the names in PEOPLE`);
+        await sys.sleep(2000);
+      }
+    }
+    const reserved = [config.user];
+    const saved = readSavedPeople(text, { reserved });
+    const merged = mergePeople(config.people, saved.people, { reserved });
+    // A damaged object is one line (it says it is not used); a name left out of it is a line each.
+    for (const problem of [...saved.problems, ...merged.problems]) log(saved.damaged ? `${problem}; carrying on with the names in PEOPLE` : problem);
+    people = merged.people;
+    if (merged.added.length > 0) log(`people added in the console: ${merged.added.join(', ')}`);
   };
 
   // The settings come first, and beside the wait for the lease. They touch neither the databases nor Google's session, only this
@@ -163,6 +201,8 @@ export async function boot(deps: BootDeps): Promise<Booted> {
   // while the old host is still letting go keeps it out of the time the bot is away. A failure is held until the lease is ours,
   // so it is reported and cleaned up the same way as any other.
   const provision = async (): Promise<void> => {
+    if (deps.savedPeople) await addSavedPeople();
+    const bridge = bridgeOptions();
     for (const dir of [paths.data, paths.synapseDir, paths.bridgeDir, paths.mediaStore, config.runDir]) await sys.mkdir(dir);
     // Write the homeserver's and the bridge's settings (the same every start), and let Synapse make its signing key.
     await sys.writeFile(paths.synapseLog, SYNAPSE_LOG_CONFIG);
@@ -265,12 +305,17 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     // The people besides the owner: the bot signs in to each one's account (made below) with the password derived here, which it cannot
     // derive itself. The names handed over are the ones this host made accounts for. Only the bot gets them, and nothing logs them. With no
     // people the bot gets none (a value set by hand is not trusted), so the owner's start is as it always was.
-    if (config.people.length > 0) {
-      botEnv.PEOPLE = config.people.map((person) => person.id).join(',');
-      botEnv.PEOPLE_PASSWORDS = formatPeoplePasswords(config.people.map((person) => ({ id: person.id, password: personPassword(config.master, person.id) })));
+    if (people.length > 0) {
+      botEnv.PEOPLE = people.map((person) => person.id).join(',');
+      botEnv.PEOPLE_PASSWORDS = formatPeoplePasswords(people.map((person) => ({ id: person.id, password: personPassword(config.master, person.id) })));
+      // Which of them PEOPLE in Render named (the console can remove only the others).
+      botEnv.PEOPLE_IN_RENDER = config.people.map((person) => person.id).join(',');
     } else {
       delete botEnv.PEOPLE_PASSWORDS;
+      delete botEnv.PEOPLE_IN_RENDER;
     }
+    // The console asks this process to restart (a new person is set up at the start) by signalling it; only the host sets this.
+    botEnv.HOST_PID = String(deps.pid ?? process.pid);
     // The bot's web door is on a port of its own, on this machine only: the front door (src/cloud/front-door.ts) holds the port Render
     // watches, so that port is never closed while the bot starts, restarts or is replaced.
     botEnv.PORT = String(config.ports.bot);
@@ -290,7 +335,7 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     //    is derived from the master secret, the same every start, and is never logged (a failure's output is scrubbed of it).
     const accounts: Array<{ user: string; password: string; owner: boolean }> = [
       { user: config.user, password: config.password, owner: true },
-      ...config.people.map((person) => ({ user: person.id, password: personPassword(config.master, person.id), owner: false })),
+      ...people.map((person) => ({ user: person.id, password: personPassword(config.master, person.id), owner: false })),
     ];
     const makeAccount = async (account: { user: string; password: string; owner: boolean }): Promise<void> => {
       const id = `@${account.user}:${config.serverName}`;

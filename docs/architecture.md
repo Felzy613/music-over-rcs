@@ -73,6 +73,9 @@ src/simulate*.ts        the terminal and browser simulators
 scripts/                command-line tools: catalog, library, music-table, cloud-check, beeper-*, send-test, invite-tester, admin-demo (the console on made-up data)
 src/cloud-main.ts      the cloud host's entry: the web door (/healthz, /ping, /status, /login, /admin/* including the Connect tab; /pair redirects there), signing in, then matrix-main.ts (or, with people in `PEOPLE`, `startHost` and a seat for each person)
 src/cloud/onboarding.ts  the gate for a person besides the owner: linked, their phone gave the bridge a number, and their own chat arrived within ten minutes (state `onboarding.linked:<id>`, `onboarding.proved:<id>`); shown on the Connect and People tabs, in `/status` and in `cloud:check`
+src/cloud/people-list.ts  the people added from the console: `config/people.json` in the bucket (`PEOPLE_OBJECT`), `readSavedPeople`/`mergePeople` (every name through `parsePeople`; read once by `boot()`, never fatal), `PeopleList` (the bot's locked, conditional writes)
+src/cloud/people-desk.ts  what the People tab does: who is set in Render, who was added, who is running, add, remove, restart (`PeopleDesk`, behind the `people/…` console routes)
+src/cloud/host-restart.ts  asking the host to restart: `hostRestarter` (the bot signals `HOST_PID` with `SIGUSR2`, a few seconds after answering the page) and the exit code the host leaves with
 src/cloud/seats.ts     one seat per person (owner first): Matrix token, Pairing, room watch and room search of their own, and the loop that adds their chat to the host when their room is joined (used by cloud-main.ts when PEOPLE lists people)
 src/cloud/              the host's parts: boot (the start-up sequence), supervise (keeps the processes running; the lease client), lease and s3 (the lease in R2), provision (Synapse's and the bridge's settings), front-door (the web port, open from the first moment), web, pairing, room (what to do when the chat's room is gone), memory (who holds the container's memory), youtube-relay (YouTube songs by way of the Worker, through the bucket), check
 src/alert.ts            problems left as files in the bucket's alerts/ folder, for the Worker to mail
@@ -111,7 +114,7 @@ One SQLite file (WAL mode, shared safely by the bot and the command-line tools):
 
 ## More than one person
 
-With names in `PEOPLE` the bot serves other people from their own chats on the same container (how to bring someone in, the limits and what is unproven are in [How it runs](cloud.md#other-people-people); built, not deployed). The split is in two layers, in `src/host.ts`:
+With names in `PEOPLE`, or added on the console's People tab, the bot serves other people from their own chats on the same container (how to bring someone in, the limits and what is unproven are in [How it runs](cloud.md#other-people-people); deployed with nobody added). The split is in two layers, in `src/host.ts`:
 
 - **`startHost`** builds what is shared, once: the catalog, Zemer's artist list and the one send-time check (`checkAudio`), the song sources, YouTube Music, the releases feed, the library jobs, health, the add-ons, the delivery gate, the memory guard. It needs no chat.
 - **`addChat(host, person, …)`** builds one person's own: a Matrix client with their own token (and a counter of what it uploads), a bot, a runner, a bridge watch and their place among the jobs' recipients. The owner is added the same way, with the old keys. Every bot is built from the same `sources` and `checkAudio` objects, so Zemer's rules (no women, your allows and blocks, the per-song layer, the check at the send) hold for everyone; only the owner's bot has the artist commands (`artistList`), the assistant, the add-ons and the OneDrive archive.
