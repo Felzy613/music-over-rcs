@@ -143,6 +143,20 @@ rc_joins:
   remote:
     per_second: 1
     burst_count: 20
+# Signing in with a password: only the bot does it, from this machine, and only for an account it has no token for yet. Synapse's
+# default is a burst of 5 for the whole address, refilled one every 5 minutes, and the bot asks for a person added in the console
+# every 3 s until the host has made their account (about 20 s after the homeserver is up): five refusals used the allowance up,
+# and the new person's chat then stayed signed out for 7 minutes (2026-11-08, "ari").
+rc_login:
+  address:
+    per_second: 1
+    burst_count: 20
+  account:
+    per_second: 1
+    burst_count: 20
+  failed_attempts:
+    per_second: 1
+    burst_count: 20
 caches:
   global_factor: ${options.cacheFactor ?? 0.25}
 `;

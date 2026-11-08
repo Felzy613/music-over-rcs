@@ -202,6 +202,15 @@ describe('the homeserver config', () => {
     assert.match(text, /rc_joins:\n {2}local:\n {4}per_second: 1\n {4}burst_count: 20\n {2}remote:\n {4}per_second: 1\n {4}burst_count: 20\n/);
   });
 
+  test('lets the bot ask for a new person\'s account every few seconds without being turned away (2026-11-08)', () => {
+    // Synapse's default is a burst of 5 for the whole address, one more every 5 minutes: five asks before the account existed used it up.
+    const block = /rc_login:\n {2}address:\n {4}per_second: 1\n {4}burst_count: 20\n {2}account:\n {4}per_second: 1\n {4}burst_count: 20\n {2}failed_attempts:\n {4}per_second: 1\n {4}burst_count: 20\n/;
+    assert.match(text, block);
+    // Top-level keys only: the block sits among the others, and no key appears twice (a duplicate key makes the homeserver refuse to start).
+    const keys = text.split('\n').filter((line) => /^[a-z_]+:/.test(line)).map((line) => line.split(':')[0]);
+    assert.equal(new Set(keys).size, keys.length);
+  });
+
   test('has secrets derived from the master, the same each time', () => {
     assert.equal(text, synapseConfig({ serverName: 'localhost', paths, master: OPTIONS.master }));
     assert.notEqual(text, synapseConfig({ serverName: 'localhost', paths, master: 'another master' }));
