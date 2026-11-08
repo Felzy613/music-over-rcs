@@ -2,7 +2,7 @@
 
 A web page on the live bot, for seeing what the backend knows and does, changing the few settings that can change while it runs, starting refreshes, and deciding **which artists and which individual songs may be sent**. It replaces texting `pending`, `allow` and `block`, and most visits to Render's dashboard, but it does not replace Render: nothing here can change Render's environment, and there is no Render key anywhere in the bot.
 
-**Open it:** `https://<your service>.onrender.com/admin/`. You land on a sign-in page ([below](#signing-in)). The Setup page (`/pair`) and `/status` are behind the same sign-in; `/` still opens Setup.
+**Open it:** `https://<your service>.onrender.com/admin/`. You land on a sign-in page ([below](#signing-in)). `/status` is behind the same sign-in. The old setup page is now the console's **Connect** tab: `/pair` redirects there, and `/` to the console's front page.
 
 **Try it with no accounts:** `npm run simulate:admin -- --open` starts the real console and web door on made-up data (a Zemer list that has turned the bot away, a YouTube Music, a releases feed and a music-table.com, all mock servers from `test/helpers/`), on `127.0.0.1:8789`. Sign in with any user name and the password `demo-password` (`--auto` skips the page, on that machine only). Nothing in it reaches anything real, and nothing is saved.
 
@@ -18,11 +18,23 @@ A real sign-in page at `/login`: a user name and a password, and a **Sign out** 
 - **Wrong guesses** are slowed (300 ms) and limited to eight a minute for the whole host, because checking a password is a deliberately slow hash; while that limit holds even a right password has to wait, but a script with the token is not held up. The same limit covers guessing the "current password" on the Account page.
 - A browser that is not signed in and asks for a page is sent to `/login`, which brings it back. Anything else gets `401` (`WWW-Authenticate: Bearer`, no password box).
 
+## Connect
+
+The setup page, redone and part of the console. It is a guided checklist: **Google Messages is linked**, **the bot has found your chat**, **the bot is answering your texts**, and (if OneDrive is set up) **songs are saved to OneDrive**. It says which step is next and refreshes itself every few seconds while something is unfinished (every half minute once everything is connected, and only while the page is open and visible; the log of the bridge's replies is only read while step 1 is open).
+
+1. **Link Google Messages.** Numbered steps with a button for each: **Start login**, a link to Google Messages for web (the one outside link it makes, to `messages.google.com/web`, in a new tab), where to find the request in the browser's developer tools, a box to paste it in (with the warning that it holds your Google cookies), and the emoji to tap on your phone. The bridge's replies show as messages as they arrive. The badge turns green and a notice appears when it is linked; the steps then fold away behind **Link again…**. The pasted request is sent on as typed, deleted from the chat a minute later, and never kept, logged, put in the record of changes or sent back: only how many characters it had is recorded.
+2. **Your chat.** Text yourself once from your phone and the bot finds the chat by itself; **Find my chat now** looks for it with the phone's own numbers (what Google Messages told the bridge), and "Use a phone number instead" takes a number written any way. A found chat is chosen with one button. If the chat was deleted on the phone it says so, and what to do.
+3. **OneDrive.** Status and what has been saved this month; **Sign in to OneDrive** shows Microsoft's address and the code large with a Copy button, and turns green by itself.
+4. **Alerts.** **Send a test alert** leaves one for the Worker to mail.
+
+The routes behind it (`GET /admin/api/connect`, `/connect/log`; `POST /admin/api/connect/start`, `/send`, `/rooms`, `/room`, `/onedrive/start`, `/test-alert`) are in the table below. They hand the work to the host (`ConnectDeps`, built in `src/cloud-main.ts`), which is also what the older routes (`/pair/send`, `/pair/log`, `/setup/rooms`, `/setup/room`, `/onedrive/*`, `/admin/test-alert`) use; those stay for scripts. The page reads a light report (the same as `/status` without its calls to the bucket and OneDrive), so asking every few seconds costs the bridge one local request.
+
 ## The pages
 
 | Page | What it shows and does |
 | --- | --- |
 | **Overview** | Everything `/status` reports (phase, the Google Messages login, the problems with since-times, memory, the lease and the Worker's last check, OneDrive, the last requests' timelines), plus how long the bot has been up, the commit it runs (Render tells it: `RENDER_GIT_COMMIT`), this month's traffic against the 4,000 MB alert and Render's 5,000 MB, Zemer's list, the new releases, and the background jobs. All the actions below, each with its last result. |
+| **Connect** | Linking the bot to your phone, replacing the old standalone `/pair` page ([below](#connect)). |
 | **Artists** | Zemer's artist list: live or frozen, since when, its last error and version, how old it is, when it will be asked again, how many artists and blocked songs the saved copy has. The artists **waiting for your word** (with when they were first seen), the ones you **allowed** and **blocked** (with when you decided), a box to allow or block by channel id, and the **saved list** itself, searchable by name, other-alphabet name or channel id, 50 at a time, with each artist's female flag. |
 | **YouTube** | Search YouTube Music the way the bot does (its artists search and its songs search). Each artist found comes with their picture, channel id, sample songs and where they stand today; **Allow…**, **Block** or **Unblock** them by channel id. Each song found says what the bot would do with it and why, and can be **allowed by itself**. |
 | **Songs** | The songs allowed one by one, the songs you unblocked, and Zemer's blocked songs (searchable by id or, for songs the bot has seen, title), with **Unblock…**. A box to allow a song by video id. |
@@ -123,6 +135,7 @@ All under `/admin/`, behind the password. `GET` reads; `POST` changes (with the 
 | `GET /admin/api/songs` | the songs allowed, unblocked and blocked |
 | `GET /admin/api/library?q=` | table counts, a song search, recent songs, views, jobs, OneDrive, releases (stored and held back) |
 | `GET /admin/api/settings` | every setting |
+| `GET /admin/api/connect`, `/admin/api/connect/log` | the Connect page: where setup stands (phase, the bridge's login, the chat, problems), the number the chat was found under, OneDrive's status; what the bridge's bot has said |
 | `GET /admin/api/account` | whether you have made your own sign-in, since when, the signed-in browsers (never the hash) |
 | `GET /admin/api/follows`, `/log?limit=&level=&search=`, `/audit` | follows, the log, the changes |
 | `POST /admin/api/actions/<name>` | `refresh-list`, `refresh-list-force`, `refresh-releases`, `sync-site`, `prefetch`, `digest-preview`, `digest-send` (needs `{"confirm": true}`), `alerts-check` |
@@ -133,6 +146,7 @@ All under `/admin/`, behind the password. `GET` reads; `POST` changes (with the 
 | `POST /admin/api/songs/unblock` | `{videoId, title, noWomenConfirmed: true}` |
 | `POST /admin/api/settings/set`, `clear` | `{key, value}` / `{key}` (live settings only) |
 | `POST /admin/api/follows/add`, `remove` | `{name}` |
+| `POST /admin/api/connect/start`, `send`, `rooms`, `room`, `onedrive/start`, `test-alert` | `{}` / `{text}` (the pasted request, up to 20,000 characters) / `{phone?}` / `{room}` / `{}` / `{}` |
 | `POST /admin/api/account/set` | `{user, password, current}`: `current` is your current password, or `ADMIN_TOKEN` the first time |
 | `POST /admin/api/account/clear` | `{current}` (refused when the host has no `ADMIN_TOKEN`) |
 | `POST /admin/api/account/signout-all` | `{}` |
@@ -142,4 +156,4 @@ Until the bot has loaded (the web door opens first, in about a second), the host
 
 ## In the code
 
-`src/admin/console.ts` is the router and the views; `account.ts` the user name, password hash and sessions; `sign-in.ts` the sign-in page's routes, cookie and limit; `settings.ts` the list of settings and the live layer; `actions.ts` the single-flight guard; `audit.ts` the record; `log-ring.ts` the log; `site/` the page. The web door (`src/cloud/web.ts`) exists before the bot is loaded, so `src/cloud-main.ts` registers the host's part with the shared `adminConsole` and `src/matrix-main.ts` the bot's (the list, YouTube Music, the releases, the jobs, the follows) once they exist. Tests: `test/sign-in.test.ts` (the account, the sessions, the sign-in page and cookie, the limit, the Account page's changes), `test/admin.test.ts` (the door, who may reach it, every view and action, the settings, the log) and `test/song-allow.test.ts` (the per-song rule and the owner's decisions).
+`src/admin/console.ts` is the router and the views; `account.ts` the user name, password hash and sessions; `sign-in.ts` the sign-in page's routes, cookie and limit; the Connect page's routes are in `console.ts` (`ConnectDeps`); `settings.ts` the list of settings and the live layer; `actions.ts` the single-flight guard; `audit.ts` the record; `log-ring.ts` the log; `site/` the page. The web door (`src/cloud/web.ts`) exists before the bot is loaded, so `src/cloud-main.ts` registers the host's part with the shared `adminConsole` and `src/matrix-main.ts` the bot's (the list, YouTube Music, the releases, the jobs, the follows) once they exist. Tests: `test/connect.test.ts` (the Connect routes, and that /pair leads to the console), `test/sign-in.test.ts` (the account, the sessions, the sign-in page and cookie, the limit, the Account page's changes), `test/admin.test.ts` (the door, who may reach it, every view and action, the settings, the log) and `test/song-allow.test.ts` (the per-song rule and the owner's decisions).

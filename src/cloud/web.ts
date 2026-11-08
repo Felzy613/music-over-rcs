@@ -33,8 +33,8 @@ export interface CloudDeps {
   oneDrive?: { status(): Record<string, unknown>; start(): Promise<Record<string, unknown>> } | undefined;
   /** Leaves a test alert for the Worker to mail (only when the R2 settings are there). */
   testAlert?: (() => Promise<void>) | undefined;
-  /** The /pair page. */
-  pageHtml: string;
+  /** An HTML page for / and /pair when there is no console to send them to (the console's Connect page has replaced the old setup page). */
+  pageHtml?: string | undefined;
   /** The management console under /admin/ (src/admin/console.ts), registered with what the bot has once it is up. */
   admin?: { handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> } | undefined;
   /**
@@ -152,7 +152,15 @@ export function createCloudWeb(deps: CloudDeps): Server {
       }
 
       if (req.method === 'GET' && path === '/status') return send(res, 200, await deps.status());
-      if (req.method === 'GET' && (path === '/pair' || path === '/')) return send(res, 200, deps.pageHtml, 'text/html');
+      if (req.method === 'GET' && (path === '/pair' || path === '/')) {
+        // The setup page is the console's Connect page now; the old addresses lead there.
+        if (deps.admin) {
+          res.writeHead(302, { location: path === '/pair' ? '/admin/#connect' : '/admin/', ...SECURITY_HEADERS });
+          return void res.end();
+        }
+        if (deps.pageHtml === undefined) return send(res, 404, { error: 'not found' });
+        return send(res, 200, deps.pageHtml, 'text/html');
+      }
       if (req.method === 'GET' && path === '/pair/log') return send(res, 200, { lines: await deps.pair.log() });
       if (req.method === 'POST' && path === '/pair/send') {
         const text = (await readJson(req)).text;

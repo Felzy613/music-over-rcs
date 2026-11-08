@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { AdminAccount, Sessions, sessionBinding } from '../src/admin/account.ts';
-import { AdminConsole } from '../src/admin/console.ts';
+import { AdminConsole, type ConnectDeps } from '../src/admin/console.ts';
 import { LogRing, secretValues } from '../src/admin/log-ring.ts';
 import { SignIn } from '../src/admin/sign-in.ts';
 import { Catalog } from '../src/catalog.ts';
@@ -149,11 +149,55 @@ admin.provide({
 catalog.setState(`usage.${new Date().toISOString().slice(0, 7)}.sent_bytes`, String(1900 * 1048576));
 catalog.setState(`usage.${new Date().toISOString().slice(0, 7)}.archived_bytes`, String(312 * 1048576));
 
+// A pretend host for the Connect page: the bridge's replies are canned, nothing is linked, and OneDrive's sign-in waits for a made-up code.
+const bridgeSays: Array<{ at: string; text: string }> = [];
+let linkedPhone = false;
+let chosenRoom: string | undefined = '!demo:localhost';
+let driveLogin: 'none' | 'pending' | 'done' = 'none';
+const say = (text: string): void => void bridgeSays.push({ at: new Date().toISOString(), text });
+const connect: ConnectDeps = {
+  async state() {
+    return {
+      phase: linkedPhone ? (chosenRoom ? 'running' : 'setup') : 'setup',
+      botEnabled: true,
+      room: chosenRoom ?? null,
+      roomGone: null,
+      bridge: linkedPhone ? { state: 'CONNECTED', rcsEnabled: true } : { state: undefined, error: 'no Google Messages login yet' },
+      problems: [],
+    };
+  },
+  pair: {
+    async send(text) {
+      if (text === 'login google') {
+        say('Demo bridge: open https://messages.google.com/web in a private window, start signing in, and copy the request the page makes as cURL. Then send it to me here.');
+      } else {
+        say(`Demo bridge: got ${text.length} characters. Now tap the emoji 🐢 in Google Messages on your phone.`);
+        setTimeout(() => (linkedPhone = true), 6000);
+      }
+    },
+    async log() {
+      return bridgeSays;
+    },
+  },
+  rooms: (phone) => (phone && phone.length < 9 ? [] : ['!selfchat:localhost']),
+  setRoom: (room) => void (chosenRoom = room),
+  knownPhone: () => '5551234567',
+  oneDrive: {
+    status: () => ({ connected: driveLogin === 'done', savedThisMonthMb: 312, monthlyLimitMb: 1500, login: driveLogin === 'pending' ? { state: 'pending', verificationUri: 'https://microsoft.com/devicelogin', userCode: 'ABCD1234' } : { state: driveLogin } }),
+    async start() {
+      driveLogin = 'pending';
+      setTimeout(() => (driveLogin = 'done'), 15_000);
+      return { state: 'pending' };
+    },
+  },
+  testAlert: async () => {},
+};
+admin.provide({ connect });
+
 const web = createCloudWeb({
   adminToken: TOKEN,
   admin,
   signIn,
-  pageHtml: '<!doctype html><title>setup</title><p>The setup page is not part of the demo.</p>',
   status: () => ({}),
   pair: { send: async () => {}, log: async () => [] },
   rooms: () => [],

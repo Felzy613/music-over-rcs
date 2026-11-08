@@ -56,9 +56,32 @@ export interface AdminDeps {
   follows: Follows;
   /** Signing in: the owner's account and the sessions (src/admin/sign-in.ts). */
   signIn: SignIn;
+  /** The Connect page's part of the host: linking Google Messages, the chat, OneDrive's sign-in. */
+  connect: ConnectDeps;
   /** The OneDrive archive's report, when it is set up. */
   oneDrive(): Record<string, unknown>;
   now(): number;
+}
+
+/**
+ * What the Connect page needs from the host: linking Google Messages to the bridge, finding the "message yourself" chat, OneDrive's
+ * sign-in, and a test alert. The host (src/cloud-main.ts) provides it, since the homeserver and the bridge are its.
+ */
+export interface ConnectDeps {
+  /** A light report (no bucket or OneDrive calls: the page asks every few seconds): phase, whether the bot answers, the chat, the bridge's login, problems. */
+  state(): Promise<Record<string, unknown>>;
+  /** A window to the bridge's bot: what is sent goes to it as typed, and what it answers is kept to show. */
+  pair: { send(text: string): Promise<void>; log(): Promise<Array<{ at: string; text: string }>> };
+  /** The rooms the bridge made for the chat with this phone number; with no number, for the phone's own numbers (which the bridge learned from Google Messages). */
+  rooms(phone: string | undefined): Promise<string[]> | string[];
+  /** Chooses the room the bot answers in. */
+  setRoom(room: string): Promise<void> | void;
+  /** The phone number the chat was found under before, if it was. */
+  knownPhone(): string | undefined;
+  /** Saving songs to OneDrive, when it is set up. */
+  oneDrive?: { status(): Record<string, unknown>; start(): Promise<Record<string, unknown>> } | undefined;
+  /** Leaves a test alert for the Worker to mail, when alerts are set up. */
+  testAlert?: (() => Promise<void>) | undefined;
 }
 
 export const ACTIONS = ['refresh-list', 'refresh-list-force', 'refresh-releases', 'sync-site', 'prefetch', 'digest-preview', 'digest-send', 'alerts-check'] as const;
@@ -255,6 +278,10 @@ export class AdminConsole implements AdminRouter {
     switch (route) {
       case 'account':
         return this.#account(req);
+      case 'connect':
+        return this.#connect();
+      case 'connect/log':
+        return this.#connectLog();
       case 'overview':
         return this.#overview();
       case 'artists':
@@ -398,6 +425,18 @@ export class AdminConsole implements AdminRouter {
         return this.#follow(body, false);
       case 'youtube/search':
         return this.#searchYouTube(body);
+      case 'connect/start':
+        return this.#connectStart();
+      case 'connect/send':
+        return this.#connectSend(body);
+      case 'connect/rooms':
+        return this.#connectRooms(body);
+      case 'connect/room':
+        return this.#connectRoom(body);
+      case 'connect/onedrive/start':
+        return this.#connectOneDrive();
+      case 'connect/test-alert':
+        return this.#connectTestAlert();
       case 'account/set':
         return this.#setAccount(body);
       case 'account/clear':
@@ -550,6 +589,88 @@ export class AdminConsole implements AdminRouter {
     if (!result) throw new AdminError(404, `No artist called "${name}" is in the catalog.`);
     if (result.was) this.audit.add({ what: 'unfollow artist', detail: result.artist.name, from: 'followed', to: 'not followed' });
     return { ok: true, message: result.was ? `Stopped following ${result.artist.name}.` : `${result.artist.name} was not being followed.` };
+  }
+
+  // --- the Connect page: Google Messages, the chat, OneDrive ---
+
+  async #connect(): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    const oneDrive = connect.oneDrive;
+    return {
+      state: await connect.state(),
+      phone: connect.knownPhone() ?? null,
+      oneDrive: oneDrive ? oneDrive.status() : null,
+      alerts: connect.testAlert !== undefined,
+    };
+  }
+
+  /** What the bridge's bot has said, for the page's "what the bridge says" panel. It may not be ready yet (the homeserver is still starting). */
+  async #connectLog(): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    try {
+      return { lines: (await connect.pair.log()).slice(-60) };
+    } catch (err) {
+      return { lines: [], error: err instanceof Error ? err.message : 'The bridge did not answer.' };
+    }
+  }
+
+  async #connectStart(): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    try {
+      await connect.pair.send('login google');
+    } catch (err) {
+      throw new AdminError(503, err instanceof Error ? err.message : 'The bridge did not answer.');
+    }
+    this.audit.add({ what: 'started the Google Messages login' });
+    return { ok: true, message: 'Asked the bridge to start the login. Its reply shows below.' };
+  }
+
+  /** The request the owner copied from Google Messages for web (it holds their Google session cookies): sent on, never kept, logged or echoed. */
+  async #connectSend(body: Record<string, unknown>): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    const text = typeof body.text === 'string' ? body.text : '';
+    if (!text.trim()) throw new AdminError(400, 'Paste the copied request first.');
+    if (text.length > 20_000) throw new AdminError(413, 'That is too long to be the request: copy only the one request the bridge names.');
+    try {
+      await connect.pair.send(text);
+    } catch (err) {
+      throw new AdminError(503, err instanceof Error ? err.message : 'The bridge did not answer.');
+    }
+    // How much was sent, nothing of what it said.
+    this.audit.add({ what: 'sent a pasted request to the bridge', detail: `${text.length} characters` });
+    return { ok: true, message: 'Sent. The bridge answers below; the request is deleted from the chat in a minute.' };
+  }
+
+  async #connectRooms(body: Record<string, unknown>): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    const given = typeof body.phone === 'string' ? body.phone.replace(/\D/g, '') : '';
+    if (given !== '' && given.length < 7) throw new AdminError(400, 'That is too short to be a phone number (digits only, with the area code).');
+    return { rooms: await connect.rooms(given === '' ? undefined : given) };
+  }
+
+  async #connectRoom(body: Record<string, unknown>): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    const room = typeof body.room === 'string' ? body.room.trim() : '';
+    if (!/^![^\s:]+:[^\s]+$/.test(room)) throw new AdminError(400, 'That is not a chat id (it looks like !abc:server).');
+    await connect.setRoom(room);
+    this.audit.add({ what: 'chose the chat the bot answers in', detail: room });
+    return { ok: true, message: 'Chosen. The bot starts answering in that chat within a minute.' };
+  }
+
+  async #connectOneDrive(): Promise<unknown> {
+    const oneDrive = this.#need('connect', 'Setup').oneDrive;
+    if (!oneDrive) throw new AdminError(404, 'OneDrive is not set up on this host (ONEDRIVE_CLIENT_ID is not set in Render).');
+    const login = await oneDrive.start();
+    this.audit.add({ what: 'started the OneDrive sign-in' });
+    return { ok: true, login };
+  }
+
+  async #connectTestAlert(): Promise<unknown> {
+    const testAlert = this.#need('connect', 'Setup').testAlert;
+    if (!testAlert) throw new AdminError(404, 'Alerts need the R2 settings in Render (R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY).');
+    await testAlert();
+    this.audit.add({ what: 'left a test alert' });
+    return { ok: true, message: 'Left a test alert. The Worker mails it within five minutes.' };
   }
 
   // --- the owner's own user name and password ---

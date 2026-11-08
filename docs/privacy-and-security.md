@@ -48,7 +48,7 @@ Pairing gives the bridge your whole Google Messages account, and the bridge acts
 - `SECRET_KEY`, `ADMIN_TOKEN` and the R2 keys are Render secrets, and the Worker's addresses are Cloudflare secrets; none is in a file in this repository. The homeserver's and the bridge's own secrets are derived from `SECRET_KEY` at each start, so nothing is stored beside them.
 - Rotate the R2 keys, or `ADMIN_TOKEN`, by changing them in Render (and, for `ADMIN_TOKEN`, in the Worker's `RENDER_ADMIN_TOKEN` secret). Changing `SECRET_KEY` signs the bot out of its homeserver account and invalidates the bridge's registration, so only do it when starting over.
 
-**Never paste your Google cookies (the "Copy as cURL" request) anywhere except the `/pair` page.** It goes into the homeserver's chat with the bridge bot and is deleted from the chat a minute later (the homeserver forgets the deleted text after an hour). If you pasted it anywhere else, open your Google account → Security → Your devices, sign that browser session out, and link the bridge again.
+**Never paste your Google cookies (the "Copy as cURL" request) anywhere except the console's Connect tab (the old `/pair` address leads there).** It goes into the homeserver's chat with the bridge bot and is deleted from the chat a minute later (the homeserver forgets the deleted text after an hour). If you pasted it anywhere else, open your Google account → Security → Your devices, sign that browser session out, and link the bridge again.
 
 ## The bridge and the bot act as you
 

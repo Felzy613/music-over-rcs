@@ -9,15 +9,32 @@
   // ---------- small helpers ----------
 
   /** Builds an element. `attrs` may hold class, on<event> handlers, and plain attributes; children are text or elements. */
+  /** The few other sites a link may lead to (Google Messages for web, Microsoft's sign-in): never an address that came from a feed. */
+  const SAFE_HOSTS = ['messages.google.com', 'microsoft.com', 'microsoftonline.com', 'live.com', 'aka.ms'];
+  function safeExternal(url) {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'https:' && SAFE_HOSTS.some((host) => u.hostname === host || u.hostname.endsWith(`.${host}`)) ? u.href : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   function h(tag, attrs, ...kids) {
     const el = document.createElement(tag);
     for (const [key, value] of Object.entries(attrs || {})) {
       if (value === undefined || value === null || value === false) continue;
       if (key === 'class') el.className = value;
       else if (key.startsWith('on') && typeof value === 'function') el.addEventListener(key.slice(2), value);
+      else if (key === 'external') continue;
       else if (key === 'href') {
-        // Only this site's own addresses.
+        // This site's own addresses, and (when asked for) one of the few other sites above.
         if (typeof value === 'string' && (value.startsWith('/') || value.startsWith('#'))) el.setAttribute('href', value);
+        else if (attrs.external === true && typeof value === 'string' && safeExternal(value) === value) {
+          el.setAttribute('href', value);
+          el.setAttribute('target', '_blank');
+          el.setAttribute('rel', 'noopener noreferrer');
+        }
       } else if (key === 'src') {
         if (typeof value === 'string' && value.startsWith('https://')) {
           el.setAttribute('src', value);
@@ -257,6 +274,10 @@
       out.push(h('div', { class: 'notice bad' }, h('b', {}, `${problems.length} problem${problems.length === 1 ? '' : 's'}: `), problems.map((p) => h('div', {}, `${p.message} (since ${when(iso(p.since))})`))));
     }
 
+    if (s.phase && (s.phase !== 'running' || (bridge.state && bridge.state !== 'CONNECTED'))) {
+      out.push(h('div', { class: 'notice' }, h('b', {}, 'Setup is not finished. '), 'Link Google Messages and pick your chat on the ', h('a', { href: '#connect' }, 'Connect tab'), '.'));
+    }
+
     const cards = [
       card(
         'The bot',
@@ -279,7 +300,7 @@
           ['Says', bridge.message],
           ['RCS', bridge.rcsEnabled === undefined ? undefined : bridge.rcsEnabled ? 'on' : 'off'],
         ]),
-        bridge.state && bridge.state !== 'CONNECTED' ? h('p', { class: 'muted' }, 'If Google unpaired the bridge, only linking again on the Setup page fixes it; restarting does not.') : null,
+        bridge.state && bridge.state !== 'CONNECTED' ? h('p', {}, 'If Google unpaired the bridge, only linking it again fixes it; restarting does not. ', h('a', { href: '#connect' }, 'Open the Connect tab.')) : null,
       ),
       card(
         'Traffic this month',
@@ -820,6 +841,275 @@
     ];
   };
 
+  // --- Connect: link Google Messages, find your chat, sign in to OneDrive ---
+
+  /** Replaces what is in `el` with `kids`, leaving out the empty ones (replaceChildren would write a null as the word "null"). */
+  const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((kid) => kid !== null && kid !== undefined && kid !== false));
+
+  const linked = (s) => Boolean(s.bridge && (s.bridge.state === 'CONNECTED' || s.bridge.state === 'BACKFILLING'));
+  const inChat = (s) => s.phase === 'running' || s.phase === 'bot-starting';
+
+  function phaseText(s) {
+    switch (s.phase) {
+      case 'running':
+        return 'Running.';
+      case 'bot-starting':
+        return 'Starting up…';
+      case 'starting':
+        return 'The host is starting; give it a minute.';
+      case 'room-missing':
+        return 'Its chat is gone: text yourself once from your phone.';
+      case 'setup':
+        return s.botEnabled === false ? 'Switched off (BOT_ENABLED is off in Render).' : 'Waiting for your chat: text yourself once from your phone.';
+      default:
+        return String(s.phase);
+    }
+  }
+
+  pages.connect = async (state, stillHere) => {
+    let d = await api('connect');
+    const checklist = h('section', { class: 'card' });
+    const linkHead = h('div', {});
+    const linkBody = h('div', {});
+    const chatHead = h('div', {});
+    const driveCard = h('section', { class: 'card' });
+    const alertCard = h('section', { class: 'card' });
+    // These keep what the owner typed (and what was found) while the rest is redrawn every few seconds.
+    const paste = h('textarea', { spellcheck: 'false', autocomplete: 'off', 'aria-label': 'The copied request', placeholder: 'Paste the copied request here', rows: 4 });
+    const phone = h('input', { type: 'text', inputmode: 'tel', autocomplete: 'off', placeholder: 'Your number, for example 5551234567', value: d.phone || '' });
+    const found = h('div', {});
+    const bridgeLog = h('div', { class: 'bridge-log', 'aria-live': 'polite' });
+    let flowKey = '';
+    let wasLinked = linked(d.state);
+
+    const showFlow = () => !linked(d.state) || state.relink === true;
+
+    // --- the checklist ---
+    function paintChecklist() {
+      const s = d.state;
+      const b = s.bridge || {};
+      const row = (done, title, detail, optional) =>
+        h(
+          'li',
+          { class: `check ${done ? 'done' : ''}` },
+          h('span', { class: 'tick', 'aria-hidden': 'true' }, done ? '✓' : '○'),
+          h('div', { class: 'grow' }, h('b', {}, title, optional ? h('span', { class: 'muted' }, ' (optional)') : null), detail ? h('div', { class: 'muted' }, detail) : null),
+          badge(done ? 'done' : optional ? 'not set up' : 'to do', done ? 'ok' : optional ? '' : 'warn'),
+        );
+      const rows = [
+        row(linked(s), 'Google Messages is linked', linked(s) ? 'The bridge is connected to your phone.' : b.error || b.message || (b.state ? `The bridge says ${b.state}.` : 'Not linked yet.')),
+        row(inChat(s), 'The bot has found your chat', s.roomGone ? 'The chat it used was deleted. Text yourself once from your phone.' : inChat(s) ? 'It answers in your "message yourself" chat.' : s.room ? 'A chat is chosen; waiting to join it.' : 'Text yourself once from your phone, or find it below.'),
+        row(s.phase === 'running', 'The bot is answering your texts', phaseText(s)),
+      ];
+      if (d.oneDrive) rows.push(row(Boolean(d.oneDrive.connected), 'Songs are saved to OneDrive', d.oneDrive.connected ? `${num(d.oneDrive.savedThisMonthMb)} MB saved this month.` : 'Sign in below to keep a copy of every song you get.', true));
+      const required = rows.slice(0, 3);
+      const next = ['Link Google Messages (step 1)', 'Get your chat found (step 2)', 'Wait a moment: the bot is starting'][required.findIndex((r) => !r.classList.contains('done'))];
+      const problems = Array.isArray(s.problems) ? s.problems : [];
+      fill(checklist, 
+        h('h2', {}, next ? 'Setup' : 'Everything is connected'),
+        h('ul', { class: 'list checks' }, rows),
+        next ? h('p', {}, h('b', {}, 'Next: '), next) : h('p', { class: 'muted' }, 'Nothing to do here unless Google unlinks the bridge or you delete the chat on your phone.'),
+        problems.length > 0 ? h('div', { class: 'notice' }, problems.map((p) => h('div', {}, p.message))) : null,
+      );
+    }
+
+    // --- step 1: link Google Messages ---
+    function paintLog(lines) {
+      const near = bridgeLog.scrollHeight - bridgeLog.scrollTop - bridgeLog.clientHeight < 40;
+      fill(bridgeLog, ...(lines.length === 0 ? [h('div', { class: 'muted' }, 'Nothing from the bridge yet. Press Start login.')] : lines.slice(-30).map((l) => h('div', { class: 'bubble' }, h('time', {}, clock(Date.parse(l.at) || Date.now())), l.text))));
+      if (near || lines.length > 0) bridgeLog.scrollTop = bridgeLog.scrollHeight;
+    }
+    async function pollLog() {
+      try {
+        const r = await api('connect/log');
+        paintLog(r.lines);
+      } catch {
+        // the homeserver may still be starting
+      }
+    }
+    const startLogin = action('Start login', async () => {
+      toast((await api('connect/start', {})).message);
+      await pollLog();
+    });
+    const sendPaste = action('Send pasted request', async () => {
+      const text = paste.value.trim();
+      if (!text) throw new Error('Paste the copied request first.');
+      toast((await api('connect/send', { text })).message);
+      paste.value = '';
+      await pollLog();
+    });
+    function paintLink() {
+      const s = d.state;
+      const b = s.bridge || {};
+      const ok = linked(s);
+      fill(linkHead, h('div', { class: 'row spread' }, h('h2', {}, '1 · Link Google Messages'), badge(b.state ? String(b.state) : 'not linked', ok ? 'ok' : 'bad')));
+      const key = `${ok}:${showFlow()}`;
+      if (key === flowKey) return;
+      flowKey = key;
+      if (!showFlow()) {
+        fill(linkBody, 
+          h('p', {}, 'Google Messages is linked. You only need to do this again if Google unlinks the bridge.'),
+          action('Link again…', async () => {
+            state.relink = true;
+            paintLink();
+            await pollLog();
+          }, { kind: 'quiet' }),
+        );
+        return;
+      }
+      fill(linkBody, 
+        h(
+          'ol',
+          { class: 'steps' },
+          h('li', {}, h('b', {}, 'Start the login. '), "The bridge answers in the box below with what it needs.", h('div', { class: 'row gap' }, startLogin)),
+          h('li', {}, h('b', {}, 'Open Google Messages for web in a private window. '), 'On a computer, in a private (incognito) window, ', h('a', { href: 'https://messages.google.com/web', external: true }, 'open messages.google.com/web'), ". Open the browser's developer tools (F12, or Cmd+Option+I on a Mac) and choose the Network tab. Then begin signing in the way the bridge's reply says."),
+          h('li', {}, h('b', {}, 'Copy the request it names. '), 'Right-click that request in the Network list, then Copy, then ', h('b', {}, 'Copy as cURL'), '.'),
+          h('li', {}, h('b', {}, 'Paste it here. '), paste, h('div', { class: 'row gap' }, sendPaste)),
+          h('li', {}, h('b', {}, 'Tap the emoji on your phone. '), 'When the bridge shows an emoji, tap the same one in Google Messages on your phone. The badge above turns green when it is linked.'),
+        ),
+        h('div', { class: 'notice' }, 'The pasted request holds your Google session cookies, as sensitive as your password. Paste it only here. It is deleted from the chat a minute after you send it; close the private window when you are done.'),
+        h('h3', {}, 'What the bridge says'),
+        bridgeLog,
+        state.relink ? action('Cancel', async () => { state.relink = false; paintLink(); }, { kind: 'quiet' }) : null,
+      );
+    }
+
+    // --- step 2: your chat ---
+    async function findRooms(number) {
+      const { rooms } = await api('connect/rooms', number ? { phone: number } : {});
+      if (rooms.length === 0) {
+        fill(found, h('div', { class: 'notice' }, number ? 'No chat with that number yet. Text yourself once from your phone, wait a few seconds, and try again.' : 'Nothing found yet. Text yourself once from your phone, wait a few seconds, and try again, or use your phone number below.'));
+        return;
+      }
+      fill(found, 
+        h(
+          'ul',
+          { class: 'list' },
+          rooms.map((room) =>
+            h(
+              'li',
+              {},
+              h('div', { class: 'grow' }, h('b', {}, 'A chat with your number'), h('div', { class: 'mono muted' }, room)),
+              action('Use this chat', async () => {
+                toast((await api('connect/room', { room })).message);
+                fill(found, h('div', { class: 'notice ok' }, 'Chosen. The bot starts answering in that chat within a minute.'));
+                await refresh();
+              }, { small: true }),
+            ),
+          ),
+        ),
+      );
+    }
+    const chatBody = h(
+      'div',
+      {},
+      h('p', {}, 'The bot answers in your "message yourself" chat: the one you get by texting your own number. ', h('b', {}, 'Text yourself once from your phone'), ' and it finds that chat by itself within a minute or two.'),
+      h('div', { class: 'row gap' }, action('Find my chat now', () => findRooms(undefined), { kind: 'quiet' })),
+      h(
+        'details',
+        {},
+        h('summary', {}, 'Use a phone number instead'),
+        h('label', {}, 'Your phone number'),
+        phone,
+        h('div', { class: 'row gap' }, action('Find', () => findRooms(phone.value), { kind: 'quiet' })),
+      ),
+      found,
+    );
+    function paintChat() {
+      const s = d.state;
+      fill(chatHead, 
+        h('div', { class: 'row spread' }, h('h2', {}, '2 · Your chat'), badge(inChat(s) ? 'found' : s.roomGone ? 'gone' : 'not found yet', inChat(s) ? 'ok' : 'warn')),
+        s.roomGone ? h('div', { class: 'notice bad' }, 'The chat the bot was answering in no longer exists. That usually means the chat was deleted on your phone. Text yourself once from your phone: the bot finds the new chat by itself. Nothing needs restarting.') : null,
+        s.room ? dl([['Chat', h('span', { class: 'mono' }, s.room)]]) : null,
+      );
+    }
+
+    // --- step 3: OneDrive ---
+    function paintDrive() {
+      const o = d.oneDrive;
+      driveCard.hidden = !o;
+      if (!o) return;
+      const login = o.login || {};
+      const pending = login.state === 'pending';
+      const code = typeof login.userCode === 'string' ? login.userCode : '';
+      const link = typeof login.verificationUri === 'string' ? login.verificationUri : '';
+      const safe = safeExternal(link);
+      fill(driveCard, 
+        h('div', { class: 'row spread' }, h('h2', {}, '3 · Save songs to OneDrive'), badge(o.connected ? 'signed in' : pending ? 'waiting for you' : 'not signed in', o.connected ? 'ok' : pending ? 'warn' : '')),
+        h('p', { class: 'muted' }, "Every song the bot sends is also saved, sorted as Artist / Album / 01 Title, in the app's own OneDrive folder. The bot cannot see the rest of your OneDrive."),
+        o.connected ? dl([['Saved this month', `${num(o.savedThisMonthMb)} MB${o.monthlyLimitMb ? ` of ${num(o.monthlyLimitMb)} MB allowed` : ''}`]]) : null,
+        o.error ? h('div', { class: 'notice bad' }, `Last problem: ${o.error}`) : null,
+        login.state === 'failed' && login.error ? h('div', { class: 'notice bad' }, String(login.error)) : null,
+        pending
+          ? h(
+              'ol',
+              { class: 'steps' },
+              h('li', {}, 'On any device, open ', safe ? h('a', { href: safe, external: true }, safe) : 'the address Microsoft gave', '.'),
+              h('li', {}, 'Enter this code: ', h('span', { class: 'code-box' }, code), ' ', action('Copy', async () => { await navigator.clipboard?.writeText(code); toast('Copied.'); }, { small: true, kind: 'quiet' })),
+              h('li', {}, 'Approve. This page updates by itself.'),
+            )
+          : null,
+        h('div', { class: 'row gap' }, action(o.connected ? 'Sign in again' : 'Sign in to OneDrive', async () => { await api('connect/onedrive/start', {}); await refresh(); }, { kind: o.connected ? 'quiet' : '' })),
+      );
+    }
+
+    // --- the test alert ---
+    function paintAlert() {
+      alertCard.hidden = !d.alerts;
+      if (!d.alerts) return;
+      fill(alertCard, 
+        h('h2', {}, 'Alerts'),
+        h('p', { class: 'muted' }, 'Problems (Google unlinking the bridge, the site not answering) are emailed within five minutes. Send a test to see that it arrives.'),
+        action('Send a test alert', async () => toast((await api('connect/test-alert', {})).message), { kind: 'quiet' }),
+      );
+    }
+
+    function paintAll() {
+      paintChecklist();
+      paintLink();
+      paintChat();
+      paintDrive();
+      paintAlert();
+    }
+
+    async function refresh() {
+      d = await api('connect');
+      const nowLinked = linked(d.state);
+      if (nowLinked && !wasLinked) {
+        toast('Google Messages is linked.');
+        state.relink = false;
+      }
+      wasLinked = nowLinked;
+      paintAll();
+      if (showFlow()) await pollLog();
+    }
+
+    // Looks again every few seconds while something is unfinished (and only while this page is open and visible), every half minute otherwise.
+    function schedule() {
+      const login = d.oneDrive && d.oneDrive.login;
+      const busy = showFlow() || d.state.phase !== 'running' || (login && login.state === 'pending');
+      setTimeout(async () => {
+        if (!stillHere()) return;
+        if (!document.hidden) {
+          try {
+            await refresh();
+          } catch {
+            // the host may be restarting: try again next time
+          }
+        }
+        schedule();
+      }, busy ? 5000 : 30_000);
+    }
+
+    paintAll();
+    if (showFlow()) await pollLog();
+    schedule();
+
+    const chatCard = h('section', { class: 'card' }, chatHead, chatBody);
+    const linkCard = h('section', { class: 'card' }, linkHead, linkBody);
+    return [checklist, linkCard, chatCard, driveCard, alertCard, h('div', { class: 'row' }, action('Refresh now', () => refresh(), { kind: 'quiet' }))];
+  };
+
   // --- Account: the owner's own user name and password ---
 
   pages.account = async () => {
@@ -914,6 +1204,7 @@
 
   const TABS = [
     ['overview', 'Overview'],
+    ['connect', 'Connect'],
     ['artists', 'Artists'],
     ['youtube', 'YouTube'],
     ['songs', 'Songs'],
@@ -938,7 +1229,7 @@
     for (const link of tabsBar.children) if (link.dataset.tab === tab) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
     document.getElementById('whereami').textContent = TABS.find(([key]) => key === tab)[1];
     try {
-      const nodes = await pages[tab](state);
+      const nodes = await pages[tab](state, () => mine === drawing);
       if (mine !== drawing) return;
       view.replaceChildren(...[nodes, tab === 'overview' || tab === 'library' ? h('div', { class: 'row' }, action('Refresh this page', () => render(), { kind: 'quiet' })) : null].flat().filter(Boolean));
     } catch (err) {

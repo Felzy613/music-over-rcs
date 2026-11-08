@@ -324,8 +324,8 @@ describe('the bot’s chat room is gone', () => {
     });
   });
 
-  test('the setup page reads the field /status writes', () => {
-    const page = readFileSync(new URL('../src/cloud/pair.html', import.meta.url), 'utf8');
+  test('the console’s Connect page reads the fields the host reports', () => {
+    const page = readFileSync(new URL('../src/admin/site/app.js', import.meta.url), 'utf8');
     const main = readFileSync(new URL('../src/cloud-main.ts', import.meta.url), 'utf8');
     for (const name of ['roomGone', 'room-missing']) {
       assert.ok(page.includes(name), `the page knows ${name}`);
