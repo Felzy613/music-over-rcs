@@ -1,4 +1,5 @@
 import { MatrixClient, MatrixError } from '../matrix/client.ts';
+import { parsePeoplePasswords, peopleFromEnv, scoped, type Person } from '../people.ts';
 
 interface StateStore {
   getState(key: string): string | undefined;
@@ -28,19 +29,63 @@ export async function waitForHomeserver(
   }
 }
 
+/** The catalog state key the owner's token is kept under (a person's is `matrix.token:<id>`, see `personAccount`). */
+const OWNER_TOKEN_KEY = 'matrix.token';
+
+/** One person's Matrix account, as the bot signs in to it (nothing here is read from the environment). */
+export interface MatrixAccount {
+  /** The account's name on the homeserver: `alice` for `@alice:localhost`. */
+  user: string;
+  password: string;
+  /** The whole id the token must turn out to belong to. Nothing is used or kept for any other account. */
+  userId: string;
+  /** Where the token is kept in the catalog between starts. */
+  stateKey: string;
+}
+
+/** The account of a person who is not the owner. `serverName` is the part of a Matrix id after the colon. */
+export function personAccount(person: Person, password: string, serverName: string): MatrixAccount {
+  if (person.owner) throw new Error("the owner's Matrix account comes from MATRIX_USER and MATRIX_PASSWORD, not from a person's");
+  return { user: person.id, password, userId: `@${person.id}:${serverName}`, stateKey: scoped(OWNER_TOKEN_KEY, person) };
+}
+
 /**
- * An access token for the bot's Matrix account: the one in MATRIX_ACCESS_TOKEN if set, else one kept from an earlier start
- * (checked, since a restored homeserver may not know it), else a new one from signing in with MATRIX_USER and
+ * The people besides the owner, each with the account the host made for them, from the environment the host hands the bot: `PEOPLE`
+ * (the names) and `PEOPLE_PASSWORDS` (their passwords, see `formatPeoplePasswords`). A person the host handed no password for is left out
+ * and said in `problems`, since the bot cannot sign in as them; it never stops the owner's start. `serverName` is the part of a Matrix id
+ * after the colon.
+ */
+export function peopleAccounts(env: NodeJS.ProcessEnv, serverName: string): { accounts: Array<{ person: Person; account: MatrixAccount }>; problems: string[] } {
+  const { people, problems } = peopleFromEnv(env);
+  const passwords = parsePeoplePasswords(env.PEOPLE_PASSWORDS);
+  const accounts: Array<{ person: Person; account: MatrixAccount }> = [];
+  for (const person of people) {
+    const password = passwords.get(person.id);
+    if (password) accounts.push({ person, account: personAccount(person, password, serverName) });
+    else problems.push(`PEOPLE: the host handed over no password for "${person.id}"; left out`);
+  }
+  return { accounts, problems };
+}
+
+/**
+ * An access token for a Matrix account. For the bot's own account (no `account`): the one in MATRIX_ACCESS_TOKEN if set, else one
+ * kept from an earlier start (checked, since a restored homeserver may not know it), else a new one from signing in with MATRIX_USER and
  * MATRIX_PASSWORD. A token made here is kept in the catalog so a restart signs in only once.
+ *
+ * For a person's account (`account`): the environment is ignored entirely, MATRIX_ACCESS_TOKEN above all, because on the cloud host it is
+ * the OWNER'S token (src/cloud-main.ts sets it for the owner's chat): the token comes from the person's own state key or from signing in
+ * as them, and it is used and kept only after the homeserver says it is theirs (`whoami`, for a kept token and for a new one alike), so a
+ * mix-up can never put one person's bot in another's account.
  */
 export async function ensureToken(options: {
   env: NodeJS.ProcessEnv;
   state: StateStore;
   homeserver: string;
+  account?: MatrixAccount;
   fetch?: typeof fetch;
   log?: (line: string) => void;
 }): Promise<{ token: string; userId: string }> {
-  const { env, state, homeserver } = options;
+  const { env, state, homeserver, account } = options;
   const check = async (token: string): Promise<string | undefined> => {
     try {
       return (await new MatrixClient({ token, homeserver, ...(options.fetch ? { fetch: options.fetch } : {}) }).whoami()).userId;
@@ -50,13 +95,36 @@ export async function ensureToken(options: {
     }
   };
 
+  if (account) {
+    // The owner's token lives under its own key; a person's must never be kept there.
+    if (account.stateKey === OWNER_TOKEN_KEY) throw new Error(`${account.user}'s Matrix token cannot be kept where the owner's is (${OWNER_TOKEN_KEY})`);
+    const kept = state.getState(account.stateKey);
+    if (kept) {
+      const userId = await check(kept);
+      if (userId === account.userId) return { token: kept, userId };
+      options.log?.(
+        userId
+          ? `the Matrix token kept for ${account.user} belongs to another account; signing in again`
+          : `the Matrix token kept for ${account.user} is no longer accepted; signing in again`,
+      );
+    }
+    if (!account.password) throw new Error(`No Matrix sign-in for ${account.user}: the host did not hand over a password`);
+    const { accessToken, userId } = await MatrixClient.login(homeserver, account.user, account.password, options.fetch);
+    if (userId !== account.userId || (await check(accessToken)) !== account.userId) {
+      throw new Error(`signing in as ${account.user} gave a token for an account other than ${account.userId}; it is not used or kept`);
+    }
+    state.setState(account.stateKey, accessToken);
+    options.log?.(`signed in to the homeserver as ${userId}`);
+    return { token: accessToken, userId };
+  }
+
   const fromEnv = env.MATRIX_ACCESS_TOKEN?.trim();
   if (fromEnv) {
     const userId = await check(fromEnv);
     if (userId) return { token: fromEnv, userId };
     throw new Error('MATRIX_ACCESS_TOKEN is not accepted by the homeserver');
   }
-  const kept = state.getState('matrix.token');
+  const kept = state.getState(OWNER_TOKEN_KEY);
   if (kept) {
     const userId = await check(kept);
     if (userId) return { token: kept, userId };
@@ -66,7 +134,7 @@ export async function ensureToken(options: {
   const password = env.MATRIX_PASSWORD;
   if (!password) throw new Error('No Matrix sign-in: set MATRIX_PASSWORD (and MATRIX_USER, default "me") for the account the first start created');
   const { accessToken, userId } = await MatrixClient.login(homeserver, user, password, options.fetch);
-  state.setState('matrix.token', accessToken);
+  state.setState(OWNER_TOKEN_KEY, accessToken);
   options.log?.(`signed in to the homeserver as ${userId}`);
   return { token: accessToken, userId };
 }

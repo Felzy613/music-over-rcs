@@ -846,7 +846,7 @@
   const linked = (s) => Boolean(s.bridge && (s.bridge.state === 'CONNECTED' || s.bridge.state === 'BACKFILLING'));
   const inChat = (s) => s.phase === 'running' || s.phase === 'bot-starting';
 
-  function phaseText(s) {
+  function phaseText(s, who) {
     switch (s.phase) {
       case 'running':
         return 'Running.';
@@ -855,27 +855,45 @@
       case 'starting':
         return 'The host is starting; give it a minute.';
       case 'room-missing':
-        return 'Its chat is gone: text yourself once from your phone.';
+        return who ? `Their chat is gone: ${who} texts themself once from their phone.` : 'Its chat is gone: text yourself once from your phone.';
       case 'setup':
-        return s.botEnabled === false ? 'Switched off (BOT_ENABLED is off in Render).' : 'Waiting for your chat: text yourself once from your phone.';
+        return s.botEnabled === false ? 'Switched off (BOT_ENABLED is off in Render).' : who ? `Waiting for ${who}'s chat: ${who} texts themself once from their phone.` : 'Waiting for your chat: text yourself once from your phone.';
       default:
         return String(s.phase);
     }
   }
 
   pages.connect = async (state, stillHere) => {
-    let d = await api('connect');
+    // Whose phone this page is about: nobody named is you; a person (PEOPLE in Render) is linked here too, with the owner pasting for them.
+    const who = state.person || undefined;
+    const route = (name) => (who ? `${name}?person=${encodeURIComponent(who)}` : name);
+    const asked = (body = {}) => (who ? { ...body, person: who } : body);
+    const their = who ? `${who}'s` : 'your';
+    let d;
+    try {
+      d = await api(route('connect'));
+    } catch (err) {
+      // A name the host no longer has: back to your own page.
+      if (who) {
+        state.person = undefined;
+        history.replaceState(null, '', '#connect');
+      }
+      throw err;
+    }
     const checklist = h('section', { class: 'card' });
     const linkHead = h('div', {});
     const linkBody = h('div', {});
     const chatHead = h('div', {});
     const driveCard = h('section', { class: 'card' });
     const alertCard = h('section', { class: 'card' });
+    const removeCard = h('section', { class: 'card' });
     // These keep what the owner typed (and what was found) while the rest is redrawn every few seconds.
     const paste = h('textarea', { spellcheck: 'false', autocomplete: 'off', 'aria-label': 'The copied request', placeholder: 'Paste the copied request here', rows: 4 });
-    const phone = h('input', { type: 'text', inputmode: 'tel', autocomplete: 'off', placeholder: 'Your number, for example 5551234567', value: d.phone || '' });
+    const phone = h('input', { type: 'text', inputmode: 'tel', autocomplete: 'off', placeholder: who ? 'Their number, for example 5551234567' : 'Your number, for example 5551234567', value: d.phone || '' });
     const found = h('div', {});
     const bridgeLog = h('div', { class: 'bridge-log', 'aria-live': 'polite' });
+    const removeLog = h('div', { class: 'bridge-log', 'aria-live': 'polite' });
+    const loginId = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'The login id the bridge listed', placeholder: 'The login id the bridge listed' });
     let flowKey = '';
     let wasLinked = linked(d.state);
 
@@ -893,45 +911,60 @@
           h('div', { class: 'grow' }, h('b', {}, title, optional ? h('span', { class: 'muted' }, ' (optional)') : null), detail ? h('div', { class: 'muted' }, detail) : null),
           badge(done ? 'done' : optional ? 'not set up' : 'to do', done ? 'ok' : optional ? '' : 'warn'),
         );
-      const rows = [
-        row(linked(s), 'Google Messages is linked', linked(s) ? 'The bridge is connected to your phone.' : b.error || b.message || (b.state ? `The bridge says ${b.state}.` : 'Not linked yet.')),
-        row(inChat(s), 'The bot has found your chat', s.roomGone ? 'The chat it used was deleted. Text yourself once from your phone.' : inChat(s) ? 'It answers in your "message yourself" chat.' : s.room ? 'A chat is chosen; waiting to join it.' : 'Text yourself once from your phone, or find it below.'),
-        row(s.phase === 'running', 'The bot is answering your texts', phaseText(s)),
-      ];
+      const o = s.onboarding || {};
+      const rows = who
+        ? [
+            row(linked(s), `${who}'s Google Messages is linked`, linked(s) ? "The bridge is connected to their phone." : b.error || b.message || (b.state ? `The bridge says ${b.state}.` : 'Not linked yet.')),
+            row(s.simNumber === true, "Their phone gave the bridge its number", s.simNumber === true ? 'Yes: the bridge can tell their own chat from the others.' : s.simNumber === false && linked(s) ? 'No number yet. Without one the bridge copies ALL of their chats onto this host: see below.' : 'Known once they are linked.'),
+            row(Boolean(o.onboarded), 'Their own chat has arrived', o.onboarded ? 'It has: they are set up.' : 'They text themself once from their phone, within a few minutes of linking.'),
+            row(s.phase === 'running', 'The bot is answering them', phaseText(s, who)),
+          ]
+        : [
+            row(linked(s), 'Google Messages is linked', linked(s) ? 'The bridge is connected to your phone.' : b.error || b.message || (b.state ? `The bridge says ${b.state}.` : 'Not linked yet.')),
+            row(inChat(s), 'The bot has found your chat', s.roomGone ? 'The chat it used was deleted. Text yourself once from your phone.' : inChat(s) ? 'It answers in your "message yourself" chat.' : s.room ? 'A chat is chosen; waiting to join it.' : 'Text yourself once from your phone, or find it below.'),
+            row(s.phase === 'running', 'The bot is answering your texts', phaseText(s)),
+          ];
       if (d.oneDrive) rows.push(row(Boolean(d.oneDrive.connected), 'Songs are saved to OneDrive', d.oneDrive.connected ? `${num(d.oneDrive.savedThisMonthMb)} MB saved this month.` : 'Sign in below to keep a copy of every song you get.', true));
-      const required = rows.slice(0, 3);
-      const next = ['Link Google Messages (step 1)', 'Get your chat found (step 2)', 'Wait a moment: the bot is starting'][required.findIndex((r) => !r.classList.contains('done'))];
+      const required = rows.slice(0, who ? 4 : 3);
+      const steps = who ? [`Link ${who}'s Google Messages (step 1)`, "Check the phone's number (step 1)", "Get their chat to arrive (step 2)", 'Wait a moment: the bot is starting'] : ['Link Google Messages (step 1)', 'Get your chat found (step 2)', 'Wait a moment: the bot is starting'];
+      const next = steps[required.findIndex((r) => !r.classList.contains('done'))];
       const problems = Array.isArray(s.problems) ? s.problems : [];
       fill(checklist, 
         h('h2', {}, next ? 'Setup' : 'Everything is connected'),
         h('ul', { class: 'list checks' }, rows),
-        next ? h('p', {}, h('b', {}, 'Next: '), next) : h('p', { class: 'muted' }, 'Nothing to do here unless Google unlinks the bridge or you delete the chat on your phone.'),
+        next ? h('p', {}, h('b', {}, 'Next: '), next) : h('p', { class: 'muted' }, who ? `Nothing to do here unless Google unlinks the bridge or ${who} deletes their chat on their phone.` : 'Nothing to do here unless Google unlinks the bridge or you delete the chat on your phone.'),
+        // The gate for a new person: a warning (no number, or their chat did not arrive) is for the owner to act on at once.
+        who && o.message && !o.onboarded && o.step !== 'not-linked' ? h('div', { class: `notice ${o.warn ? 'bad' : ''}` }, o.message) : null,
+        s.error ? h('div', { class: 'notice bad' }, s.error) : null,
         problems.length > 0 ? h('div', { class: 'notice' }, problems.map((p) => h('div', {}, p.message))) : null,
       );
     }
 
     // --- step 1: link Google Messages ---
     function paintLog(lines) {
-      const near = bridgeLog.scrollHeight - bridgeLog.scrollTop - bridgeLog.clientHeight < 40;
-      fill(bridgeLog, ...(lines.length === 0 ? [h('div', { class: 'muted' }, 'Nothing from the bridge yet. Press Start login.')] : lines.slice(-30).map((l) => h('div', { class: 'bubble' }, h('time', {}, clock(Date.parse(l.at) || Date.now())), l.text))));
-      if (near || lines.length > 0) bridgeLog.scrollTop = bridgeLog.scrollHeight;
+      // The same replies show under step 1 and, for a person, under "Take them off this host".
+      for (const box of [bridgeLog, removeLog]) {
+        const near = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+        fill(box, ...(lines.length === 0 ? [h('div', { class: 'muted' }, 'Nothing from the bridge yet.')] : lines.slice(-30).map((l) => h('div', { class: 'bubble' }, h('time', {}, clock(Date.parse(l.at) || Date.now())), l.text))));
+        if (near || lines.length > 0) box.scrollTop = box.scrollHeight;
+      }
     }
     async function pollLog() {
       try {
-        const r = await api('connect/log');
+        const r = await api(route('connect/log'));
         paintLog(r.lines);
       } catch {
         // the homeserver may still be starting
       }
     }
     const startLogin = action('Start login', async () => {
-      toast((await api('connect/start', {})).message);
+      toast((await api('connect/start', asked())).message);
       await pollLog();
     });
     const sendPaste = action('Send pasted request', async () => {
       const text = paste.value.trim();
       if (!text) throw new Error('Paste the copied request first.');
-      toast((await api('connect/send', { text })).message);
+      toast((await api('connect/send', asked({ text }))).message);
       paste.value = '';
       await pollLog();
     });
@@ -939,13 +972,13 @@
       const s = d.state;
       const b = s.bridge || {};
       const ok = linked(s);
-      fill(linkHead, h('div', { class: 'row spread' }, h('h2', {}, '1 · Link Google Messages'), badge(b.state ? String(b.state) : 'not linked', ok ? 'ok' : 'bad')));
+      fill(linkHead, h('div', { class: 'row spread' }, h('h2', {}, who ? `1 · Link ${who}'s Google Messages` : '1 · Link Google Messages'), badge(b.state ? String(b.state) : 'not linked', ok ? 'ok' : 'bad')));
       const key = `${ok}:${showFlow()}`;
       if (key === flowKey) return;
       flowKey = key;
       if (!showFlow()) {
         fill(linkBody, 
-          h('p', {}, 'Google Messages is linked. You only need to do this again if Google unlinks the bridge.'),
+          h('p', {}, who ? `${who}'s Google Messages is linked. It only needs doing again if Google unlinks the bridge.` : 'Google Messages is linked. You only need to do this again if Google unlinks the bridge.'),
           action('Link again…', async () => {
             state.relink = true;
             paintLink();
@@ -955,16 +988,26 @@
         return;
       }
       fill(linkBody, 
+        // Another person's link is made together: their cookies pass through this page, so they are here, and nothing is sent to you to paste later.
+        who
+          ? h(
+              'div',
+              { class: 'notice bad' },
+              h('b', {}, `Do this with ${who} next to you. `),
+              `${who} makes the request on their own computer, in a private window signed in to ONLY their Google account, and you paste what they copy into this page while they are with you. Never have them send it to you in a text, an email or a chat: it holds their Google session cookies, as sensitive as their password, and that message would keep it.`,
+            )
+          : null,
+        who ? h('p', { class: 'muted' }, `Before you start, tell ${who}: you can read what they text and what the bot answers (the host's logs and this console show requests), the link to Google is unofficial and can drop, the host is on free plans and can be down, the artist rules are yours (nobody else's to change), and they have a monthly limit.`) : null,
         h(
           'ol',
           { class: 'steps' },
           h('li', {}, h('b', {}, 'Start the login. '), "The bridge answers in the box below with what it needs.", h('div', { class: 'row gap' }, startLogin)),
-          h('li', {}, h('b', {}, 'Open Google Messages for web in a private window. '), 'On a computer, in a private (incognito) window, ', h('a', { href: 'https://messages.google.com/web', external: true }, 'open messages.google.com/web'), ". Open the browser's developer tools (F12, or Cmd+Option+I on a Mac) and choose the Network tab. Then begin signing in the way the bridge's reply says."),
+          h('li', {}, h('b', {}, 'Open Google Messages for web in a private window. '), who ? `On ${who}'s computer, in a private (incognito) window signed in to only their Google account, ` : 'On a computer, in a private (incognito) window, ', h('a', { href: 'https://messages.google.com/web', external: true }, 'open messages.google.com/web'), ". Open the browser's developer tools (F12, or Cmd+Option+I on a Mac) and choose the Network tab. Then begin signing in the way the bridge's reply says."),
           h('li', {}, h('b', {}, 'Copy the request it names. '), 'Right-click that request in the Network list, then Copy, then ', h('b', {}, 'Copy as cURL'), '.'),
-          h('li', {}, h('b', {}, 'Paste it here. '), paste, h('div', { class: 'row gap' }, sendPaste)),
-          h('li', {}, h('b', {}, 'Tap the emoji on your phone. '), 'When the bridge shows an emoji, tap the same one in Google Messages on your phone. The badge above turns green when it is linked.'),
+          h('li', {}, h('b', {}, 'Paste it here. '), who ? `You paste it, with ${who} watching. ` : null, paste, h('div', { class: 'row gap' }, sendPaste)),
+          h('li', {}, h('b', {}, who ? 'The emoji on their phone. ' : 'Tap the emoji on your phone. '), who ? `When the bridge shows an emoji, ${who} taps the same one in Google Messages on their phone. The badge above turns green when it is linked. Then ${who} texts themself once from their phone: the bridge makes their chat only then.` : 'When the bridge shows an emoji, tap the same one in Google Messages on your phone. The badge above turns green when it is linked.'),
         ),
-        h('div', { class: 'notice' }, 'The pasted request holds your Google session cookies, as sensitive as your password. Paste it only here. It is deleted from the chat a minute after you send it; close the private window when you are done.'),
+        h('div', { class: 'notice' }, who ? `The pasted request holds ${who}'s Google session cookies, as sensitive as their password. Paste it only here, with ${who} present. It is deleted from the chat a minute after you send it (or, if the host restarts inside that minute, as soon as it is back); ${who} closes the private window when you are done.` : 'The pasted request holds your Google session cookies, as sensitive as your password. Paste it only here. It is deleted from the chat a minute after you send it (or, if the host restarts inside that minute, as soon as it is back); close the private window when you are done.'),
         h('h3', {}, 'What the bridge says'),
         bridgeLog,
         state.relink ? action('Cancel', async () => { state.relink = false; paintLink(); }, { kind: 'quiet' }) : null,
@@ -973,9 +1016,9 @@
 
     // --- step 2: your chat ---
     async function findRooms(number) {
-      const { rooms } = await api('connect/rooms', number ? { phone: number } : {});
+      const { rooms } = await api('connect/rooms', asked(number ? { phone: number } : {}));
       if (rooms.length === 0) {
-        fill(found, h('div', { class: 'notice' }, number ? 'No chat with that number yet. Text yourself once from your phone, wait a few seconds, and try again.' : 'Nothing found yet. Text yourself once from your phone, wait a few seconds, and try again, or use your phone number below.'));
+        fill(found, h('div', { class: 'notice' }, who ? (number ? `No chat with that number yet. ${who} texts themself once from their phone, you wait a few seconds, and try again.` : `Nothing found yet. ${who} texts themself once from their phone, you wait a few seconds, and try again, or use their phone number below.`) : number ? 'No chat with that number yet. Text yourself once from your phone, wait a few seconds, and try again.' : 'Nothing found yet. Text yourself once from your phone, wait a few seconds, and try again, or use your phone number below.'));
         return;
       }
       fill(found, 
@@ -986,10 +1029,10 @@
             h(
               'li',
               {},
-              h('div', { class: 'grow' }, h('b', {}, 'A chat with your number'), h('div', { class: 'mono muted' }, room)),
+              h('div', { class: 'grow' }, h('b', {}, who ? 'A chat with their number' : 'A chat with your number'), h('div', { class: 'mono muted' }, room)),
               action('Use this chat', async () => {
-                toast((await api('connect/room', { room })).message);
-                fill(found, h('div', { class: 'notice ok' }, 'Chosen. The bot starts answering in that chat within a minute.'));
+                toast((await api('connect/room', asked({ room }))).message);
+                fill(found, h('div', { class: 'notice ok' }, who ? `Chosen. The bot starts answering ${who} in that chat within a minute.` : 'Chosen. The bot starts answering in that chat within a minute.'));
                 await refresh();
               }, { small: true }),
             ),
@@ -1000,13 +1043,15 @@
     const chatBody = h(
       'div',
       {},
-      h('p', {}, 'The bot answers in your "message yourself" chat: the one you get by texting your own number. ', h('b', {}, 'Text yourself once from your phone'), ' and it finds that chat by itself within a minute or two.'),
-      h('div', { class: 'row gap' }, action('Find my chat now', () => findRooms(undefined), { kind: 'quiet' })),
+      who
+        ? h('p', {}, `The bot answers ${who} in their "message yourself" chat: the one they get by texting their own number. `, h('b', {}, `${who} texts themself once from their phone`), ' and it finds that chat by itself within a minute or two, from the number their phone gave the bridge. It is found only among their own logins, never among anyone else\'s.')
+        : h('p', {}, 'The bot answers in your "message yourself" chat: the one you get by texting your own number. ', h('b', {}, 'Text yourself once from your phone'), ' and it finds that chat by itself within a minute or two.'),
+      h('div', { class: 'row gap' }, action(who ? `Find ${who}'s chat now` : 'Find my chat now', () => findRooms(undefined), { kind: 'quiet' })),
       h(
         'details',
         {},
         h('summary', {}, 'Use a phone number instead'),
-        h('label', {}, 'Your phone number'),
+        h('label', {}, who ? 'Their phone number' : 'Your phone number'),
         phone,
         h('div', { class: 'row gap' }, action('Find', () => findRooms(phone.value), { kind: 'quiet' })),
       ),
@@ -1015,8 +1060,8 @@
     function paintChat() {
       const s = d.state;
       fill(chatHead, 
-        h('div', { class: 'row spread' }, h('h2', {}, '2 · Your chat'), badge(inChat(s) ? 'found' : s.roomGone ? 'gone' : 'not found yet', inChat(s) ? 'ok' : 'warn')),
-        s.roomGone ? h('div', { class: 'notice bad' }, 'The chat the bot was answering in no longer exists. That usually means the chat was deleted on your phone. Text yourself once from your phone: the bot finds the new chat by itself. Nothing needs restarting.') : null,
+        h('div', { class: 'row spread' }, h('h2', {}, who ? `2 · ${who}'s chat` : '2 · Your chat'), badge(inChat(s) ? 'found' : s.roomGone ? 'gone' : 'not found yet', inChat(s) ? 'ok' : 'warn')),
+        s.roomGone ? h('div', { class: 'notice bad' }, who ? `The chat the bot was answering ${who} in no longer exists. That usually means it was deleted on their phone. ${who} texts themself once from their phone: the bot finds the new chat by itself. Nothing needs restarting, and nobody else's chat is affected.` : 'The chat the bot was answering in no longer exists. That usually means the chat was deleted on your phone. Text yourself once from your phone: the bot finds the new chat by itself. Nothing needs restarting.') : null,
         s.room ? dl([['Chat', h('span', { class: 'mono' }, s.room)]]) : null,
       );
     }
@@ -1061,16 +1106,52 @@
       );
     }
 
+    // --- taking a person off the host (a person only): their link to Google is cut from their own window, BEFORE they leave PEOPLE ---
+    function paintRemove() {
+      removeCard.hidden = !who;
+      if (!who) return;
+      const showLogins = action('Ask the bridge for their logins', async () => {
+        toast((await api('connect/send', asked({ text: 'logout' }))).message);
+        await pollLog();
+      }, { kind: 'quiet' });
+      const unlink = action(`Unlink ${who}`, async () => {
+        const id = loginId.value.trim();
+        if (!id || /\s/.test(id) || id.length > 200) throw new Error('Type the login id exactly as the bridge listed it (no spaces).');
+        if (!(await confirmPlain(`Unlink ${who}?`, `This signs ${who}'s Google Messages out of the bridge: the bot stops being able to text them, and their link to Google is cut. Do it before ${who} is taken out of PEOPLE in Render.`, 'Unlink'))) return;
+        toast((await api('connect/send', asked({ text: `logout ${id}` }))).message);
+        loginId.value = '';
+        await pollLog();
+      }, { kind: 'danger' });
+      fill(
+        removeCard,
+        h('h2', {}, `Take ${who} off this host`),
+        h('p', { class: 'muted' }, `Do these in order. Unlink FIRST: once ${who} is out of PEOPLE in Render the host no longer has their account, and their link to Google can no longer be cut from here.`),
+        h(
+          'ol',
+          { class: 'steps' },
+          h('li', {}, h('b', {}, 'Ask the bridge for their logins. '), 'It lists them below.', h('div', { class: 'row gap' }, showLogins, action('Read its answer', pollLog, { kind: 'quiet' }))),
+          h('li', {}, h('b', {}, 'Unlink. '), 'Type the login id it listed, then press the button.', loginId, h('div', { class: 'row gap' }, unlink)),
+          h('li', {}, h('b', {}, 'Check. '), 'The badge in step 1 reads "not linked" and the bridge says it signed out.'),
+          h('li', {}, h('b', {}, 'Then take them out of PEOPLE in Render. '), `That restarts the host (about a minute). ${who} also signs this session out in Google: Google Messages on their phone, Device pairing, and their Google account, Security, Your devices.`),
+        ),
+        h('h3', {}, 'What the bridge says'),
+        removeLog,
+        h('p', { class: 'muted' }, `What ${who} texted stays in the host's database, and the backups keep copies for at least three days. Their Google session leaves with the unlink; the backups hold it for the same days.`),
+      );
+    }
+
     function paintAll() {
       paintChecklist();
       paintLink();
       paintChat();
       paintDrive();
       paintAlert();
+      paintRemove();
     }
 
     async function refresh() {
-      d = await api('connect');
+      d = await api(route('connect'));
+      state.people = d.people || [];
       const nowLinked = linked(d.state);
       if (nowLinked && !wasLinked) {
         toast('Google Messages is linked.');
@@ -1104,7 +1185,72 @@
 
     const chatCard = h('section', { class: 'card' }, chatHead, chatBody);
     const linkCard = h('section', { class: 'card' }, linkHead, linkBody);
-    return [checklist, linkCard, chatCard, driveCard, alertCard, h('div', { class: 'row' }, action('Refresh now', () => refresh(), { kind: 'quiet' }))];
+    // Whose phone: you, or one of the people who use the bot (PEOPLE in Render). Each is a page of their own, with their own account and chat.
+    state.people = d.people || [];
+    const choose = (id) => {
+      state.person = id;
+      state.relink = false;
+      history.replaceState(null, '', id ? `#connect:${id}` : '#connect');
+      render();
+    };
+    const selector =
+      Array.isArray(state.people) && state.people.length > 0
+        ? h(
+            'section',
+            { class: 'card' },
+            h('div', { class: 'row' }, h('b', {}, 'Whose phone? '), [undefined, ...state.people].map((id) => h('button', { type: 'button', class: id === who ? 'small' : 'quiet small', 'aria-pressed': String(id === who), onclick: () => choose(id) }, id === undefined ? 'You' : id))),
+            who ? h('p', { class: 'muted' }, `This page is about ${who}'s phone, account and chat. Nothing here touches yours.`) : null,
+          )
+        : null;
+    return [selector, checklist, linkCard, chatCard, driveCard, alertCard, removeCard, h('div', { class: 'row' }, action('Refresh now', () => refresh(), { kind: 'quiet' }))];
+  };
+
+  // --- People: who else uses the bot (read only: who is in PEOPLE is Render's environment, and this page has no control that edits it) ---
+
+  const STEP_TEXT = { 'not-linked': ['not linked', ''], 'no-number': ['no phone number', 'bad'], 'waiting-for-chat': ['waiting for their chat', 'warn'], 'chat-missing': ['chat did not arrive', 'bad'], onboarded: ['set up', 'ok'] };
+
+  pages.people = async (state) => {
+    const d = await api('people');
+    if (d.people.length === 0) {
+      return [
+        card(
+          'People',
+          h('p', {}, 'Nobody besides you uses the bot.'),
+          h('p', { class: 'muted' }, 'To add someone, put their name (lower case letters and digits, 2 to 16 of them) in PEOPLE in the service\'s environment on Render; that restarts the host. Then link their phone on the Connect tab, with them next to you. This page only shows who is there: it changes nothing in Render.'),
+        ),
+      ];
+    }
+    const rows = d.people.map((one) => {
+      const step = one.onboarding ? STEP_TEXT[one.onboarding.step] || [one.onboarding.step, ''] : ['unknown', ''];
+      return h(
+        'tr',
+        {},
+        h('td', {}, h('a', { href: `#connect:${one.id}` }, one.id)),
+        h('td', {}, one.phase === 'running' ? badge('answering', 'ok') : badge(one.phase || 'unknown', one.phase === 'room-missing' ? 'bad' : 'warn')),
+        h('td', {}, one.bridge ? badge(one.bridge, one.bridge === 'CONNECTED' ? 'ok' : 'warn') : badge('not linked', '')),
+        h('td', {}, one.simNumber === true ? badge('yes', 'ok') : one.simNumber === false ? badge('no', one.bridge === 'CONNECTED' ? 'bad' : '') : badge('unknown', '')),
+        h('td', {}, badge(step[0], step[1])),
+        h('td', {}, one.sentThisMonthMb === null ? '—' : `${num(one.sentThisMonthMb)} MB${one.monthlyLimitMb === null ? ' (no limit)' : ` of ${num(one.monthlyLimitMb)} MB`}`),
+      );
+    });
+    const notes = d.people.flatMap((one) => [
+      one.onboarding && one.onboarding.warn && one.onboarding.message ? h('div', { class: 'notice bad' }, one.onboarding.message) : null,
+      one.error ? h('div', { class: 'notice bad' }, `${one.id}: ${one.error}`) : null,
+      ...one.problems.map((p) => h('div', { class: 'notice' }, p.message)),
+    ]);
+    return [
+      card(
+        'People besides you',
+        h('p', { class: 'muted' }, 'Each has their own Matrix account, Google Messages login and chat. They share the song catalog and your artist rules (their texts cannot change those). Select a name to open their Connect page.'),
+        h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['Person', 'Chat', 'Google Messages', 'Phone number', 'Set up', 'Songs this month'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))),
+        h('p', { class: 'muted' }, `Songs sent this month: ${num(d.ownerSentThisMonthMb)} MB to you, ${num(d.totalSentThisMonthMb)} MB to everybody (Render's free plan includes about 5,000 MB a month for the whole host).`),
+      ),
+      ...notes.filter(Boolean),
+      card(
+        'Adding or removing someone',
+        h('p', { class: 'muted' }, 'Add: put their name in PEOPLE in Render (that restarts the host), then link them on the Connect tab with them next to you. Remove: unlink them first on their Connect page (it has the steps), and only then take the name out of PEOPLE: afterwards the host has no account for them and their link to Google can no longer be cut from here.'),
+      ),
+    ];
   };
 
   // --- Account: the owner's own user name and password ---
@@ -1202,6 +1348,7 @@
   const TABS = [
     ['overview', 'Overview'],
     ['connect', 'Connect'],
+    ['people', 'People'],
     ['artists', 'Artists'],
     ['youtube', 'YouTube'],
     ['songs', 'Songs'],
@@ -1215,13 +1362,21 @@
   const state = {};
   let drawing = 0;
 
+  /** The address after the # is a tab, and for the Connect tab optionally `:` and a person (`#connect:alice`). */
+  function hashParts() {
+    const [id, person] = location.hash.replace(/^#/, '').split(':');
+    return [id, person && /^[a-z][a-z0-9]{1,15}$/.test(person) ? person : undefined];
+  }
+
   function currentTab() {
-    const id = location.hash.replace(/^#/, '');
+    const [id] = hashParts();
     return TABS.some(([key]) => key === id) ? id : 'overview';
   }
 
   async function render() {
     const tab = currentTab();
+    // The address says whose Connect page this is (nobody named: yours), so a reload or a link comes back to the same one.
+    if (tab === 'connect') state.person = hashParts()[1];
     const mine = ++drawing;
     for (const link of tabsBar.children) if (link.dataset.tab === tab) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
     document.getElementById('whereami').textContent = TABS.find(([key]) => key === tab)[1];

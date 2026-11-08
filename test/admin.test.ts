@@ -14,6 +14,7 @@ import { createCloudWeb } from '../src/cloud/web.ts';
 import { catalogFollows } from '../src/library/follows.ts';
 import { LibraryJobs, STATE } from '../src/library/jobs.ts';
 import { MusicTable } from '../src/sources/music-table.ts';
+import { addSent } from '../src/usage.ts';
 import { YouTubeMusic } from '../src/sources/youtube-music.ts';
 import { createNewReleases, ZemerReleases } from '../src/sources/zemer-releases.ts';
 import { ZemerWhitelist } from '../src/sources/zemer-whitelist.ts';
@@ -88,7 +89,7 @@ describe('the management console', () => {
     await Promise.all([content.close(), youMock.close(), feed.close(), site.close()]);
   });
 
-  /** Everything the bot assembles in matrix-main.ts, in memory, with the real console in front of it. */
+  /** Everything the bot assembles in src/host.ts, in memory, with the real console in front of it. */
   beforeEach(async () => {
     content.reset(LISTED);
     content.blocked.global = ['blockedsong'];
@@ -275,6 +276,17 @@ describe('the management console', () => {
       assert.equal(d.botReady, true);
       assert.equal(typeof d.startedAt, 'number');
       assert.deepEqual(Object.keys(d.actions).sort(), ['alerts-check', 'digest-preview', 'digest-send', 'prefetch', 'refresh-list', 'refresh-list-force', 'refresh-releases', 'sync-site']);
+    });
+
+    test('the overview’s traffic is everybody’s songs together, with each other person’s share named, and unchanged with only the owner', async () => {
+      const month = new Date().toISOString().slice(0, 7);
+      catalog.setState(`usage.${month}.sent_bytes`, String(1500 * 1048576));
+      const alone = await json(await get('/admin/api/overview'));
+      assert.deepEqual(alone.traffic, { sentMb: 1500, savedMb: 0, totalMb: 1500, alertMb: 4000, planMb: 5000 }, 'no people key when only the owner has been sent anything');
+      addSent(catalog, 700 * 1048576, new Date(), 'alice');
+      addSent(catalog, 300 * 1048576, new Date(), 'bob');
+      const shared = await json(await get('/admin/api/overview'));
+      assert.deepEqual(shared.traffic, { sentMb: 2500, savedMb: 0, totalMb: 2500, alertMb: 4000, planMb: 5000, people: [{ id: 'alice', sentMb: 700 }, { id: 'bob', sentMb: 300 }] });
     });
 
     test('the artist page: the list’s state, the saved copy searchable, the owner’s lists with times', async () => {
@@ -654,9 +666,13 @@ describe('the management console', () => {
 
     test('never shows a secret’s value anywhere, only whether it is set', async () => {
       env.MATRIX_PASSWORD = 'matrix-password-9981';
+      env.PEOPLE_PASSWORDS = 'alice:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0';
+      ring.add(`signed in with ${env.PEOPLE_PASSWORDS.slice(6)}`);
       const text = (await (await get('/admin/api/settings')).text()) + (await (await get('/admin/api/overview')).text()) + (await (await get('/admin/api/log')).text());
-      for (const secret of [TOKEN, SECRET_IN_ENV, 'matrix-password-9981']) assert.ok(!text.includes(secret), `${secret} must not appear`);
+      for (const secret of [TOKEN, SECRET_IN_ENV, 'matrix-password-9981', env.PEOPLE_PASSWORDS, env.PEOPLE_PASSWORDS.slice(6)]) assert.ok(!text.includes(secret), `${secret} must not appear`);
       const d = JSON.parse((await (await get('/admin/api/settings')).text())) as { settings: any[] };
+      const passwords = d.settings.find((s) => s.key === 'PEOPLE_PASSWORDS');
+      assert.deepEqual([passwords.secret, passwords.isSet, passwords.value, passwords.environment], [true, true, null, null]);
       const token = d.settings.find((s) => s.key === 'ADMIN_TOKEN');
       assert.deepEqual([token.secret, token.isSet, token.value, token.environment], [true, true, null, null]);
       assert.equal(d.settings.find((s) => s.key === 'R2_ACCESS_KEY_ID').isSet, false);
@@ -797,6 +813,20 @@ describe('the log kept for the console', () => {
     }
     assert.equal(redact('searching "achas" took 0.4s', secrets), 'searching "achas" took 0.4s');
     assert.ok(redact('x'.repeat(5000)).length <= 2001);
+  });
+
+  test('masks each person’s password in PEOPLE_PASSWORDS by itself, and the setting as a whole', () => {
+    const alice = 'a1'.repeat(32);
+    const bob = 'b2'.repeat(32);
+    const env = { PEOPLE: 'alice,bob', PEOPLE_PASSWORDS: `alice:${alice},bob:${bob}` };
+    const secrets = secretValues(env);
+    assert.ok(secrets.includes(env.PEOPLE_PASSWORDS) && secrets.includes(alice) && secrets.includes(bob));
+    assert.ok(!secrets.includes('alice,bob'), 'the names are not secret');
+    for (const line of [`signed in with ${alice}`, `${bob} was refused`, `PEOPLE_PASSWORDS=alice:${alice},bob:${bob}`]) {
+      const masked = redact(line, secrets);
+      assert.ok(!masked.includes(alice) && !masked.includes(bob), `leaked from: ${line}`);
+      assert.match(masked, /‹hidden›/);
+    }
   });
 
   test('taps the console: lines are kept, still written, and nothing is kept twice', () => {

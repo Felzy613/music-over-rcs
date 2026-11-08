@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { STARTUP_SENT_KEY, STARTUP_TEXT, sendStartupMessage, startupModeFrom, type StartupMode } from '../src/startup-message.ts';
+import { OWNER, personOf } from '../src/people.ts';
+import { PERSON_STARTUP_TEXT, STARTUP_SENT_KEY, STARTUP_TEXT, sendStartupMessage, startupKey, startupModeFrom, startupText, type StartupMode } from '../src/startup-message.ts';
 import type { Reply } from '../src/types.ts';
 
 function setUp(mode: StartupMode, extra: { readyAnswers?: boolean[]; failSends?: number; seed?: Record<string, string> } = {}) {
@@ -89,5 +90,27 @@ describe('the startup message', () => {
     const { run, sent } = setUp('once', { readyAnswers: [false] });
     assert.equal(await run({ sleep: async () => void (stopped = true), stopped: () => stopped }), false);
     assert.equal(sent.length, 0);
+  });
+});
+
+describe('the startup message for each person', () => {
+  const alice = personOf('alice');
+
+  test('the owner’s key and words are the ones they have always been; a person’s have their own', () => {
+    assert.equal(startupKey(OWNER), STARTUP_SENT_KEY);
+    assert.equal(startupKey(), STARTUP_SENT_KEY);
+    assert.equal(startupKey(alice), 'hello.sent:alice');
+    assert.equal(startupText(OWNER), STARTUP_TEXT);
+    assert.equal(startupText(alice), PERSON_STARTUP_TEXT);
+    assert.doesNotMatch(PERSON_STARTUP_TEXT, /Mac|cloud/, 'nothing about the owner’s setup');
+  });
+
+  test('once is remembered under the key it is given, so one person’s hello is not another’s', async () => {
+    const { run, store, sent } = setUp('once', { seed: { [STARTUP_SENT_KEY]: '2026-10-15T00:00:00.000Z' } });
+    assert.equal(await run({ key: startupKey(alice), text: startupText(alice) }), true, 'the owner was told; alice was not');
+    assert.deepEqual(sent, [[{ kind: 'text', text: PERSON_STARTUP_TEXT }]]);
+    assert.equal(store.get('hello.sent:alice'), '2026-10-16T03:00:00.000Z');
+    assert.equal(store.get(STARTUP_SENT_KEY), '2026-10-15T00:00:00.000Z', 'the owner’s mark is left alone');
+    assert.equal(await run({ key: startupKey(alice), text: startupText(alice) }), false, 'and now she has been');
   });
 });

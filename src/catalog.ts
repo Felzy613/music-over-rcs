@@ -92,11 +92,25 @@ export interface NewRelease {
   videoId?: string | undefined;
   /** ISO time this machine first saw it. */
   firstSeenAt: string;
-  /** ISO time it went out in a daily message, if it did. */
+  /** ISO time it went out in a daily message, if it did (to the chat the list was asked for: `Catalog.releases`). */
   announcedAt?: string | undefined;
-  /** ISO time a "new from an artist you follow" alert went out for it, if one did. */
+  /** ISO time a "new from an artist you follow" alert went out for it, if one did (to the same chat). */
   alertedAt?: string | undefined;
 }
+
+/**
+ * What a delivery mark is of: a site post or a Zemer release, in a daily message (`announced`) or in an alert for an artist
+ * followed (`alerted`).
+ */
+export type DeliveryKind = 'post.announced' | 'post.alerted' | 'release.announced' | 'release.alerted';
+
+/** Where each kind of mark is also kept for the owner, as it was before people: the shared row's own column. */
+const DELIVERY_SOURCES: Record<DeliveryKind, { table: 'site_posts' | 'zemer_releases'; id: 'slug' | 'id'; column: 'announced_at' | 'alerted_at' }> = {
+  'post.announced': { table: 'site_posts', id: 'slug', column: 'announced_at' },
+  'post.alerted': { table: 'site_posts', id: 'slug', column: 'alerted_at' },
+  'release.announced': { table: 'zemer_releases', id: 'id', column: 'announced_at' },
+  'release.alerted': { table: 'zemer_releases', id: 'id', column: 'alerted_at' },
+};
 
 /** A post on music-table.com as the catalog remembers it: enough to rank it and announce it. */
 export interface SitePost {
@@ -112,11 +126,14 @@ export interface SitePost {
   audioFiles: number;
   /** ISO time this machine first saw it. */
   firstSeenAt: string;
-  /** ISO time it went out in a daily message, if it did. */
+  /**
+   * ISO time it went out in the owner's daily message, if it did. Another person's marks are kept apart (`deliveries`, see
+   * `Catalog.delivery`), so the posts a query returns for them leave this out.
+   */
   announcedAt?: string | undefined;
   /** The site's categories it's in (ids). */
   categoryIds?: string[] | undefined;
-  /** ISO time a "new from an artist you follow" alert went out for it, if one did. */
+  /** ISO time a "new from an artist you follow" alert went out to the owner for it, if one did (like `announcedAt`, the owner's). */
   alertedAt?: string | undefined;
 }
 
@@ -214,11 +231,24 @@ const SCHEMA = `
     PRIMARY KEY (artist_id, track_id)
   );
   CREATE INDEX IF NOT EXISTS artist_tracks_by_track ON artist_tracks (track_id);
+  -- One row per person and artist: chat '' is the owner's, anyone else's is their id (people.ts). A database made before
+  -- people has the artist alone as its key; the constructor rebuilds it (SQLite can't change a primary key in place).
   CREATE TABLE IF NOT EXISTS follows (
-    artist_id INTEGER PRIMARY KEY REFERENCES artists (id) ON DELETE CASCADE,
+    chat      TEXT NOT NULL DEFAULT '',
+    artist_id INTEGER NOT NULL REFERENCES artists (id) ON DELETE CASCADE,
     following INTEGER NOT NULL,
     auto      INTEGER NOT NULL DEFAULT 0,
-    since     TEXT NOT NULL
+    since     TEXT NOT NULL,
+    PRIMARY KEY (chat, artist_id)
+  );
+  -- What went out to whom: the daily message and the alerts. The posts and releases themselves are shared; each person has
+  -- their own marks. kind is a DeliveryKind, key the post's slug or the release's id, at an ISO time.
+  CREATE TABLE IF NOT EXISTS deliveries (
+    chat TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    key  TEXT NOT NULL,
+    at   TEXT NOT NULL,
+    PRIMARY KEY (chat, kind, key)
   );
   CREATE TABLE IF NOT EXISTS message_links (
     message_id TEXT PRIMARY KEY,
@@ -336,11 +366,113 @@ export class Catalog {
     const cacheColumns = this.#db.prepare('PRAGMA table_info(audio_cache)').all().map((column) => String(column.name));
     if (!cacheColumns.includes('replaces')) this.#db.exec('ALTER TABLE audio_cache ADD COLUMN replaces TEXT');
     if (!cacheColumns.includes('tags')) this.#db.exec('ALTER TABLE audio_cache ADD COLUMN tags TEXT');
+    // Menus, pages, plays and follows belong to a chat: '' for the owner (every row there was), a person's id for anyone else
+    // (people.ts). What went out to whom is in `deliveries`; the owner's marks from before are copied into it.
+    this.#addChatColumn('views');
+    this.#addChatColumn('plays');
+    this.#addChatToFollows();
+    this.#copyOwnersMarks();
     // Songs that came before artists were kept get theirs now.
     const linked = Number(this.#db.prepare('SELECT count(*) AS n FROM artist_tracks').get()?.n);
     if (linked === 0) {
       for (const row of this.#db.prepare("SELECT id, artist FROM tracks WHERE artist != ''").all()) this.#linkArtists(Number(row.id), String(row.artist));
     }
+  }
+
+  /**
+   * Adds the chat column to a table made without it (every row in it was the owner's: ''). Another connection to the same
+   * file (the command-line tools, or the cloud host's second one in the same process) may add it between the check and this,
+   * which is not a failure.
+   */
+  #addChatColumn(table: 'views' | 'plays'): void {
+    const has = (): boolean => this.#db.prepare(`PRAGMA table_info(${table})`).all().some((column) => String(column.name) === 'chat');
+    if (has()) return;
+    try {
+      this.#db.exec(`ALTER TABLE ${table} ADD COLUMN chat TEXT NOT NULL DEFAULT ''`);
+    } catch (err) {
+      if (!has()) throw err;
+    }
+  }
+
+  /** Runs `work` as one transaction that takes the write lock at once (a second connection waits its turn, up to the busy timeout). */
+  #atomically(work: () => void): void {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      work();
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.#db.exec('ROLLBACK');
+      } catch {
+        // already rolled back by SQLite
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * A database made before people keyed follows by the artist alone, and SQLite can't change a primary key in place: the table
+   * is rebuilt keyed by (chat, artist), every row becoming the owner's, in one transaction. It is checked again once the write
+   * lock is held, so a second connection opening the same file at the same time finds it done and leaves it alone; a restored
+   * old-shaped file goes through the same.
+   */
+  #addChatToFollows(): void {
+    const has = (): boolean => this.#db.prepare('PRAGMA table_info(follows)').all().some((column) => String(column.name) === 'chat');
+    if (has()) return;
+    this.#atomically(() => {
+      if (has()) return;
+      this.#db.exec(`
+        DROP TABLE IF EXISTS follows_with_chat;
+        CREATE TABLE follows_with_chat (
+          chat      TEXT NOT NULL DEFAULT '',
+          artist_id INTEGER NOT NULL REFERENCES artists (id) ON DELETE CASCADE,
+          following INTEGER NOT NULL,
+          auto      INTEGER NOT NULL DEFAULT 0,
+          since     TEXT NOT NULL,
+          PRIMARY KEY (chat, artist_id)
+        );
+        -- A follow whose artist is gone (a file edited by hand with foreign keys off) is of no use, and would fail the new table's key.
+        INSERT INTO follows_with_chat (chat, artist_id, following, auto, since)
+          SELECT '', artist_id, following, auto, since FROM follows WHERE artist_id IN (SELECT id FROM artists);
+        DROP TABLE follows;
+        ALTER TABLE follows_with_chat RENAME TO follows;
+      `);
+    });
+  }
+
+  /**
+   * The owner's marks from before people (the post's or release's own announced_at and alerted_at) become delivery marks, so
+   * one query serves everybody. Marks already there are left alone, so this is safe to run every time the file is opened, and
+   * it picks up marks a program that didn't know the table (an older release, after a rollback) left behind.
+   */
+  #copyOwnersMarks(): void {
+    for (const [kind, { table, id, column }] of Object.entries(DELIVERY_SOURCES)) {
+      this.#db.prepare(`INSERT OR IGNORE INTO deliveries (chat, kind, key, at) SELECT '', ?, ${id}, ${column} FROM ${table} WHERE ${column} IS NOT NULL`).run(kind);
+    }
+  }
+
+  /**
+   * Notes that something went out to a chat, now or at `at`. Only things that exist are marked. The owner's mark is also put
+   * where it always was (the post's or release's own column), so a release rolled back to still knows what was sent.
+   */
+  #deliver(kind: DeliveryKind, keys: string[], at: Date, chat: string): void {
+    if (keys.length === 0) return;
+    const { table, id, column } = DELIVERY_SOURCES[kind];
+    const stamp = at.toISOString();
+    const record = this.#db.prepare(`INSERT OR REPLACE INTO deliveries (chat, kind, key, at) SELECT ?, ?, ${id}, ? FROM ${table} WHERE ${id} = ?`);
+    const legacy = chat === '' ? this.#db.prepare(`UPDATE ${table} SET ${column} = ? WHERE ${id} = ?`) : undefined;
+    this.#atomically(() => {
+      for (const key of keys) {
+        record.run(chat, kind, stamp, key);
+        legacy?.run(stamp, key);
+      }
+    });
+  }
+
+  /** When something went out to a chat (the owner's unless another is named), or nothing if it hasn't. */
+  delivery(kind: DeliveryKind, key: string, chat = ''): string | undefined {
+    const row = this.#db.prepare('SELECT at FROM deliveries WHERE chat = ? AND kind = ? AND key = ?').get(chat, kind, key);
+    return row ? String(row.at) : undefined;
   }
 
   /** Records which artists a song is by, from its credit. */
@@ -487,11 +619,11 @@ export class Catalog {
       .map((row) => ({ ...toTrack(row), addedAt: String(row.added_at) }));
   }
 
-  /** The chat's newest menus and pages (views), newest first: what each is of, how many lines it has shown, when it was made and last used. */
-  recentViews(limit: number): Array<{ id: number; parent: number | null; kind: string; key: string; shown: number; at: string; usedAt: string }> {
+  /** The chat's newest menus and pages (views), newest first: what each is of, how many lines it has shown, when it was made and last used. The owner's chat unless another's is named. */
+  recentViews(limit: number, chat = ''): Array<{ id: number; parent: number | null; kind: string; key: string; shown: number; at: string; usedAt: string }> {
     return this.#db
-      .prepare('SELECT id, parent, kind, key, shown, at, used_at FROM views ORDER BY id DESC LIMIT ?')
-      .all(Math.max(1, Math.min(100, limit)))
+      .prepare('SELECT id, parent, kind, key, shown, at, used_at FROM views WHERE chat = ? ORDER BY id DESC LIMIT ?')
+      .all(chat, Math.max(1, Math.min(100, limit)))
       .map((row) => {
         let shown = 0;
         try {
@@ -505,12 +637,15 @@ export class Catalog {
   }
 
   // --- plays: what you ask for, so the most played songs can be kept ready ---
+  //
+  // A play belongs to the chat that asked ('' is the owner's, anyone else's is their id), because what follows from plays
+  // (an artist followed after three songs, an alert held back for a song you've had) is each person's own.
 
-  recordPlay(trackId: number, at: Date = new Date()): void {
-    this.#db.prepare('INSERT INTO plays (track_id, at) VALUES (?, ?)').run(trackId, at.toISOString());
+  recordPlay(trackId: number, at: Date = new Date(), chat = ''): void {
+    this.#db.prepare('INSERT INTO plays (track_id, at, chat) VALUES (?, ?, ?)').run(trackId, at.toISOString(), chat);
   }
 
-  /** The songs you asked for most, most first (ties: the one asked for most recently). */
+  /** The songs asked for most by everybody together (what is kept ready is for all), most first (ties: the one asked for most recently). */
   mostPlayed(limit: number): Array<Track & { plays: number }> {
     return this.#db
       .prepare(
@@ -559,17 +694,28 @@ export class Catalog {
     return row ? toSitePost(row) : undefined;
   }
 
-  /** Posts published after `since` that have not gone out in a daily message yet, newest first. */
-  postsToAnnounce(since: Date, limit = 30): SitePost[] {
-    return this.#db
-      .prepare('SELECT * FROM site_posts WHERE published_at > ? AND announced_at IS NULL ORDER BY published_at DESC LIMIT ?')
-      .all(since.toISOString(), limit)
-      .map(toSitePost);
+  /** A post as a chat is shown it: the owner's own marks stay on it; another person's are not on the shared row, so they are left off. */
+  #forChat(post: SitePost, chat: string): SitePost {
+    if (chat === '') return post;
+    const { announcedAt: _announced, alertedAt: _alerted, ...rest } = post;
+    return rest;
   }
 
-  markAnnounced(slugs: string[], at: Date = new Date()): void {
-    const mark = this.#db.prepare('UPDATE site_posts SET announced_at = ? WHERE slug = ?');
-    for (const slug of slugs) mark.run(at.toISOString(), slug);
+  /** Posts published after `since` that have not gone out in this chat's daily message yet (the owner's unless another is named), newest first. */
+  postsToAnnounce(since: Date, limit = 30, chat = ''): SitePost[] {
+    return this.#db
+      .prepare(
+        `SELECT p.* FROM site_posts p
+          WHERE p.published_at > ?
+            AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.chat = ? AND d.kind = 'post.announced' AND d.key = p.slug)
+          ORDER BY p.published_at DESC LIMIT ?`,
+      )
+      .all(since.toISOString(), chat, limit)
+      .map((row) => this.#forChat(toSitePost(row), chat));
+  }
+
+  markAnnounced(slugs: string[], at: Date = new Date(), chat = ''): void {
+    this.#deliver('post.announced', slugs, at, chat);
   }
 
   /** Posts with music, published since `since`, most viewed first. */
@@ -758,44 +904,62 @@ export class Catalog {
 
   // --- artists you follow: new songs by them are sent as soon as they're out ---
 
+  //
+  // Follows belong to a chat ('' is the owner's, anyone else's is their id): each person follows their own artists, and an
+  // unfollow (the 'off' mark) is theirs alone. The `chat` of every method here is the last parameter and means the owner's
+  // when left out.
+
   /** Follows an artist. A follow you set yourself replaces one made from your plays, and undoes an unfollow. */
-  follow(artistId: number, auto = false, now: Date = new Date()): void {
+  follow(artistId: number, auto = false, now: Date = new Date(), chat = ''): void {
     this.#db
       .prepare(
-        `INSERT INTO follows (artist_id, following, auto, since) VALUES (?, 1, ?, ?)
-         ON CONFLICT (artist_id) DO UPDATE SET following = 1, auto = excluded.auto, since = excluded.since`,
+        `INSERT INTO follows (chat, artist_id, following, auto, since) VALUES (?, ?, 1, ?, ?)
+         ON CONFLICT (chat, artist_id) DO UPDATE SET following = 1, auto = excluded.auto, since = excluded.since`,
       )
-      .run(artistId, auto ? 1 : 0, now.toISOString());
+      .run(chat, artistId, auto ? 1 : 0, now.toISOString());
   }
 
   /** Stops following, and remembers it, so your plays won't follow the artist again. */
-  unfollow(artistId: number, now: Date = new Date()): void {
+  unfollow(artistId: number, now: Date = new Date(), chat = ''): void {
     this.#db
-      .prepare('INSERT INTO follows (artist_id, following, auto, since) VALUES (?, 0, 0, ?) ON CONFLICT (artist_id) DO UPDATE SET following = 0, auto = 0, since = excluded.since')
-      .run(artistId, now.toISOString());
+      .prepare(
+        `INSERT INTO follows (chat, artist_id, following, auto, since) VALUES (?, ?, 0, 0, ?)
+         ON CONFLICT (chat, artist_id) DO UPDATE SET following = 0, auto = 0, since = excluded.since`,
+      )
+      .run(chat, artistId, now.toISOString());
   }
 
   /** 'on', 'off' (you unfollowed), or nothing yet. */
-  followState(artistId: number): 'on' | 'off' | undefined {
-    const row = this.#db.prepare('SELECT following FROM follows WHERE artist_id = ?').get(artistId);
+  followState(artistId: number, chat = ''): 'on' | 'off' | undefined {
+    const row = this.#db.prepare('SELECT following FROM follows WHERE chat = ? AND artist_id = ?').get(chat, artistId);
     return row ? (Number(row.following) ? 'on' : 'off') : undefined;
   }
 
   /** The artists you follow, and which of them came from your plays. */
-  followed(): Array<Artist & { auto: boolean }> {
+  followed(chat = ''): Array<Artist & { auto: boolean }> {
     return this.#db
       .prepare(
         `SELECT a.id, a.name, f.auto, (SELECT count(*) FROM artist_tracks at WHERE at.artist_id = a.id) AS songs
-           FROM follows f JOIN artists a ON a.id = f.artist_id WHERE f.following = 1 ORDER BY a.name`,
+           FROM follows f JOIN artists a ON a.id = f.artist_id WHERE f.chat = ? AND f.following = 1 ORDER BY a.name`,
       )
-      .all()
+      .all(chat)
       .map((row) => ({ id: Number(row.id), name: String(row.name), songs: Number(row.songs), auto: Boolean(Number(row.auto)) }));
   }
 
+  /** The chats that follow anyone, the owner's ('') first: who the background jobs have alerts to look for. */
+  followingChats(): string[] {
+    return this.#db
+      .prepare('SELECT DISTINCT chat FROM follows WHERE following = 1 ORDER BY chat')
+      .all()
+      .map((row) => String(row.chat));
+  }
+
   /** How many different songs by an artist you've had. */
-  playedSongsBy(artistId: number): number {
+  playedSongsBy(artistId: number, chat = ''): number {
     return Number(
-      this.#db.prepare('SELECT count(DISTINCT p.track_id) AS n FROM plays p JOIN artist_tracks at ON at.track_id = p.track_id WHERE at.artist_id = ?').get(artistId)?.n,
+      this.#db
+        .prepare('SELECT count(DISTINCT p.track_id) AS n FROM plays p JOIN artist_tracks at ON at.track_id = p.track_id WHERE at.artist_id = ? AND p.chat = ?')
+        .get(artistId, chat)?.n,
     );
   }
 
@@ -811,29 +975,29 @@ export class Catalog {
   }
 
   /**
-   * Posts with music, published and first seen since `since`, not alerted yet, by an artist you follow and seen after
-   * you started following them, none of whose songs you've had already; newest first.
+   * Posts with music, published and first seen since `since`, not alerted to this chat yet, by an artist it follows and seen
+   * after it started following them, none of whose songs it has had already; newest first. The owner's chat unless another is named.
    */
-  postsToAlert(since: Date): Array<SitePost & { artists: string[] }> {
+  postsToAlert(since: Date, chat = ''): Array<SitePost & { artists: string[] }> {
     return this.#db
       .prepare(
         `SELECT p.*, json_group_array(DISTINCT a.name) AS artist_names
            FROM site_posts p
            JOIN tracks t ON t.post = p.slug
            JOIN artist_tracks at ON at.track_id = t.id
-           JOIN follows f ON f.artist_id = at.artist_id AND f.following = 1 AND p.first_seen_at >= f.since
+           JOIN follows f ON f.chat = ? AND f.artist_id = at.artist_id AND f.following = 1 AND p.first_seen_at >= f.since
            JOIN artists a ON a.id = at.artist_id
-          WHERE p.audio_files > 0 AND p.alerted_at IS NULL AND p.first_seen_at >= ? AND p.published_at >= ?
-            AND NOT EXISTS (SELECT 1 FROM plays pl JOIN tracks played ON played.id = pl.track_id WHERE played.post = p.slug)
+          WHERE p.audio_files > 0 AND p.first_seen_at >= ? AND p.published_at >= ?
+            AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.chat = ? AND d.kind = 'post.alerted' AND d.key = p.slug)
+            AND NOT EXISTS (SELECT 1 FROM plays pl JOIN tracks played ON played.id = pl.track_id WHERE played.post = p.slug AND pl.chat = ?)
           GROUP BY p.slug ORDER BY p.published_at DESC`,
       )
-      .all(since.toISOString(), since.toISOString())
-      .map((row) => ({ ...toSitePost(row), artists: (JSON.parse(String(row.artist_names ?? '[]')) as unknown[]).map(String) }));
+      .all(chat, since.toISOString(), since.toISOString(), chat, chat)
+      .map((row) => ({ ...this.#forChat(toSitePost(row), chat), artists: (JSON.parse(String(row.artist_names ?? '[]')) as unknown[]).map(String) }));
   }
 
-  markAlerted(slugs: string[], at: Date = new Date()): void {
-    const mark = this.#db.prepare('UPDATE site_posts SET alerted_at = ? WHERE slug = ?');
-    for (const slug of slugs) mark.run(at.toISOString(), slug);
+  markAlerted(slugs: string[], at: Date = new Date(), chat = ''): void {
+    this.#deliver('post.alerted', slugs, at, chat);
   }
 
   // --- Zemer's new releases: the feed of its latest releases, kept up to date by the sync ---
@@ -858,45 +1022,57 @@ export class Catalog {
     return { isNew: !known };
   }
 
-  /** Every release kept, newest first. */
-  releases(): NewRelease[] {
-    return this.#db.prepare('SELECT * FROM zemer_releases ORDER BY released_at DESC, id').all().map(toRelease);
-  }
+  /** The columns of a release with the daily-message and alert marks of one chat (the two `?` are that chat), for the queries below. */
+  static readonly #RELEASES_FOR_CHAT = `SELECT r.id, r.title, r.artist, r.artist_id, r.cover, r.released_at, r.songs, r.video_id, r.first_seen_at,
+           announced.at AS announced_at, alerted.at AS alerted_at
+      FROM zemer_releases r
+      LEFT JOIN deliveries announced ON announced.chat = ? AND announced.kind = 'release.announced' AND announced.key = r.id
+      LEFT JOIN deliveries alerted ON alerted.chat = ? AND alerted.kind = 'release.alerted' AND alerted.key = r.id`;
 
-  /** Forgets the releases that came out before `before` (the feed holds only a couple of weeks). Says how many. */
-  pruneReleases(before: Date): number {
-    return Number(this.#db.prepare('DELETE FROM zemer_releases WHERE released_at < ?').run(before.toISOString()).changes);
-  }
-
-  markReleasesAnnounced(ids: string[], at: Date = new Date()): void {
-    const mark = this.#db.prepare('UPDATE zemer_releases SET announced_at = ? WHERE id = ?');
-    for (const id of ids) mark.run(at.toISOString(), id);
-  }
-
-  markReleasesAlerted(ids: string[], at: Date = new Date()): void {
-    const mark = this.#db.prepare('UPDATE zemer_releases SET alerted_at = ? WHERE id = ?');
-    for (const id of ids) mark.run(at.toISOString(), id);
-  }
-
-  /** Releases that came out and were first seen since `since` and have not been alerted yet, newest first. */
-  unalertedReleases(since: Date): NewRelease[] {
+  /** Every release kept, newest first, each with when it went out to this chat (the owner's unless another is named). */
+  releases(chat = ''): NewRelease[] {
     return this.#db
-      .prepare('SELECT * FROM zemer_releases WHERE alerted_at IS NULL AND first_seen_at >= ? AND released_at >= ? ORDER BY released_at DESC, id')
-      .all(since.toISOString(), since.toISOString())
+      .prepare(`${Catalog.#RELEASES_FOR_CHAT} ORDER BY r.released_at DESC, r.id`)
+      .all(chat, chat)
       .map(toRelease);
   }
 
-  /** The artists you follow, as they are compared (their key), with when each follow began. */
-  followedSince(): Array<{ key: string; name: string; since: string }> {
+  /** Forgets the releases that came out before `before` (the feed holds only a couple of weeks), and what went out about them. Says how many. */
+  pruneReleases(before: Date): number {
+    const gone = Number(this.#db.prepare('DELETE FROM zemer_releases WHERE released_at < ?').run(before.toISOString()).changes);
+    if (gone > 0) this.#db.prepare("DELETE FROM deliveries WHERE kind IN ('release.announced', 'release.alerted') AND key NOT IN (SELECT id FROM zemer_releases)").run();
+    return gone;
+  }
+
+  markReleasesAnnounced(ids: string[], at: Date = new Date(), chat = ''): void {
+    this.#deliver('release.announced', ids, at, chat);
+  }
+
+  markReleasesAlerted(ids: string[], at: Date = new Date(), chat = ''): void {
+    this.#deliver('release.alerted', ids, at, chat);
+  }
+
+  /** Releases that came out and were first seen since `since` and have not been alerted to this chat yet, newest first. */
+  unalertedReleases(since: Date, chat = ''): NewRelease[] {
     return this.#db
-      .prepare('SELECT a.key, a.name, f.since FROM follows f JOIN artists a ON a.id = f.artist_id WHERE f.following = 1')
-      .all()
+      .prepare(`${Catalog.#RELEASES_FOR_CHAT} WHERE alerted.at IS NULL AND r.first_seen_at >= ? AND r.released_at >= ? ORDER BY r.released_at DESC, r.id`)
+      .all(chat, chat, since.toISOString(), since.toISOString())
+      .map(toRelease);
+  }
+
+  /** The artists this chat follows, as they are compared (their key), with when each follow began. */
+  followedSince(chat = ''): Array<{ key: string; name: string; since: string }> {
+    return this.#db
+      .prepare('SELECT a.key, a.name, f.since FROM follows f JOIN artists a ON a.id = f.artist_id WHERE f.chat = ? AND f.following = 1')
+      .all(chat)
       .map((row) => ({ key: String(row.key), name: String(row.name), since: String(row.since) }));
   }
 
-  /** Whether you've had a song of this release already (a song is on a release once Zemer has opened it). */
-  releaseHad(id: string): boolean {
-    return this.#db.prepare("SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE json_extract(t.album, '$.id') = ? LIMIT 1").get(id) !== undefined;
+  /** Whether this chat has had a song of this release already (a song is on a release once Zemer has opened it). */
+  releaseHad(id: string, chat = ''): boolean {
+    return (
+      this.#db.prepare("SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.chat = ? AND json_extract(t.album, '$.id') = ? LIMIT 1").get(chat, id) !== undefined
+    );
   }
 
   artistName(artistId: number): string | undefined {
@@ -924,19 +1100,24 @@ export class Catalog {
   }
 
   // --- the chat's menus and pages (see views.ts) ---
+  //
+  // Each belongs to one chat: '' is the owner's (and every view there was before there were people), anyone else's is their
+  // id. Ids are global and never reused, but a number from one chat means nothing in another: reading, saving and touching
+  // all name the chat, and a view of another chat is simply not found.
 
-  /** A new view; old ones (unused for a month, or past the newest 300) are cleared out first. */
-  openView(key: ViewKey, parent: number | undefined, at: Date = new Date()): View {
+  /** A new view; old ones (unused for a month, or past the newest 300 of the chat) are cleared out first. */
+  openView(key: ViewKey, parent: number | undefined, at: Date = new Date(), chat = ''): View {
     this.#db.prepare('DELETE FROM views WHERE used_at < ?').run(new Date(at.getTime() - VIEW_DAYS * 24 * 60 * 60_000).toISOString());
-    this.#db.prepare('DELETE FROM views WHERE id NOT IN (SELECT id FROM views ORDER BY id DESC LIMIT ?)').run(VIEWS_KEPT - 1);
+    this.#db.prepare('DELETE FROM views WHERE chat = ? AND id NOT IN (SELECT id FROM views WHERE chat = ? ORDER BY id DESC LIMIT ?)').run(chat, chat, VIEWS_KEPT - 1);
     const result = this.#db
-      .prepare('INSERT INTO views (parent, kind, key, shown, at, used_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(parent ?? null, key.kind, JSON.stringify(key), '[]', at.toISOString(), at.toISOString());
+      .prepare('INSERT INTO views (parent, kind, key, shown, at, used_at, chat) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(parent ?? null, key.kind, JSON.stringify(key), '[]', at.toISOString(), at.toISOString(), chat);
     return { id: Number(result.lastInsertRowid), ...(parent !== undefined ? { parent } : {}), key, shown: [] };
   }
 
-  view(id: number): View | undefined {
-    const row = this.#db.prepare('SELECT * FROM views WHERE id = ?').get(id);
+  /** A view of this chat; undefined for one that is gone, damaged, or another chat's. */
+  view(id: number, chat = ''): View | undefined {
+    const row = this.#db.prepare('SELECT * FROM views WHERE id = ? AND chat = ?').get(id, chat);
     if (!row) return undefined;
     try {
       const key = JSON.parse(String(row.key)) as ViewKey;
@@ -954,14 +1135,15 @@ export class Catalog {
     }
   }
 
-  saveView(view: View, at: Date = new Date()): void {
+  /** Keeps what a view of this chat has shown. Another chat's view is left as it is. */
+  saveView(view: View, at: Date = new Date(), chat = ''): void {
     this.#db
-      .prepare('UPDATE views SET key = ?, shown = ?, last_more = ?, used_at = ? WHERE id = ?')
-      .run(JSON.stringify(view.key), JSON.stringify(view.shown), view.lastMore ?? null, at.toISOString(), view.id);
+      .prepare('UPDATE views SET key = ?, shown = ?, last_more = ?, used_at = ? WHERE id = ? AND chat = ?')
+      .run(JSON.stringify(view.key), JSON.stringify(view.shown), view.lastMore ?? null, at.toISOString(), view.id, chat);
   }
 
-  touchView(id: number, at: Date = new Date()): void {
-    this.#db.prepare('UPDATE views SET used_at = ? WHERE id = ?').run(at.toISOString(), id);
+  touchView(id: number, at: Date = new Date(), chat = ''): void {
+    this.#db.prepare('UPDATE views SET used_at = ? WHERE id = ? AND chat = ?').run(at.toISOString(), id, chat);
   }
 
   // --- small facts the bot keeps between runs (when the daily message last went out, …) ---
@@ -1045,6 +1227,8 @@ export class Catalog {
         counts.follows = copy('follows');
         counts.posts = copy('site_posts');
         counts.state = copy('state', "WHERE key NOT LIKE 'chat.%' AND key NOT LIKE 'health.%' AND key NOT LIKE 'matrix.%' AND key NOT LIKE 'instinct.%'", 'INSERT OR REPLACE');
+        // What went out to whom, to go with the posts (the other file's own marks were copied into it when it was opened above).
+        copy('deliveries', "WHERE kind LIKE 'post.%'", 'INSERT OR IGNORE');
         this.#db.exec('COMMIT');
       } catch (err) {
         this.#db.exec('ROLLBACK');
@@ -1109,28 +1293,43 @@ export function resumeIn(catalog: Pick<Catalog, 'getState' | 'setState'>, key = 
 
 /**
  * The chat's views (menus, artists, albums, lists) and which one is current (state `chat.view`), kept in the catalog's
- * database, so "songs more" and a 👍 on an older menu still work after a restart.
+ * database, so "songs more" and a 👍 on an older menu still work after a restart. The store belongs to one chat (`chat`: ''
+ * for the owner, a person's id for anyone else): it opens, reads and saves only that chat's views, and its current-view
+ * pointer is the state `key` (`scoped('chat.view', person)`).
  */
-export function viewsIn(catalog: Pick<Catalog, 'openView' | 'view' | 'saveView' | 'touchView' | 'getState' | 'setState'>, key = 'chat.view'): ViewStore {
+export function viewsIn(
+  catalog: Pick<Catalog, 'openView' | 'view' | 'saveView' | 'touchView' | 'getState' | 'setState'>,
+  key = 'chat.view',
+  chat = '',
+): ViewStore {
   return {
-    open: (viewKey, parent) => catalog.openView(viewKey, parent),
-    get: (id) => catalog.view(id),
-    save: (view) => catalog.saveView(view),
+    open: (viewKey, parent) => catalog.openView(viewKey, parent, undefined, chat),
+    get: (id) => catalog.view(id, chat),
+    save: (view) => catalog.saveView(view, undefined, chat),
     current() {
       const id = Number(catalog.getState(key) || NaN);
-      return Number.isInteger(id) ? catalog.view(id) : undefined;
+      return Number.isInteger(id) ? catalog.view(id, chat) : undefined;
     },
     setCurrent(id) {
       catalog.setState(key, id === undefined ? '' : String(id));
-      if (id !== undefined) catalog.touchView(id);
+      if (id !== undefined) catalog.touchView(id, undefined, chat);
     },
   };
 }
 
-/** Which sent messages stand for which song, kept in the catalog's database so a 👍 works across processes and restarts. */
-export function linksIn(catalog: Pick<Catalog, 'linkMessage' | 'linkedPostback'>): MessageLinks {
+/** The start of a message key that stands for what a message said (the runner's `text:` fallback), not for its id. */
+const TEXT_KEY = 'text:';
+
+/**
+ * Which sent messages stand for which song, kept in the catalog's database so a 👍 works across processes and restarts.
+ * A message's id belongs to one room, but what a message says can be the same in two: people shown the same line would
+ * share the `text:` fallback key and could be handed each other's view. So `scope` (a person's id; empty for the owner,
+ * whose keys are as they always were) is put into that key and only that one.
+ */
+export function linksIn(catalog: Pick<Catalog, 'linkMessage' | 'linkedPostback'>, scope = ''): MessageLinks {
+  const keyOf = (messageId: string): string => (scope && messageId.startsWith(TEXT_KEY) ? `text@${scope}:${messageId.slice(TEXT_KEY.length)}` : messageId);
   return {
-    link: (messageId, postback) => catalog.linkMessage(messageId, postback),
-    lookup: (messageId) => catalog.linkedPostback(messageId),
+    link: (messageId, postback) => catalog.linkMessage(keyOf(messageId), postback),
+    lookup: (messageId) => catalog.linkedPostback(keyOf(messageId)),
   };
 }

@@ -19,12 +19,17 @@ export interface CloudDeps {
   adminToken: string | undefined;
   /** What /status reports. */
   status(): Promise<Record<string, unknown>> | Record<string, unknown>;
-  /** Sends a command to the bridge's bot (`login google`, then the pasted request), and reads what it answered. */
-  pair: { send(text: string): Promise<void>; log(): Promise<PairLine[]> };
-  /** Rooms the bridge made for the chat with this phone number. */
-  rooms(phone: string): Promise<string[]> | string[];
-  /** Chooses the room the bot answers in. */
-  setRoom(room: string): Promise<void> | void;
+  /**
+   * Sends a command to the bridge's bot (`login google`, then the pasted request), and reads what it answered. With a `person` (an id from
+   * `people`) it is that person's own window to the bridge, with their account; without one, the owner's.
+   */
+  pair: { send(text: string, person?: string): Promise<void>; log(person?: string): Promise<PairLine[]> };
+  /** Rooms the bridge made for the chat with this phone number (for this person's own logins, when a `person` is named). */
+  rooms(phone: string, person?: string): Promise<string[]> | string[];
+  /** Chooses the room the bot answers in (this person's, when a `person` is named). */
+  setRoom(room: string, person?: string): Promise<void> | void;
+  /** The people besides the owner (PEOPLE): the only names `?person=` and a `person` field may carry. None means the routes take no person. */
+  people?(): Array<{ id: string }>;
   /** Whether a catalog may be uploaded now (ALLOW_IMPORT=1 and the bot not started). */
   canImport(): boolean;
   /** Reads an uploaded catalog file into this one; the file is deleted afterwards. */
@@ -100,6 +105,16 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   throw new HttpError(400, 'expected a JSON object');
 }
 
+/**
+ * The person a request is about: nothing (or `owner`) for the owner, otherwise one of the people the host has. Anything else is refused, so a
+ * request can never reach a window, a chat or a room of someone who isn't there.
+ */
+function personIn(raw: unknown, deps: CloudDeps, status: 400 | 404): string | undefined {
+  if (raw === undefined || raw === null || raw === '' || raw === 'owner') return undefined;
+  if (typeof raw !== 'string' || !(deps.people?.() ?? []).some((one) => one.id === raw)) throw new HttpError(status, 'there is nobody called that on this host');
+  return raw;
+}
+
 function send(res: ServerResponse, status: number, body: unknown, type = 'application/json'): void {
   const text = type === 'application/json' ? JSON.stringify(body) : String(body);
   res.writeHead(status, { 'content-type': `${type}; charset=utf-8`, ...SECURITY_HEADERS });
@@ -153,20 +168,26 @@ export function createCloudWeb(deps: CloudDeps): Server {
 
       if (req.method === 'GET' && path === '/status') return send(res, 200, await deps.status());
       if (req.method === 'GET' && (path === '/pair' || path === '/')) {
-        // The setup page is the console's Connect page now; the old addresses lead there.
+        // The setup page is the console's Connect page now; the old addresses lead there (`/pair?person=alice` to that person's page).
         if (deps.admin) {
-          res.writeHead(302, { location: path === '/pair' ? '/admin/#connect' : '/admin/', ...SECURITY_HEADERS });
+          const person = path === '/pair' ? personIn(url.searchParams.get('person'), deps, 404) : undefined;
+          res.writeHead(302, { location: path !== '/pair' ? '/admin/' : person === undefined ? '/admin/#connect' : `/admin/#connect:${person}`, ...SECURITY_HEADERS });
           return void res.end();
         }
         if (deps.pageHtml === undefined) return send(res, 404, { error: 'not found' });
         return send(res, 200, deps.pageHtml, 'text/html');
       }
-      if (req.method === 'GET' && path === '/pair/log') return send(res, 200, { lines: await deps.pair.log() });
+      if (req.method === 'GET' && path === '/pair/log') {
+        const person = personIn(url.searchParams.get('person'), deps, 404);
+        return send(res, 200, { lines: await (person === undefined ? deps.pair.log() : deps.pair.log(person)) });
+      }
       if (req.method === 'POST' && path === '/pair/send') {
-        const text = (await readJson(req)).text;
+        const body = await readJson(req);
+        const text = body.text;
         if (typeof text !== 'string' || !text.trim()) throw new HttpError(400, 'text is required');
         if (text.length > 20_000) throw new HttpError(413, 'that is too long to be a command');
-        await deps.pair.send(text);
+        const person = personIn(body.person, deps, 400);
+        await (person === undefined ? deps.pair.send(text) : deps.pair.send(text, person));
         return send(res, 200, { ok: true });
       }
       if (path === '/onedrive/status' || path === '/onedrive/start') {
@@ -182,12 +203,19 @@ export function createCloudWeb(deps: CloudDeps): Server {
       if (req.method === 'GET' && path === '/setup/rooms') {
         const phone = (url.searchParams.get('phone') ?? '').replace(/\D/g, '');
         if (phone.length < 7) throw new HttpError(400, 'phone is required (your number, digits only)');
-        return send(res, 200, { rooms: await deps.rooms(phone) });
+        const person = personIn(url.searchParams.get('person'), deps, 404);
+        return send(res, 200, { rooms: await (person === undefined ? deps.rooms(phone) : deps.rooms(phone, person)) });
       }
       if (req.method === 'POST' && path === '/setup/room') {
-        const room = (await readJson(req)).room;
+        const body = await readJson(req);
+        const room = body.room;
         if (typeof room !== 'string' || !/^![^\s:]+:[^\s]+$/.test(room)) throw new HttpError(400, 'room must look like !abc:server');
-        await deps.setRoom(room);
+        const person = personIn(body.person, deps, 400);
+        try {
+          await (person === undefined ? deps.setRoom(room) : deps.setRoom(room, person));
+        } catch (err) {
+          throw new HttpError(409, err instanceof Error ? err.message : 'that chat cannot be chosen');
+        }
         return send(res, 200, { ok: true });
       }
       if (req.method === 'POST' && path === '/admin/import-catalog') {

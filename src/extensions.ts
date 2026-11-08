@@ -7,7 +7,7 @@ import type { IncomingPicture } from './runner.ts';
 import type { Reply } from './types.ts';
 
 // Add-ons kept outside this repository. Each is a folder in extensions/ (which git ignores) whose index.ts
-// default-exports a function that sets it up. The bridge route (matrix-main.ts) loads them; the cloud image does not include
+// default-exports a function that sets it up. The bridge route (`startHost` in src/host.ts) loads them, and they belong to the owner's chat; the cloud image does not include
 // extensions/, so an add-on runs only where the bot runs from a checkout.
 
 /** What an add-on can use from the bot when it's set up. */

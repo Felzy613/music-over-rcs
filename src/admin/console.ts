@@ -9,7 +9,7 @@ import type { YouTubeMusic } from '../sources/youtube-music.ts';
 import type { NewReleases } from '../sources/zemer-releases.ts';
 import type { Verdict, ZemerWhitelist } from '../sources/zemer-whitelist.ts';
 import type { Reply } from '../types.ts';
-import { TRAFFIC_ALERT_BYTES, archivedThisMonth, sentThisMonth } from '../usage.ts';
+import { TRAFFIC_ALERT_BYTES, archivedThisMonth, sentByEveryone, sentShares } from '../usage.ts';
 import { ActionGuard, AdminError, type ActionOutcome } from './actions.ts';
 import { AdminAccount, MAX_PASSWORD_CHARS, MAX_USER_CHARS, MIN_PASSWORD_CHARS, MIN_USER_CHARS } from './account.ts';
 import { AuditLog } from './audit.ts';
@@ -26,7 +26,7 @@ import { logRing, type LogRing } from './log-ring.ts';
 // artists and songs may be sent. Docs: docs/admin.md.
 //
 // The door exists before the bot is loaded, so the bot registers what it has with `provide()` afterwards (src/cloud-main.ts
-// gives the host's part, src/matrix-main.ts the bot's). Until then the parts that need the bot say it is still starting.
+// gives the host's part, src/host.ts (`startHost`) the bot's). Until then the parts that need the bot say it is still starting.
 //
 // Every request that changes anything is a POST with a JSON body and the header `X-Admin-Console: 1`, and is refused when the
 // browser says it came from another site (Origin, Sec-Fetch-Site), so a page on another site cannot use the browser's saved
@@ -68,16 +68,21 @@ export interface AdminDeps {
  * sign-in, and a test alert. The host (src/cloud-main.ts) provides it, since the homeserver and the bridge are its.
  */
 export interface ConnectDeps {
-  /** A light report (no bucket or OneDrive calls: the page asks every few seconds): phase, whether the bot answers, the chat, the bridge's login, problems. */
-  state(): Promise<Record<string, unknown>>;
+  /**
+   * A light report (no bucket or OneDrive calls: the page asks every few seconds): phase, whether the bot answers, the chat, the bridge's login, problems.
+   * Every function that takes a `person` (an id from `people`) is about that person's own Matrix account, login and chat; without one, the owner's.
+   */
+  state(person?: string): Promise<Record<string, unknown>>;
   /** A window to the bridge's bot: what is sent goes to it as typed, and what it answers is kept to show. */
-  pair: { send(text: string): Promise<void>; log(): Promise<Array<{ at: string; text: string }>> };
+  pair: { send(text: string, person?: string): Promise<void>; log(person?: string): Promise<Array<{ at: string; text: string }>> };
   /** The rooms the bridge made for the chat with this phone number; with no number, for the phone's own numbers (which the bridge learned from Google Messages). */
-  rooms(phone: string | undefined): Promise<string[]> | string[];
+  rooms(phone: string | undefined, person?: string): Promise<string[]> | string[];
   /** Chooses the room the bot answers in. */
-  setRoom(room: string): Promise<void> | void;
+  setRoom(room: string, person?: string): Promise<void> | void;
   /** The phone number the chat was found under before, if it was. */
-  knownPhone(): string | undefined;
+  knownPhone(person?: string): string | undefined;
+  /** The people besides the owner (PEOPLE), whose ids the routes accept as `person`. Absent or empty: only the owner. */
+  people?(): Array<{ id: string }>;
   /** Saving songs to OneDrive, when it is set up. */
   oneDrive?: { status(): Record<string, unknown>; start(): Promise<Record<string, unknown>> } | undefined;
   /** Leaves a test alert for the Worker to mail, when alerts are set up. */
@@ -279,9 +284,11 @@ export class AdminConsole implements AdminRouter {
       case 'account':
         return this.#account(req);
       case 'connect':
-        return this.#connect();
+        return this.#connect(url);
       case 'connect/log':
-        return this.#connectLog();
+        return this.#connectLog(url);
+      case 'people':
+        return this.#people();
       case 'overview':
         return this.#overview();
       case 'artists':
@@ -308,10 +315,47 @@ export class AdminConsole implements AdminRouter {
     }
   }
 
+  /**
+   * The people besides the owner, read only: where each stands, what they were sent this month, and whether their phone gave the bridge its number
+   * and their own chat arrived (the onboarding gate). Taken from the host's status field by field, so nothing else that report may hold reaches the
+   * page; the console has no control here that edits Render (who is in PEOPLE is Render's environment).
+   */
+  async #people(): Promise<unknown> {
+    const status = await this.#need('status', 'The status')();
+    const word = (value: unknown, max = 300): string | null => (typeof value === 'string' && value !== '' ? text(value, max) : null);
+    const count = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+    const list = Array.isArray(status.people) ? (status.people as Array<Record<string, any>>) : [];
+    return {
+      people: list.map((one) => {
+        const onboarding = one.onboarding as Record<string, any> | null | undefined;
+        const bridge = one.bridge as Record<string, any> | null | undefined;
+        const problems = Array.isArray(one.problems) ? (one.problems as Array<Record<string, any>>) : [];
+        return {
+          id: word(one.id, 40) ?? '',
+          phase: word(one.phase, 40),
+          roomMissing: one.roomMissing === true,
+          room: word(one.room, 200),
+          bridge: word(bridge?.state, 60),
+          bridgeError: word(bridge?.error),
+          simNumber: typeof one.simNumber === 'boolean' ? one.simNumber : null,
+          onboarding: onboarding ? { step: word(onboarding.step, 40), onboarded: onboarding.onboarded === true, warn: onboarding.warn === true, message: word(onboarding.message, 800), chatDueBy: word(onboarding.chatDueBy, 40) } : null,
+          sentThisMonthMb: count(one.sentThisMonthMb),
+          monthlyLimitMb: count(one.monthlyLimitMb),
+          problems: problems.map((problem) => ({ message: word(problem.message, 400), since: word(problem.since, 40) })),
+          error: word(one.error),
+        };
+      }),
+      ownerSentThisMonthMb: count(status.sentThisMonthMb),
+      totalSentThisMonthMb: count(status.sentTotalThisMonthMb),
+    };
+  }
+
   async #overview(): Promise<unknown> {
     const { catalog, env } = this.#deps;
     const status = this.#deps.status ? await this.#deps.status() : null;
-    const sent = catalog ? sentThisMonth(catalog) : 0;
+    // Everybody's songs together: it is the host's traffic that the plan allows so much of.
+    const sent = catalog ? sentByEveryone(catalog) : 0;
+    const others = catalog ? sentShares(catalog).slice(1) : [];
     const saved = catalog ? archivedThisMonth(catalog) : 0;
     const mb = (bytes: number): number => Math.round(bytes / 1048576);
     const commit = env?.RENDER_GIT_COMMIT?.trim();
@@ -322,7 +366,7 @@ export class AdminConsole implements AdminRouter {
       node: process.version,
       botReady: this.#deps.whitelist !== undefined || this.#deps.jobs !== undefined,
       status,
-      traffic: { sentMb: mb(sent), savedMb: mb(saved), totalMb: mb(sent + saved), alertMb: mb(TRAFFIC_ALERT_BYTES), planMb: 5000 },
+      traffic: { sentMb: mb(sent), savedMb: mb(saved), totalMb: mb(sent + saved), alertMb: mb(TRAFFIC_ALERT_BYTES), planMb: 5000, ...(others.length > 0 ? { people: others.map((one) => ({ id: one.id, sentMb: mb(one.bytes) })) } : {}) },
       list: this.#deps.whitelist?.report() ?? null,
       releases: this.#deps.releases?.status() ?? null,
       jobs: this.#deps.jobs?.()?.report() ?? null,
@@ -426,7 +470,7 @@ export class AdminConsole implements AdminRouter {
       case 'youtube/search':
         return this.#searchYouTube(body);
       case 'connect/start':
-        return this.#connectStart();
+        return this.#connectStart(body);
       case 'connect/send':
         return this.#connectSend(body);
       case 'connect/rooms':
@@ -434,9 +478,9 @@ export class AdminConsole implements AdminRouter {
       case 'connect/room':
         return this.#connectRoom(body);
       case 'connect/onedrive/start':
-        return this.#connectOneDrive();
+        return this.#connectOneDrive(body);
       case 'connect/test-alert':
-        return this.#connectTestAlert();
+        return this.#connectTestAlert(body);
       case 'account/set':
         return this.#setAccount(body);
       case 'account/clear':
@@ -593,80 +637,109 @@ export class AdminConsole implements AdminRouter {
 
   // --- the Connect page: Google Messages, the chat, OneDrive ---
 
-  async #connect(): Promise<unknown> {
+  /**
+   * The person a Connect request is about: nobody (or `owner`) is the owner, otherwise one of the people the host has. An id that is not
+   * one is refused (404 reading, 400 changing), so nothing is ever sent to the bridge for, or chosen as the chat of, someone who isn't there.
+   */
+  #personOf(connect: ConnectDeps, raw: unknown, status: 400 | 404): string | undefined {
+    if (raw === undefined || raw === null || raw === '' || raw === 'owner') return undefined;
+    if (typeof raw !== 'string' || !(connect.people?.() ?? []).some((one) => one.id === raw)) throw new AdminError(status, 'Nobody is called that on this host (PEOPLE lists who else uses the bot).');
+    return raw;
+  }
+
+  async #connect(url: URL): Promise<unknown> {
     const connect = this.#need('connect', 'Setup');
+    const person = this.#personOf(connect, url.searchParams.get('person'), 404);
     const oneDrive = connect.oneDrive;
+    // OneDrive and the test alert are the owner's: for a person the page has neither.
     return {
-      state: await connect.state(),
-      phone: connect.knownPhone() ?? null,
-      oneDrive: oneDrive ? oneDrive.status() : null,
-      alerts: connect.testAlert !== undefined,
+      state: await (person === undefined ? connect.state() : connect.state(person)),
+      phone: (person === undefined ? connect.knownPhone() : connect.knownPhone(person)) ?? null,
+      oneDrive: oneDrive && person === undefined ? oneDrive.status() : null,
+      alerts: connect.testAlert !== undefined && person === undefined,
+      ...(person === undefined ? {} : { person }),
+      // Who else there is, so the page can draw its selector whoever is selected (nothing when nobody besides the owner uses the bot).
+      ...((connect.people?.() ?? []).length > 0 ? { people: (connect.people?.() ?? []).map((one) => one.id) } : {}),
     };
   }
 
   /** What the bridge's bot has said, for the page's "what the bridge says" panel. It may not be ready yet (the homeserver is still starting). */
-  async #connectLog(): Promise<unknown> {
+  async #connectLog(url: URL): Promise<unknown> {
     const connect = this.#need('connect', 'Setup');
+    const person = this.#personOf(connect, url.searchParams.get('person'), 404);
     try {
-      return { lines: (await connect.pair.log()).slice(-60) };
+      return { lines: (await (person === undefined ? connect.pair.log() : connect.pair.log(person))).slice(-60) };
     } catch (err) {
       return { lines: [], error: err instanceof Error ? err.message : 'The bridge did not answer.' };
     }
   }
 
-  async #connectStart(): Promise<unknown> {
+  async #connectStart(body: Record<string, unknown>): Promise<unknown> {
     const connect = this.#need('connect', 'Setup');
+    const person = this.#personOf(connect, body.person, 400);
     try {
-      await connect.pair.send('login google');
+      await (person === undefined ? connect.pair.send('login google') : connect.pair.send('login google', person));
     } catch (err) {
       throw new AdminError(503, err instanceof Error ? err.message : 'The bridge did not answer.');
     }
-    this.audit.add({ what: 'started the Google Messages login' });
+    this.audit.add({ what: 'started the Google Messages login', ...(person === undefined ? {} : { detail: `for ${person}` }) });
     return { ok: true, message: 'Asked the bridge to start the login. Its reply shows below.' };
   }
 
-  /** The request the owner copied from Google Messages for web (it holds their Google session cookies): sent on, never kept, logged or echoed. */
+  /** The request the owner copied from Google Messages for web (it holds their Google session cookies, or a person's): sent on, never kept, logged or echoed. */
   async #connectSend(body: Record<string, unknown>): Promise<unknown> {
     const connect = this.#need('connect', 'Setup');
+    const person = this.#personOf(connect, body.person, 400);
     const text = typeof body.text === 'string' ? body.text : '';
     if (!text.trim()) throw new AdminError(400, 'Paste the copied request first.');
     if (text.length > 20_000) throw new AdminError(413, 'That is too long to be the request: copy only the one request the bridge names.');
     try {
-      await connect.pair.send(text);
+      await (person === undefined ? connect.pair.send(text) : connect.pair.send(text, person));
     } catch (err) {
       throw new AdminError(503, err instanceof Error ? err.message : 'The bridge did not answer.');
     }
     // How much was sent, nothing of what it said.
-    this.audit.add({ what: 'sent a pasted request to the bridge', detail: `${text.length} characters` });
+    this.audit.add({ what: 'sent a pasted request to the bridge', detail: person === undefined ? `${text.length} characters` : `${text.length} characters, for ${person}` });
     return { ok: true, message: 'Sent. The bridge answers below; the request is deleted from the chat in a minute.' };
   }
 
   async #connectRooms(body: Record<string, unknown>): Promise<unknown> {
     const connect = this.#need('connect', 'Setup');
+    const person = this.#personOf(connect, body.person, 400);
     const given = typeof body.phone === 'string' ? body.phone.replace(/\D/g, '') : '';
     if (given !== '' && given.length < 7) throw new AdminError(400, 'That is too short to be a phone number (digits only, with the area code).');
-    return { rooms: await connect.rooms(given === '' ? undefined : given) };
+    const phone = given === '' ? undefined : given;
+    return { rooms: await (person === undefined ? connect.rooms(phone) : connect.rooms(phone, person)) };
   }
 
   async #connectRoom(body: Record<string, unknown>): Promise<unknown> {
     const connect = this.#need('connect', 'Setup');
+    const person = this.#personOf(connect, body.person, 400);
     const room = typeof body.room === 'string' ? body.room.trim() : '';
     if (!/^![^\s:]+:[^\s]+$/.test(room)) throw new AdminError(400, 'That is not a chat id (it looks like !abc:server).');
-    await connect.setRoom(room);
-    this.audit.add({ what: 'chose the chat the bot answers in', detail: room });
-    return { ok: true, message: 'Chosen. The bot starts answering in that chat within a minute.' };
+    try {
+      await (person === undefined ? connect.setRoom(room) : connect.setRoom(room, person));
+    } catch (err) {
+      throw new AdminError(409, err instanceof Error ? err.message : 'That chat cannot be chosen.');
+    }
+    this.audit.add({ what: 'chose the chat the bot answers in', detail: person === undefined ? room : `${room}, for ${person}` });
+    return { ok: true, message: person === undefined ? 'Chosen. The bot starts answering in that chat within a minute.' : `Chosen. The bot starts answering ${person} in that chat within a minute.` };
   }
 
-  async #connectOneDrive(): Promise<unknown> {
-    const oneDrive = this.#need('connect', 'Setup').oneDrive;
+  async #connectOneDrive(body: Record<string, unknown>): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    if (this.#personOf(connect, body.person, 400) !== undefined) throw new AdminError(400, "OneDrive is the owner's: songs sent to other people are not saved to it.");
+    const oneDrive = connect.oneDrive;
     if (!oneDrive) throw new AdminError(404, 'OneDrive is not set up on this host (ONEDRIVE_CLIENT_ID is not set in Render).');
     const login = await oneDrive.start();
     this.audit.add({ what: 'started the OneDrive sign-in' });
     return { ok: true, login };
   }
 
-  async #connectTestAlert(): Promise<unknown> {
-    const testAlert = this.#need('connect', 'Setup').testAlert;
+  async #connectTestAlert(body: Record<string, unknown>): Promise<unknown> {
+    const connect = this.#need('connect', 'Setup');
+    if (this.#personOf(connect, body.person, 400) !== undefined) throw new AdminError(400, "Alerts are mailed to the owner: there is no test alert for a person.");
+    const testAlert = connect.testAlert;
     if (!testAlert) throw new AdminError(404, 'Alerts need the R2 settings in Render (R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY).');
     await testAlert();
     this.audit.add({ what: 'left a test alert' });

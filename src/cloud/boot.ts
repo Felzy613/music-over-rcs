@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { bridgeRegistration, patchBridgeConfig, pathsFor, SYNAPSE_LOG_CONFIG, synapseConfig, type BridgeOptions, type CloudPaths } from './provision.ts';
+import { formatPeoplePasswords, parsePeople, type Person } from '../people.ts';
+import { bridgeRegistration, patchBridgeConfig, pathsFor, personPassword, SYNAPSE_LOG_CONFIG, synapseConfig, type BridgeOptions, type CloudPaths } from './provision.ts';
 import type { ChildSpec, LeaseState } from './supervise.ts';
 
 // What the cloud host does between "the container started" and "the bot is answering", and what it undoes on the way out.
@@ -14,6 +15,13 @@ export interface CloudConfig {
   serverName: string;
   user: string;
   password: string;
+  /**
+   * The other people who use the bot (PEOPLE), in the order listed: each gets a Matrix account here, a bridge permission, and a password
+   * derived from `master` that the host hands the bot. Empty (the usual case) means only the owner; nothing below changes anything then.
+   */
+  people: Person[];
+  /** What was wrong with the names in PEOPLE that were left out, one sentence each, for the log (a typo in Render must not stop the host). */
+  peopleProblems: string[];
   holder: string;
   /** Where the databases are backed up, and the lease and alerts are kept (R2); without it none of that happens, which is only for trying things out. */
   backup: boolean;
@@ -49,14 +57,18 @@ export function readCloudConfig(env: NodeJS.ProcessEnv): CloudConfig {
   const botPort = port('BOT_WEB_PORT', 8081);
   const frontPort = port('PORT', 8080);
   if (botPort === frontPort) problems.push(`BOT_WEB_PORT must differ from PORT (both ${frontPort}): the front door is on PORT and passes requests to the bot on BOT_WEB_PORT`);
+  const user = env.MATRIX_USER?.trim() || 'me';
+  const { people, problems: peopleProblems } = parsePeople(env.PEOPLE, { reserved: [user] });
   const backup = Boolean(env.R2_ENDPOINT?.trim() && env.R2_BUCKET?.trim() && env.R2_ACCESS_KEY_ID?.trim() && env.R2_SECRET_ACCESS_KEY?.trim());
   if (problems.length > 0) throw new Error(`Configuration problems:\n  - ${problems.join('\n  - ')}`);
   return {
     dataDir: env.DATA_DIR?.trim() || '/data',
     master,
     serverName: env.SERVER_NAME?.trim() || 'localhost',
-    user: env.MATRIX_USER?.trim() || 'me',
+    user,
     password,
+    people,
+    peopleProblems,
     holder: env.INSTANCE_ID?.trim() || env.RENDER_INSTANCE_ID?.trim() || `${hostname()}-${randomBytes(3).toString('hex')}`,
     backup,
     runDir: env.RUN_DIR?.trim() || '/run/mors',
@@ -134,6 +146,7 @@ export async function boot(deps: BootDeps): Promise<Booted> {
   };
 
   const phase = (text: string): void => deps.onPhase?.(text);
+  for (const problem of config.peopleProblems) log(problem);
   const bridge: BridgeOptions = {
     domain: config.serverName,
     homeserverUrl: HOMESERVER,
@@ -141,6 +154,7 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     port: config.ports.bridge,
     master: config.master,
     user: config.user,
+    people: config.people,
     databaseUri: `file:${paths.bridgeDb}?_txlock=immediate`,
   };
 
@@ -248,6 +262,15 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     botEnv.MALLOC_MMAP_THRESHOLD_ ??= '262144';
     // The bot can't derive the homeserver's secrets. It keeps the R2 settings: its alerts go into the bucket for the Worker to mail.
     delete botEnv.SECRET_KEY;
+    // The people besides the owner: the bot signs in to each one's account (made below) with the password derived here, which it cannot
+    // derive itself. The names handed over are the ones this host made accounts for. Only the bot gets them, and nothing logs them. With no
+    // people the bot gets none (a value set by hand is not trusted), so the owner's start is as it always was.
+    if (config.people.length > 0) {
+      botEnv.PEOPLE = config.people.map((person) => person.id).join(',');
+      botEnv.PEOPLE_PASSWORDS = formatPeoplePasswords(config.people.map((person) => ({ id: person.id, password: personPassword(config.master, person.id) })));
+    } else {
+      delete botEnv.PEOPLE_PASSWORDS;
+    }
     // The bot's web door is on a port of its own, on this machine only: the front door (src/cloud/front-door.ts) holds the port Render
     // watches, so that port is never closed while the bot starts, restarts or is replaced.
     botEnv.PORT = String(config.ports.bot);
@@ -262,16 +285,30 @@ export async function boot(deps: BootDeps): Promise<Booted> {
     ];
     deps.supervisor.start(specs);
 
-    // 4. The bot's account, made once the homeserver is up (nothing happens if it exists).
-    void (async () => {
-      while (!stopped && !(await homeserverUp())) await sys.sleep(2000);
+    // 4. The bot's account, and each other person's, made once the homeserver is up (nothing happens for one that exists). The owner's
+    //    comes first. Registration is closed on the homeserver, so these are the only accounts there will ever be. A person's password
+    //    is derived from the master secret, the same every start, and is never logged (a failure's output is scrubbed of it).
+    const accounts: Array<{ user: string; password: string; owner: boolean }> = [
+      { user: config.user, password: config.password, owner: true },
+      ...config.people.map((person) => ({ user: person.id, password: personPassword(config.master, person.id), owner: false })),
+    ];
+    const makeAccount = async (account: { user: string; password: string; owner: boolean }): Promise<void> => {
+      const id = `@${account.user}:${config.serverName}`;
       for (let attempt = 1; !stopped && attempt <= 5; attempt++) {
-        const made = await sys.run(config.bins.register, ['-c', paths.synapseConfig, '-u', config.user, '-p', config.password, '--no-admin', HOMESERVER]);
-        if (made.code === 0) return void log(`made the Matrix account @${config.user}:${config.serverName}`);
-        if (/already.*(taken|in use|exists)|User ID already/i.test(made.output)) return void log(`the Matrix account @${config.user}:${config.serverName} exists`);
-        log(`could not make the Matrix account (attempt ${attempt}): ${made.output.trim().split('\n').slice(-2).join(' | ')}`);
+        const made = await sys.run(config.bins.register, ['-c', paths.synapseConfig, '-u', account.user, '-p', account.password, '--no-admin', HOMESERVER]);
+        if (made.code === 0) return void log(`made the Matrix account ${id}`);
+        if (/already.*(taken|in use|exists)|User ID already/i.test(made.output)) return void log(`the Matrix account ${id} exists`);
+        // A person's password is 64 random characters, so it cannot be mistaken for part of a sentence; the owner's is theirs to choose
+        // and is left as the tool said it.
+        const output = account.owner ? made.output : made.output.split(account.password).join('‹hidden›');
+        const said = output.trim().split('\n').slice(-2).join(' | ');
+        log(`could not make the Matrix account${account.owner ? '' : ` ${id}`} (attempt ${attempt}): ${said}`);
         await sys.sleep(5000);
       }
+    };
+    void (async () => {
+      while (!stopped && !(await homeserverUp())) await sys.sleep(2000);
+      for (const account of accounts) await makeAccount(account);
     })();
 
     // 5. Keep the lease. Losing it means another host has taken over: stop everything now rather than fight it.

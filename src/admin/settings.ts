@@ -89,6 +89,7 @@ const CHAT = 'Chat and bridge';
 const MUSIC = 'Music sources';
 const SENDING = 'Sending';
 const SCHEDULE = 'Library and schedule';
+const PEOPLE_GROUP = 'People';
 const ONEDRIVE = 'OneDrive';
 const OTHER = 'Other routes (not used on Render)';
 
@@ -143,6 +144,10 @@ export const SETTINGS: readonly SettingSpec[] = [
   { key: 'GMESSAGES_ALL_CHATS', group: CHAT, label: 'Bridge every chat', note: '1 bridges every chat on the phone instead of only the self-chat (it multiplied Render traffic).', default: 'off' },
   { key: 'SYNAPSE_PORT', group: CHAT, label: 'Homeserver port', note: 'Port Synapse listens on.', default: '8008' },
   { key: 'SERVER_NAME', group: CHAT, label: 'Homeserver name', note: "The homeserver's own name.", default: 'localhost' },
+  // People
+  { key: 'PEOPLE', group: PEOPLE_GROUP, label: 'People', note: 'Other people who use the bot from their own Google Messages chat, besides you: names separated by commas or spaces (2 to 16 lower-case letters or digits, starting with a letter). Empty: only you.', default: 'empty (only you)' },
+  { key: 'PEOPLE_PASSWORDS', group: PEOPLE_GROUP, label: "People's account passwords", note: "The Matrix passwords the host made for the people in PEOPLE, as name:password pairs separated by commas, handed to the bot by the host itself at each start (a value set by hand is replaced). Never set by hand.", secret: true },
+  { key: 'PERSON_MAX_MB_PER_MONTH', group: PEOPLE_GROUP, label: 'Monthly limit per person', note: 'The most the bot sends one person besides you in a calendar month, in MB, or "unlimited". Past it, that person is told so and gets no more songs until next month (searching still works). It counts against Render\'s 5 GB of outbound traffic with everything else.', default: '1000' },
   // Cloud host
   { key: 'ADMIN_TOKEN', group: HOST, label: 'Admin token', note: "The recovery and machine password: any user name with it signs in, and it is what the Worker and cloud:check send. Your own user name and password are made on the Account page and kept in the database, not here.", secret: true },
   { key: 'SECRET_KEY', group: HOST, label: 'Master secret', note: "The homeserver's and bridge's secrets are derived from it. Keep it.", secret: true },

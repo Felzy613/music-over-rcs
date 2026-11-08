@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AudioFetchError, type DownloadedAudio } from './audio-fetch.ts';
 import { ALL_WORDS, joinLists, type Bot } from './bot.ts';
+import { createDeliveryGate, isGateAborted, type DeliveryGate } from './delivery-gate.ts';
 import type { DownloadedImage } from './image-fetch.ts';
 import type { Picture, PreparedPicture } from './library/images.ts';
 import { liveValue, type Live } from './live.ts';
@@ -244,6 +245,22 @@ export interface RunnerOptions {
   /** Whether the host has memory to spare for another download now (the cloud host: under 380 of its 512 MB). Always, without it. */
   memoryRoom?: () => boolean;
   /**
+   * The host's one turn at a time for sending a file (see delivery-gate.ts), shared by every runner on the host so that only one song,
+   * zip or few of an album's songs coming to disk are under way at once. Each file (not each answer) takes a turn, and the gap between
+   * songs is waited outside it. Without it the runner has a gate of its own, and a chat that nobody shares the gate with is paced by its
+   * own downloads and gap, as it was before there was a gate.
+   */
+  gate?: DeliveryGate;
+  /** Whose turns at the gate these are (default: the chat's id). Runners sharing a gate need one each. */
+  gateOwner?: string;
+  /**
+   * A person's share of the host's traffic (see `monthlyAllowance` in usage.ts): asked as an answer with a song or an album in it is
+   * decided, before it is queued. A text back means the share is used up, and that text is sent in place of the answer (nothing is
+   * fetched or queued); nothing back means there is room. Answers of text alone are never held to it, and neither are announcements.
+   * Without it there is no limit (the owner's).
+   */
+  allowance?: () => string | undefined;
+  /**
    * Circuit breaker: at most this many answers (and announcements) a minute; past it, a request gets no answer (default
    * 30). It counts answers, not messages: a loop (the bot answering itself) shows as answer after answer, while a long
    * list (an album's songs, one message each so each can be 👍'd) is one answer, and it has to arrive whole.
@@ -287,10 +304,18 @@ export interface Runner {
   tick(): Promise<void>;
   /** Sends messages the bot starts itself (the daily new-music message), never in the middle of answering a request. */
   announce(replies: Reply[]): Promise<void>;
-  /** Whether a song, a picture or an album is on its way to the chat right now (other uploads wait for it to be over). */
+  /**
+   * Whether a song, a picture or an album is on its way to a chat right now (other uploads wait for it to be over): this runner's
+   * answers waiting or being sent, or a file under way at the delivery gate, whoever's it is.
+   */
   busy(): boolean;
   start(): Promise<void>;
-  stop(): Promise<void>;
+  /**
+   * Stops reading the chat and waits for the answers already handed over to be sent (a song waiting for its turn goes at once). With
+   * `abandon`, the ones that have not started are dropped instead, and they do not count as dealt with: a restart answers them. A
+   * file already under way is always finished.
+   */
+  stop(options?: { abandon?: boolean }): Promise<void>;
 }
 
 /** On a small host the bot runs with --expose-gc: an album's part, once sent, is given back at once instead of whenever. */
@@ -312,6 +337,12 @@ export function createRunner(options: RunnerOptions): Runner {
   const catchUpMs = options.catchUpMs ?? CATCH_UP_MS;
   const downloadsAhead = (): number => Math.max(1, liveValue(options.downloadsAhead) ?? DOWNLOADS_AHEAD);
   const albumDownloads = (): number => Math.max(1, liveValue(options.albumDownloads) ?? ALBUM_DOWNLOADS);
+  const gate = options.gate ?? createDeliveryGate();
+  const owner = options.gateOwner ?? chatID;
+  /** Aborted by stop({ abandon }): the files still waiting for a turn at the gate are given up. */
+  const quit = new AbortController();
+  /** An answer was dropped (stop({ abandon })), so the resume point must not move past it: a restart answers it. */
+  let dropped = false;
 
   const seen = new Set<string>();
   /** Messages that arrived while the bot was down, answered by the first tick. */
@@ -520,57 +551,141 @@ export function createRunner(options: RunnerOptions): Runner {
   }
 
   /**
+   * The turns an answer takes at the delivery gate (see `stepsFor`).
+   */
+  interface Steps {
+    /** Whether the turns go through the gate (the delivery queue's answers) or straight through (announcements). */
+    readonly gated: boolean;
+    /**
+     * Runs one unit of the answer's work (a song, a zip, a few of an album's songs coming to disk) when the gate gives this chat its
+     * turn, and returns as soon as the work calls `early`, or ends. `settle` is what must finish before the turn is given up to
+     * somebody else: the downloads the unit started ahead, so none is under way without the turn (while nobody else is waiting, this
+     * chat's next unit takes the turn over at once and the downloads go on, as they do on a host with one chat). A unit that fails
+     * fails the step, once `settle` is done.
+     * `first` is for the downloads an answer starts before its first song's own turn (see `DeliveryGate.run`).
+     */
+    step(work: (early: () => void) => Promise<void>, options?: { settle?: () => Promise<unknown>; first?: boolean }): Promise<void>;
+    /** Whether the answer is over, so a turn that comes late has nothing to do. */
+    ended(): boolean;
+    /** Whether somebody else is waiting for the gate. */
+    contended(): boolean;
+    /** The answer is over: waits for every turn it still has at the gate to end. */
+    end(): Promise<void>;
+  }
+
+  /**
+   * The turns for one answer: through the gate for what the delivery queue sends, and straight through for an announcement (which
+   * never waits for the gate: it holds `current`, and the runner would stop reading its chat).
+   */
+  function stepsFor(gated: boolean): Steps {
+    let over = false;
+    const tails: Array<Promise<unknown>> = [];
+    /** Aborted when the answer is over, so a turn it is still waiting for (the first downloads of an answer that failed early) is given up. */
+    const finishing = new AbortController();
+    const signal = AbortSignal.any([quit.signal, finishing.signal]);
+    return {
+      gated,
+      ended: () => over,
+      contended: () => gated && gate.contended(owner),
+      async end() {
+        over = true;
+        finishing.abort();
+        await Promise.allSettled(tails);
+      },
+      step(work, stepOptions) {
+        if (!gated) return work(() => {});
+        return new Promise<void>((resolve, reject) => {
+          let handed = false;
+          const hand = (): void => {
+            if (handed) return;
+            handed = true;
+            resolve();
+          };
+          const fail = (err: unknown): void => {
+            if (handed) log(`a file's turn at the delivery gate failed after its answer went on: ${errorText(err)}`);
+            else {
+              handed = true;
+              reject(err);
+            }
+          };
+          const holder = gate.running();
+          if (holder !== undefined && holder !== owner) log(`waiting for ${holder}'s file to be sent first`);
+          tails.push(
+            gate
+              .run(
+                owner,
+                async () => {
+                  await work(hand);
+                },
+                { signal, first: stepOptions?.first ?? false, ...(stepOptions?.settle ? { settle: stepOptions.settle } : {}) },
+              )
+              .then(hand, fail),
+          );
+        });
+      },
+    };
+  }
+
+  /**
    * An album's songs, fetched up to albumDownloads at a time, each handed to `use` as soon as it is in hand (which writes it to disk,
    * so it isn't held in memory): what `use` gave, in album order, a song that couldn't be had left out (and named in `missing`).
    * Another download starts only while the host has memory to spare (`memoryRoom`) and the downloads in flight fit
    * ALBUM_IN_FLIGHT_BYTES at the size of the biggest song so far; one always may, so an album never stalls. Once YouTube has turned
    * the relay away (or a song failed), the rest go one at a time: asking for three at once is what its bot check would notice.
+   * The downloads are made in rounds, each one turn at the delivery gate: while somebody else is waiting for it, a round starts no
+   * more songs once it has started one, and ends when those are on disk, so nobody waits for a whole album.
    */
-  async function fetchAlbum<T>(songs: readonly AlbumSong[], missing: string[], use: (song: AlbumSong, file: DownloadedAudio, i: number) => Promise<T>): Promise<T[]> {
+  async function fetchAlbum<T>(songs: readonly AlbumSong[], missing: string[], use: (song: AlbumSong, file: DownloadedAudio, i: number) => Promise<T>, steps: Steps): Promise<T[]> {
     const results: Array<T | undefined> = Array.from({ length: songs.length }, () => undefined);
     let width = albumDownloads();
     let biggest = SONG_BYTES_GUESS;
     let started = 0;
-    let inFlight = 0;
     let finished = 0;
-    const room = (): boolean => inFlight === 0 || ((inFlight + 1) * biggest <= ALBUM_IN_FLIGHT_BYTES && (options.memoryRoom?.() ?? true));
-    await new Promise<void>((resolve) => {
-      const launch = (): void => {
-        while (started < songs.length && inFlight < width && room()) {
-          const i = started++;
-          const song = songs[i]!;
-          const start = now();
-          inFlight += 1;
-          options
-            .fetchAudio(song.url, song.title)
-            .then(
-              async (file) => {
-                biggest = Math.max(biggest, file.bytes);
-                if (file.timing?.turnedAway) width = 1;
-                note(songLine(song.title, file, now() - start, ''));
-                results[i] = await use(song, file, i);
-              },
-              (err: unknown) => {
-                log(`could not get ${song.title} ready: ${errorText(err)}`);
-                missing.push(song.title);
-                width = 1;
-              },
-            )
-            .catch((err: unknown) => {
-              log(`could not keep ${song.title}: ${errorText(err)}`);
-              missing.push(song.title);
-            })
-            .finally(() => {
-              inFlight -= 1;
-              finished += 1;
-              if (finished === songs.length) resolve();
-              else launch();
-            });
-        }
-      };
-      if (songs.length === 0) resolve();
-      else launch();
-    });
+    while (finished < songs.length) {
+      await steps.step(async () => {
+        let inFlight = 0;
+        let launched = 0;
+        const room = (): boolean => inFlight === 0 || ((inFlight + 1) * biggest <= ALBUM_IN_FLIGHT_BYTES && (options.memoryRoom?.() ?? true));
+        await new Promise<void>((resolve) => {
+          const launch = (): void => {
+            while (started < songs.length && inFlight < width && room() && (launched === 0 || !steps.contended())) {
+              const i = started++;
+              launched += 1;
+              const song = songs[i]!;
+              const start = now();
+              inFlight += 1;
+              options
+                .fetchAudio(song.url, song.title)
+                .then(
+                  async (file) => {
+                    biggest = Math.max(biggest, file.bytes);
+                    if (file.timing?.turnedAway) width = 1;
+                    note(songLine(song.title, file, now() - start, ''));
+                    results[i] = await use(song, file, i);
+                  },
+                  (err: unknown) => {
+                    log(`could not get ${song.title} ready: ${errorText(err)}`);
+                    missing.push(song.title);
+                    width = 1;
+                  },
+                )
+                .catch((err: unknown) => {
+                  log(`could not keep ${song.title}: ${errorText(err)}`);
+                  missing.push(song.title);
+                })
+                .finally(() => {
+                  inFlight -= 1;
+                  finished += 1;
+                  launch();
+                });
+            }
+            // Nothing is on its way: the album is in, or this round gives way to somebody who is waiting.
+            if (inFlight === 0) resolve();
+          };
+          launch();
+        });
+      });
+    }
     return results.filter((result): result is T => result !== undefined);
   }
 
@@ -580,24 +695,31 @@ export function createRunner(options: RunnerOptions): Runner {
    * are downloaded a few at a time (`fetchAlbum`) and each is written to a folder on disk as soon as it is in hand, so the
    * album is never held in memory: the ZIP is made of the files as they are on disk, in album order, and the chat streams
    * it from there. A chat that can't take a file gets the songs one by one instead, in order (downloadsAhead at a time). A
-   * song that can't be had is left out, and the chat is told.
+   * song that can't be had is left out, and the chat is told. Each ZIP (and, one by one, each song) is a turn at the delivery gate,
+   * as is each round of the songs coming to disk (`fetchAlbum`); the gap between songs is waited outside it.
    */
-  async function sendAlbum(album: Extract<Reply, { kind: 'album' }>, timeline?: Timeline): Promise<void> {
+  async function sendAlbum(album: Extract<Reply, { kind: 'album' }>, steps: Steps, timeline?: Timeline): Promise<void> {
     const missing: string[] = [];
     const said = async (text: string): Promise<void> => {
       await timedSend(timeline, () => chat.sendText(chatID, markBotText(text)));
     };
     const began = now();
     // For a chat that can't take a file: the songs in album order, the next ones downloading while one is sent, never more than
-    // downloadsAhead at once.
+    // downloadsAhead at once. They start only inside a turn at the gate (`fill`), which ends when they are in hand (`settleAhead`).
     const ahead: Array<Promise<{ file: DownloadedAudio; ms: number; title: string } | undefined>> = [];
     let started = 0;
-    const next = async (): Promise<DownloadedAudio | undefined> => {
+    const fill = (): void => {
       while (started < album.songs.length && ahead.length < downloadsAhead()) {
         const song = album.songs[started++]!;
         const start = now();
+        let fetching: Promise<DownloadedAudio>;
+        try {
+          fetching = options.fetchAudio(song.url, song.title);
+        } catch (err) {
+          fetching = Promise.reject(err);
+        }
         ahead.push(
-          options.fetchAudio(song.url, song.title).then(
+          fetching.then(
             (file) => ({ file, ms: now() - start, title: song.title }),
             (err: unknown) => {
               log(`could not get ${song.title} ready: ${errorText(err)}`);
@@ -607,7 +729,10 @@ export function createRunner(options: RunnerOptions): Runner {
           ),
         );
       }
-      const got = await ahead.shift()!;
+    };
+    const settleAhead = (): Promise<unknown> => Promise.all(ahead);
+    const take = async (): Promise<DownloadedAudio | undefined> => {
+      const got = await ahead.shift();
       if (got) note(songLine(got.title, got.file, got.ms, ''));
       return got?.file;
     };
@@ -616,20 +741,36 @@ export function createRunner(options: RunnerOptions): Runner {
     let diskMs = 0;
 
     if (!chat.sendFile) {
+      void steps
+        .step(
+          async (early) => {
+            if (steps.ended()) return;
+            fill();
+            early();
+          },
+          { settle: settleAhead, first: true },
+        )
+        .catch(() => {}); // the song's own turn says it if the gate was given up
       for (const song of album.songs) {
-        const file = await next();
-        if (!file) continue;
-        had += 1;
         await songTurn();
-        try {
-          await timedSend(timeline, () => chat.sendAudio(chatID, file));
-          lastSongAt = now();
-          log(`-> audio ${song.title}`);
-        } catch (err) {
-          log(`could not send audio: ${errorText(err)}`);
-          missing.push(song.title);
-        }
-        freeMemory();
+        await steps.step(async (early) => {
+          const file = await take();
+          if (file) {
+            had += 1;
+            try {
+              await timedSend(timeline, () => chat.sendAudio(chatID, file));
+              lastSongAt = now();
+              log(`-> audio ${song.title}`);
+            } catch (err) {
+              log(`could not send audio: ${errorText(err)}`);
+              missing.push(song.title);
+            }
+            freeMemory();
+          }
+          // The next song starts coming while the gap is waited, still in this turn: it ends when that song is in hand.
+          fill();
+          early();
+        }, { settle: settleAhead });
       }
     } else {
       const sendFile = chat.sendFile.bind(chat);
@@ -639,17 +780,22 @@ export function createRunner(options: RunnerOptions): Runner {
       const folder = await mkdtemp(join(options.spoolDir ?? tmpdir(), 'album-'));
       try {
         // Every song on disk first, with the checksum its place in the ZIP needs; then the parts are known exactly.
-        const songs = await fetchAlbum(album.songs, missing, async (song, file, i) => {
-          const extension = /\.[a-z0-9]{2,5}$/i.exec(file.fileName)?.[0].toLowerCase() ?? '.audio';
-          const path = join(folder, `${String(i + 1).padStart(3, '0')}${extension}`);
-          const written = now();
-          const crc = await writeWithCrc32(file.data, path);
-          const data = await openAsBlob(path, { type: file.mimeType });
-          diskMs += now() - written;
-          bytes += file.bytes;
-          freeMemory(); // the song as it was downloaded, now that it is on disk
-          return { name: `${stem(song)}${extension}`, data, crc };
-        });
+        const songs = await fetchAlbum(
+          album.songs,
+          missing,
+          async (song, file, i) => {
+            const extension = /\.[a-z0-9]{2,5}$/i.exec(file.fileName)?.[0].toLowerCase() ?? '.audio';
+            const path = join(folder, `${String(i + 1).padStart(3, '0')}${extension}`);
+            const written = now();
+            const crc = await writeWithCrc32(file.data, path);
+            const data = await openAsBlob(path, { type: file.mimeType });
+            diskMs += now() - written;
+            bytes += file.bytes;
+            freeMemory(); // the song as it was downloaded, now that it is on disk
+            return { name: `${stem(song)}${extension}`, data, crc };
+          },
+          steps,
+        );
         had = songs.length;
         const fetched = now() - began;
         const parts: Array<typeof songs> = [];
@@ -670,15 +816,20 @@ export function createRunner(options: RunnerOptions): Runner {
           const zip = zipBlob(part);
           const zipMs = now() - zipping;
           await songTurn();
-          const uploading = now();
-          try {
-            await timedSend(timeline, () => sendFile(chatID, { data: zip, fileName, mimeType: 'application/zip', bytes: zip.size }));
-          } catch (err) {
-            log(`could not send the zip: ${errorText(err)}`);
-            return said(`I couldn't send "${album.title}" as a zip.`);
-          } finally {
-            freeMemory();
-          }
+          let uploading = now();
+          let sentZip = true;
+          await steps.step(async () => {
+            uploading = now(); // not counting the wait for the turn
+            try {
+              await timedSend(timeline, () => sendFile(chatID, { data: zip, fileName, mimeType: 'application/zip', bytes: zip.size }));
+            } catch (err) {
+              log(`could not send the zip: ${errorText(err)}`);
+              sentZip = false;
+            } finally {
+              freeMemory();
+            }
+          });
+          if (!sentZip) return said(`I couldn't send "${album.title}" as a zip.`);
           lastSongAt = now();
           log(`-> zip ${fileName} (${part.length} songs, ${zip.size} bytes)`);
           note(
@@ -694,12 +845,25 @@ export function createRunner(options: RunnerOptions): Runner {
     if (missing.length > 0) await said(`I couldn't get ${missing.length === 1 ? 'one song' : `${missing.length} songs`} of "${album.title}": ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}.`);
   }
 
-  async function respond(answer: Reply[], timeline?: Timeline): Promise<void> {
+  /**
+   * Sends a list of replies in order. `gated` is for what the delivery queue sends: each file (a song, an album's zip) takes a turn at
+   * the host's delivery gate, with its downloads ahead, and the gap between songs is waited outside it. An announcement is not gated.
+   */
+  async function respond(answer: Reply[], timeline?: Timeline, gated = false): Promise<void> {
     if (answer.length === 0) return;
     if (!allowAnswer()) {
       log(`answer limit reached (${maxAnswers} a minute); not sending this answer`);
       return;
     }
+    const steps = stepsFor(gated);
+    try {
+      await deliver(answer, steps, timeline);
+    } finally {
+      await steps.end();
+    }
+  }
+
+  async function deliver(answer: Reply[], steps: Steps, timeline?: Timeline): Promise<void> {
     const replies = chat.reactions ? answer : joinLists(answer);
     // Songs start downloading ahead of their turn, so a song gets ready while its picture is drawn and sent; at most
     // DOWNLOADS_AHEAD at a time, so "all" doesn't fetch twenty files at once.
@@ -709,19 +873,55 @@ export function createRunner(options: RunnerOptions): Runner {
     const fetchMs = new Map<Reply, number>();
     let started = 0;
     let sentSongs = 0;
-    const startDownloads = (): void => {
+    /** The downloads started and not yet in hand (or failed): a turn at the gate ends only when none is left, so none runs without it. */
+    const fetching = new Set<Promise<unknown>>();
+    const settle = (): Promise<unknown> => Promise.all([...fetching]);
+    /**
+     * Starts the downloads that are due. The song whose turn it is (`required`, its index among the answer's songs) always starts, so
+     * every song is fetched by the time its own turn needs it. The ones after it start ahead only while nobody else is waiting for the
+     * gate and the host has memory to spare (`memoryRoom`): a finished song waits in memory until its turn, and with several chats on
+     * one host every chat that handed the gate over with downloads in hand would add its songs to what a 512 MB host holds. A song not
+     * started ahead is fetched inside its own turn instead.
+     */
+    const startDownloads = (required = -1): void => {
       while (started < songs.length && started - sentSongs < downloadsAhead()) {
+        if (started > required && (steps.contended() || !(options.memoryRoom?.() ?? true))) break;
         const song = songs[started++]!;
         const start = now();
-        const file = options.fetchAudio(song.url, song.title, song.after ? { after: song.after } : undefined).then((got) => {
+        let asked: Promise<DownloadedAudio>;
+        try {
+          asked = options.fetchAudio(song.url, song.title, song.after ? { after: song.after } : undefined);
+        } catch (err) {
+          asked = Promise.reject(err);
+        }
+        const file = asked.then((got) => {
           fetchMs.set(song, now() - start);
           return got;
         });
         file.catch(() => {}); // handled when it's sent
         files.set(song, file);
+        const ending = file.then(
+          () => {},
+          () => {},
+        );
+        fetching.add(ending);
+        void ending.then(() => fetching.delete(ending));
       }
     };
-    startDownloads();
+    if (songs.length > 0 && steps.gated) {
+      // The first downloads start in a turn of their own, at once when the gate is free, so they run while the answer's first
+      // pictures are sent (and, for a song asked for soon after another, while the gap is waited).
+      void steps
+        .step(
+          async (early) => {
+            if (steps.ended()) return;
+            startDownloads(); // no song is due yet: the first one's own turn fetches it if nothing could start ahead
+            early();
+          },
+          { settle, first: true },
+        )
+        .catch(() => {}); // each song's own turn says it if the gate was given up
+    } else startDownloads();
     // Covers are drawn ahead too, so a song's card is ready when its turn comes instead of being drawn after the wait.
     const pictures = replies.filter((reply): reply is Picture => reply.kind === 'image' || reply.kind === 'collage');
     const drawn = new Map<Reply, Promise<PreparedPicture>>();
@@ -759,34 +959,42 @@ export function createRunner(options: RunnerOptions): Runner {
       }
       if (reply.kind === 'audio') {
         songNext = true;
-        let file: DownloadedAudio | undefined;
-        try {
-          file = await files.get(reply)!;
-        } catch (err) {
-          log(`could not get ${reply.title ?? reply.url} ready: ${errorText(err)}`);
-          const why = err instanceof AudioFetchError ? `: ${err.message}` : '';
-          await timedSend(timeline, () => chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}${why}.`)));
-        } finally {
-          // This one is in hand (or failed), so the next can start: never more than DOWNLOADS_AHEAD at once.
-          sentSongs += 1;
-          startDownloads();
-        }
-        if (!file) continue; // one song that can't be sent doesn't stop the others
-        try {
-          const uploading = now();
-          await timedSend(timeline, () => chat.sendAudio(chatID, file));
-          lastSongAt = now();
-          log(`-> audio ${reply.title ?? reply.url}`);
-          note(songLine(reply.title ?? reply.url, file, fetchMs.get(reply) ?? 0, ` upload ${seconds(now() - uploading)}`));
-          timeline?.mark('song');
-        } catch (err) {
-          log(`could not send audio: ${errorText(err)}`);
-          await timedSend(timeline, () => chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}.`)));
-        } finally {
-          // What downloading, tagging and uploading the song left behind is given back now: on 2026-10-19 a 27 MB song's buffers
-          // kept the host near 470 of 512 MB for two minutes after it was sent, until a collection happened to run.
-          freeMemory();
-        }
+        // One song is one turn at the gate: getting it (it is usually in hand already, from the turn that started it), starting the
+        // next ones coming, and uploading it. The answer goes on as soon as it is up, while the next ones finish arriving.
+        await steps.step(async (early) => {
+          let file: DownloadedAudio | undefined;
+          startDownloads(sentSongs); // this song is due: fetched here if it was not started ahead (somebody was waiting, or no memory)
+          try {
+            file = await files.get(reply)!;
+          } catch (err) {
+            log(`could not get ${reply.title ?? reply.url} ready: ${errorText(err)}`);
+            const why = err instanceof AudioFetchError ? `: ${err.message}` : '';
+            await timedSend(timeline, () => chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}${why}.`)));
+          } finally {
+            // This one is in hand (or failed), so the next can start: never more than DOWNLOADS_AHEAD at once.
+            sentSongs += 1;
+            startDownloads();
+          }
+          // One song that can't be sent doesn't stop the others.
+          if (file) {
+            try {
+              const uploading = now();
+              await timedSend(timeline, () => chat.sendAudio(chatID, file));
+              lastSongAt = now();
+              log(`-> audio ${reply.title ?? reply.url}`);
+              note(songLine(reply.title ?? reply.url, file, fetchMs.get(reply) ?? 0, ` upload ${seconds(now() - uploading)}`));
+              timeline?.mark('song');
+            } catch (err) {
+              log(`could not send audio: ${errorText(err)}`);
+              await timedSend(timeline, () => chat.sendText(chatID, markBotText(`I couldn't send ${reply.title ? `"${reply.title}"` : 'that file'}.`)));
+            } finally {
+              // What downloading, tagging and uploading the song left behind is given back now: on 2026-10-19 a 27 MB song's buffers
+              // kept the host near 470 of 512 MB for two minutes after it was sent, until a collection happened to run.
+              freeMemory();
+            }
+          }
+          early();
+        }, { settle });
       } else if (reply.kind === 'image' || reply.kind === 'collage') {
         // A picture is a nicety: when it can't be shown, the answer goes on without it, and a song's name goes as text.
         const caption = reply.kind === 'image' && reply.caption ? markBotText(`${reply.caption.artist ? `${reply.caption.artist} — ` : ''}${reply.caption.title}`) : undefined;
@@ -810,7 +1018,7 @@ export function createRunner(options: RunnerOptions): Runner {
           startPictures();
         }
       } else if (reply.kind === 'album') {
-        await sendAlbum(reply, timeline);
+        await sendAlbum(reply, steps, timeline);
       } else {
         // Options need a word on how to pick one, unless the text already gives it.
         const hint = !chat.reactions && reply.chips && !/\breply with a number\b/i.test(reply.text);
@@ -875,16 +1083,17 @@ export function createRunner(options: RunnerOptions): Runner {
    * Sends the bot's answer to one request, then calls `done` (which clears "typing…"). An answer of text alone goes out
    * at once. One with a song, a picture or an album waits its turn behind the ones handed over before it, and is not
    * waited for: the poll goes on, so a request made while a song is on its way is read and answered then, not after the
-   * song. They go one at a time because the songs have to arrive in the order they were asked for, and a small host
-   * can't hold two downloads' worth of memory.
+   * song. They go one answer at a time because the songs have to arrive in the order they were asked for, and each file in them
+   * takes a turn at the host's delivery gate (see `respond`), because a small host can't hold two downloads' worth of memory.
    */
-  async function send(replies: Reply[], done: () => Promise<void>, timeline?: Timeline): Promise<void> {
+  async function send(answer: Reply[], done: () => Promise<void>, timeline?: Timeline): Promise<void> {
+    const replies = withinAllowance(answer);
     // What a number picks is the answer's list from now, not once the songs before it have gone out: a number texted while
     // an album is on its way picks from the menu it was texted under.
     offer(replies);
     const run = async (): Promise<void> => {
       try {
-        await respond(replies, timeline);
+        await respond(replies, timeline, true);
       } finally {
         if (timeline) finished(timeline);
         await done();
@@ -894,15 +1103,44 @@ export function createRunner(options: RunnerOptions): Runner {
     delivering += 1;
     delivery = delivery.then(async () => {
       try {
+        if (quit.signal.aborted) {
+          // stop({ abandon }): this answer was not started, so it is given up, and its request stays unanswered for the next start.
+          dropped = true;
+          log('dropping an answer that had not started: the bot is stopping');
+          if (timeline) live.delete(timeline);
+          await done();
+          return;
+        }
         await run();
       } catch (err) {
-        failed('sending', err);
+        if (isGateAborted(err)) {
+          dropped = true;
+          log('an answer was cut short: the bot is stopping');
+        } else failed('sending', err);
       } finally {
         delivering -= 1;
         // Nothing is half-answered now, unless a poll is partway through (it saves its own point when it ends).
         if (!current) checkpoint();
       }
     });
+  }
+
+  /**
+   * The answer as it will be sent: itself, or, when it has a song or an album in it and the person's share of this month is used up,
+   * a text saying so in its place. Decided before anything is fetched or queued; a text-only answer is never held back.
+   */
+  function withinAllowance(answer: Reply[]): Reply[] {
+    if (!options.allowance || !answer.some((reply) => reply.kind === 'audio' || reply.kind === 'album')) return answer;
+    let refusal: string | undefined;
+    try {
+      refusal = options.allowance();
+    } catch (err) {
+      // A count that can't be read must not stop the songs: the limit is a guard on traffic, not a lock.
+      log(`could not read this month's share: ${errorText(err)}`);
+    }
+    if (refusal === undefined) return answer;
+    log("not sending songs: this month's share is used up");
+    return [{ kind: 'text', text: refusal }];
   }
 
   /** An answer's list (the last one in it, where there are several) is the one a number or "all" picks from now on. */
@@ -1027,7 +1265,7 @@ export function createRunner(options: RunnerOptions): Runner {
    * it: not while a song or album handed over for delivery is still on its way.
    */
   function checkpoint(): void {
-    if (!options.resume || !unsaved || delivering > 0) return;
+    if (!options.resume || !unsaved || delivering > 0 || dropped) return;
     unsaved = false;
     try {
       options.resume.save({ at: lastAt, ids: [...seen].slice(-RESUME_IDS) });
@@ -1187,7 +1425,7 @@ export function createRunner(options: RunnerOptions): Runner {
   return {
     prime,
     tick,
-    busy: () => delivering > 0,
+    busy: () => delivering > 0 || gate.busy(),
     announce(replies) {
       return exclusive(async () => {
         log(`-> announcement (${replies.length} message${replies.length === 1 ? '' : 's'})`);
@@ -1201,11 +1439,12 @@ export function createRunner(options: RunnerOptions): Runner {
       // A long poll listens from the start; short polls begin a poll's time from now.
       timer = setTimeout(() => void loop(), (options.waitMs ?? 0) > 0 ? 0 : pollMs);
     },
-    async stop() {
+    async stop(stopOptions) {
       stopped = true;
       clearTimeout(timer);
       listening?.abort();
       wake?.(); // a song waiting its turn goes now
+      if (stopOptions?.abandon) quit.abort(); // and a file waiting for its turn at the delivery gate is given up
       await current;
       await idle();
       // Lines still waiting for Google's word are written as they stand.

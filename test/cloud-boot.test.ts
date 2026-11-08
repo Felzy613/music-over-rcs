@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { boot, databasesOf, readCloudConfig, type BootDeps, type BootSys } from '../src/cloud/boot.ts';
-import { derive, pathsFor } from '../src/cloud/provision.ts';
+import { derive, pathsFor, personPassword } from '../src/cloud/provision.ts';
+import { peopleAccounts } from '../src/cloud/bootstrap.ts';
+import { parsePeoplePasswords } from '../src/people.ts';
 import type { ChildSpec, LeaseState } from '../src/cloud/supervise.ts';
 
 const ENV = {
@@ -38,7 +40,7 @@ interface Setup {
   restoreOverlap(): number;
 }
 
-function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; keysCode?: number; signingKey?: BootDeps['signingKey']; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string } } = {}): Setup {
+function setUp(options: { env?: Record<string, string | undefined>; backup?: boolean; restoreCode?: number; keysCode?: number; signingKey?: BootDeps['signingKey']; replicaExists?: boolean; lease?: boolean; holdLease?: boolean; accountOutput?: { code: number; output: string }; accountFor?: (user: string, attempt: number) => { code: number; output: string } | Promise<{ code: number; output: string }> } = {}): Setup {
   const env = { ...ENV, ...options.env } as NodeJS.ProcessEnv;
   if (options.backup === false) for (const name of ['R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']) delete env[name];
   const config = readCloudConfig(env);
@@ -53,6 +55,7 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
   const phases: string[] = [];
   let restoring = 0;
   let widest = 0;
+  const registerAttempts = new Map<string, number>();
   const sys: BootSys = {
     mkdir: async (path) => void events.push(`mkdir ${path}`),
     writeFile: async (path, text) => {
@@ -80,7 +83,12 @@ function setUp(options: { env?: Record<string, string | undefined>; backup?: boo
       }
       if (name === 'python' && args.includes('--generate-keys') && options.keysCode) return { code: options.keysCode, output: 'no signing key for you' };
       if (name === 'python' && args.includes('--generate-keys')) files.set(paths.synapseKey, MADE_KEY);
-      if (name === 'register_new_matrix_user') return options.accountOutput ?? { code: 0, output: '' };
+      if (name === 'register_new_matrix_user') {
+        const user = args[args.indexOf('-u') + 1]!;
+        const attempt = (registerAttempts.get(user) ?? 0) + 1;
+        registerAttempts.set(user, attempt);
+        return (await options.accountFor?.(user, attempt)) ?? options.accountOutput ?? { code: 0, output: '' };
+      }
       return { code: 0, output: '' };
     },
     fetch: (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch,
@@ -440,5 +448,195 @@ describe('the host settings', () => {
     assert.equal(config.backup, false);
     assert.deepEqual(config.ports, { homeserver: 8008, bridge: 29336, bot: 8081, front: 8080 });
     assert.match(readCloudConfig({ SECRET_KEY: ENV.SECRET_KEY, MATRIX_PASSWORD: 'x' }).holder, /-[0-9a-f]{6}$/);
+    assert.deepEqual([config.people, config.peopleProblems], [[], []], 'no PEOPLE is only the owner');
+  });
+
+  test('reads PEOPLE, leaving out a name that cannot be used and saying why, without stopping the host', () => {
+    const base = { SECRET_KEY: ENV.SECRET_KEY, MATRIX_PASSWORD: 'x' };
+    const config = readCloudConfig({ ...base, PEOPLE: 'alice, Bad me bob alice gmessagesbot dave', MATRIX_USER: 'dave' });
+    assert.deepEqual(config.people.map((person) => [person.id, person.owner, person.chat]), [['alice', false, 'alice'], ['bob', false, 'bob']]);
+    assert.equal(config.peopleProblems.length, 5);
+    assert.ok(config.peopleProblems.every((line) => line.startsWith('PEOPLE: ') && line.endsWith('; left out')));
+    assert.ok(config.peopleProblems.some((line) => /"dave" is the owner's Matrix account/.test(line)));
+    assert.deepEqual(readCloudConfig({ ...base, PEOPLE: '' }).people, []);
+    assert.deepEqual(readCloudConfig({ ...base, PEOPLE: 'Nope' }).people, [], 'every name bad is only the owner');
+  });
+});
+
+describe('people besides the owner', () => {
+  const registrations = (s: Setup) =>
+    s.commands
+      .filter((c) => c.command.endsWith('register_new_matrix_user'))
+      .map((c) => ({ user: c.args[c.args.indexOf('-u') + 1]!, password: c.args[c.args.indexOf('-p') + 1]!, args: c.args }));
+  const botOf = (s: Setup) => s.specs.find((spec) => spec.name === 'bot')!;
+  const MASTER = ENV.SECRET_KEY;
+
+  describe('with no one else, the owner’s start is what it always was', () => {
+    test('one account is made, with exactly these arguments, and the bridge knows only the owner', async () => {
+      const s = setUp();
+      await boot(s.deps);
+      await settle();
+      const made = registrations(s);
+      assert.equal(made.length, 1);
+      assert.deepEqual(made[0]!.args, ['-c', pathsFor('/data').synapseConfig, '-u', 'me', '-p', 'account-password', '--no-admin', 'http://127.0.0.1:8008']);
+      assert.match(s.files.get(pathsFor('/data').bridgeConfig)!, /permissions:\n {8}"@me:localhost": admin$/);
+      assert.ok(!/"@\w+:localhost": user/.test(s.files.get(pathsFor('/data').bridgeConfig)!));
+      assert.ok(s.events.includes('log made the Matrix account @me:localhost'));
+    });
+
+    test('the bot is handed no people and no passwords, even if PEOPLE_PASSWORDS was set by hand', async () => {
+      const plain = setUp();
+      await boot(plain.deps);
+      assert.equal('PEOPLE' in botOf(plain).env!, false);
+      assert.equal('PEOPLE_PASSWORDS' in botOf(plain).env!, false);
+      const byHand = setUp({ env: { PEOPLE_PASSWORDS: 'alice:made-up-by-hand' } });
+      await boot(byHand.deps);
+      assert.equal('PEOPLE_PASSWORDS' in botOf(byHand).env!, false, 'a value nobody derived is not passed on');
+    });
+
+    test('a PEOPLE with no usable name is the same as none: the bot is handed no passwords, and the problems are logged once', async () => {
+      const s = setUp({ env: { PEOPLE: 'Nope me' } });
+      await boot(s.deps);
+      await settle();
+      assert.equal(registrations(s).length, 1);
+      assert.equal('PEOPLE_PASSWORDS' in botOf(s).env!, false);
+      assert.equal(s.events.filter((event) => event.startsWith('log PEOPLE: ')).length, 2);
+    });
+  });
+
+  describe('with people', () => {
+    const PEOPLE = { PEOPLE: 'alice bob' };
+
+    test('each person’s account is made once, after the owner’s, without admin rights, with a password derived from the master secret', async () => {
+      const s = setUp({ env: PEOPLE });
+      await boot(s.deps);
+      await settle();
+      const made = registrations(s);
+      assert.deepEqual(made.map((one) => one.user), ['me', 'alice', 'bob']);
+      for (const one of made) {
+        assert.ok(one.args.includes('--no-admin'), `${one.user} is no admin`);
+        assert.deepEqual(one.args.slice(0, 2), ['-c', pathsFor('/data').synapseConfig]);
+        assert.equal(one.args.at(-1), 'http://127.0.0.1:8008');
+      }
+      assert.equal(made[0]!.password, 'account-password', 'the owner keeps the password they chose');
+      assert.equal(made[1]!.password, derive(MASTER, 'user-alice'));
+      assert.equal(made[2]!.password, personPassword(MASTER, 'bob'));
+      assert.notEqual(made[1]!.password, made[2]!.password);
+      for (const id of ['@me', '@alice', '@bob']) assert.ok(s.events.includes(`log made the Matrix account ${id}:localhost`), `${id} made`);
+    });
+
+    test('starting again makes the same passwords and finds the accounts there: nothing is retried and nothing is renewed', async () => {
+      const first = setUp({ env: PEOPLE });
+      await boot(first.deps);
+      await settle();
+      const again = setUp({ env: PEOPLE, accountOutput: { code: 1, output: 'User ID already taken.' } });
+      await boot(again.deps);
+      await settle();
+      assert.deepEqual(registrations(again).map((one) => [one.user, one.password]), registrations(first).map((one) => [one.user, one.password]), 'the same account and password every start');
+      assert.equal(registrations(again).length, 3, 'one attempt each, no retries for an account that exists');
+      for (const id of ['@me', '@alice', '@bob']) assert.ok(again.events.includes(`log the Matrix account ${id}:localhost exists`), id);
+    });
+
+    test('the bridge may be used by each of them as a plain user, and by no one else', async () => {
+      const s = setUp({ env: PEOPLE });
+      await boot(s.deps);
+      const config = s.files.get(pathsFor('/data').bridgeConfig)!;
+      assert.match(config, /permissions:\n {8}"@me:localhost": admin\n {8}"@alice:localhost": user\n {8}"@bob:localhost": user$/);
+      assert.ok(!config.includes('"*": relay'));
+      assert.ok(s.files.get(pathsFor('/data').synapseConfig)!.includes('enable_registration: false'), 'the homeserver still opens no sign-ups');
+      const registration = s.files.get(pathsFor('/data').bridgeRegistration)!;
+      assert.ok(!registration.includes('alice') && !registration.includes('bob'), 'the appservice namespaces do not take people’s accounts');
+    });
+
+    test('the bot is handed their names and passwords, and still not the master secret; no other process is', async () => {
+      const s = setUp({ env: PEOPLE });
+      await boot(s.deps);
+      const env = botOf(s).env!;
+      assert.equal(env.PEOPLE, 'alice,bob');
+      assert.deepEqual([...parsePeoplePasswords(env.PEOPLE_PASSWORDS)], [['alice', personPassword(MASTER, 'alice')], ['bob', personPassword(MASTER, 'bob')]]);
+      assert.equal(env.SECRET_KEY, undefined, 'the bot cannot derive anything itself');
+      assert.equal(env.MATRIX_PASSWORD, 'account-password', 'the owner’s sign-in is as it was');
+      for (const name of ['synapse', 'bridge', 'litestream']) {
+        const other = s.specs.find((spec) => spec.name === name)!.env!;
+        assert.ok(!('PEOPLE_PASSWORDS' in other) && !('PEOPLE' in other), `${name} gets neither`);
+        assert.ok(!Object.values(other).some((value) => String(value).includes(personPassword(MASTER, 'alice'))), `${name} does not have the password`);
+      }
+    });
+
+    test('the bot reads back, from what it is handed, the accounts the host made: the same names, passwords and ids', async () => {
+      const s = setUp({ env: { ...PEOPLE, SERVER_NAME: 'my.server' } });
+      await boot(s.deps);
+      await settle();
+      const { accounts, problems } = peopleAccounts(botOf(s).env!, 'my.server');
+      assert.deepEqual(problems, []);
+      assert.deepEqual(
+        accounts.map((one) => [one.account.user, one.account.password, one.account.userId]),
+        registrations(s).filter((one) => one.user !== 'me').map((one) => [one.user, one.password, `@${one.user}:my.server`]),
+      );
+    });
+
+    test('what the bot is handed is what the host made accounts for: a name left out of PEOPLE is left out of both', async () => {
+      const s = setUp({ env: { PEOPLE: 'alice Bad bob me' } });
+      await boot(s.deps);
+      await settle();
+      assert.deepEqual(registrations(s).map((one) => one.user), ['me', 'alice', 'bob']);
+      assert.equal(botOf(s).env!.PEOPLE, 'alice,bob');
+      assert.deepEqual([...parsePeoplePasswords(botOf(s).env!.PEOPLE_PASSWORDS).keys()], ['alice', 'bob']);
+      assert.match(s.files.get(pathsFor('/data').bridgeConfig)!, /"@alice:localhost": user\n {8}"@bob:localhost": user$/);
+      assert.equal(s.events.filter((event) => event.startsWith('log PEOPLE: ')).length, 2, 'Bad and me are said, once each');
+      assert.ok(s.events.includes('supervisor.start'), 'and the host started');
+    });
+
+    test('an account that cannot be made is said and retried, and does not stop the others being made', async () => {
+      const s = setUp({ env: PEOPLE, accountFor: (user) => (user === 'alice' ? { code: 1, output: 'the homeserver is busy' } : { code: 0, output: '' }) });
+      await boot(s.deps);
+      await settle(60);
+      const made = registrations(s).map((one) => one.user);
+      assert.equal(made.filter((user) => user === 'alice').length, 5, 'five tries, as for the owner');
+      assert.deepEqual(made.filter((user) => user !== 'alice'), ['me', 'bob']);
+      assert.ok(s.events.some((event) => /^log could not make the Matrix account @alice:localhost \(attempt 5\): the homeserver is busy$/.test(event)));
+      assert.ok(s.events.includes('log made the Matrix account @bob:localhost'));
+    });
+
+    test('the owner’s account failing does not stop theirs either, and says what it always said', async () => {
+      const s = setUp({ env: PEOPLE, accountFor: (user) => (user === 'me' ? { code: 1, output: 'no luck' } : { code: 0, output: '' }) });
+      await boot(s.deps);
+      await settle(60);
+      assert.ok(s.events.includes('log could not make the Matrix account (attempt 1): no luck'));
+      assert.ok(s.events.includes('log made the Matrix account @alice:localhost'));
+    });
+
+    test('shutting down while the accounts are being made stops it: no more accounts are tried', async () => {
+      let booting: Promise<Awaited<ReturnType<typeof boot>>> | undefined;
+      const s = setUp({
+        env: { PEOPLE: 'alice bob' },
+        accountFor: async (user) => {
+          if (user === 'me') await (await booting!).shutdown();
+          return { code: 0, output: '' };
+        },
+      });
+      booting = boot(s.deps);
+      await booting;
+      await settle(60);
+      assert.deepEqual(registrations(s).map((one) => one.user), ['me']);
+    });
+  });
+
+  describe('passwords are secret', () => {
+    const everyPassword = ['alice', 'bob'].map((id) => personPassword(MASTER, id));
+
+    test('nothing the host logs or does while starting has a person’s password in it, apart from the account command itself and the bot’s environment', async () => {
+      const s = setUp({ env: { PEOPLE: 'alice bob' }, accountFor: (user, attempt) => (user === 'alice' && attempt === 1 ? { code: 1, output: `sorry, ${personPassword(MASTER, 'alice')} was not accepted` } : { code: 0, output: '' }) });
+      await boot(s.deps);
+      await settle(60);
+      const peoplePasswords = botOf(s).env!.PEOPLE_PASSWORDS!;
+      for (const event of s.events) {
+        assert.ok(!event.includes(peoplePasswords), `PEOPLE_PASSWORDS in: ${event}`);
+        for (const password of everyPassword) assert.ok(!event.includes(password), `a password in: ${event}`);
+      }
+      assert.ok(s.events.some((event) => /could not make the Matrix account @alice:localhost \(attempt 1\): sorry, ‹hidden› was not accepted/.test(event)), 'a failure that echoes the password says so without it');
+      // The files it writes are the homeserver's and the bridge's settings, not the bot's.
+      for (const [path, text] of s.files) for (const password of everyPassword) assert.ok(!text.includes(password), `${path} has a password`);
+    });
   });
 });

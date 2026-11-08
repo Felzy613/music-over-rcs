@@ -15,28 +15,36 @@ export interface Follows {
   afterPlay(track: Track): string[];
 }
 
-export function catalogFollows(catalog: Catalog, now: () => Date = () => new Date()): Follows {
+/**
+ * The follows of one chat: the owner's ('' or left out) or a person's (their id, `Person.chat`). Each chat follows its own
+ * artists, is auto-followed from its own plays, and its unfollow stops only its own auto-follow. `now` is for tests.
+ */
+export function catalogFollows(catalog: Catalog, now?: () => Date): Follows;
+export function catalogFollows(catalog: Catalog, chat: string, now?: () => Date): Follows;
+export function catalogFollows(catalog: Catalog, second?: string | (() => Date), third?: () => Date): Follows {
+  const chat = typeof second === 'string' ? second : '';
+  const now = (typeof second === 'function' ? second : third) ?? (() => new Date());
   return {
     follow(tokens) {
       const artist = catalog.findArtist(tokens);
-      if (artist) catalog.follow(artist.id, false, now());
+      if (artist) catalog.follow(artist.id, false, now(), chat);
       return artist;
     },
     unfollow(tokens) {
       const artist = catalog.findArtist(tokens);
       if (!artist) return undefined;
-      const was = catalog.followState(artist.id) === 'on';
-      catalog.unfollow(artist.id, now());
+      const was = catalog.followState(artist.id, chat) === 'on';
+      catalog.unfollow(artist.id, now(), chat);
       return { artist, was };
     },
-    list: () => catalog.followed().map((artist) => ({ name: artist.name, auto: artist.auto })),
+    list: () => catalog.followed(chat).map((artist) => ({ name: artist.name, auto: artist.auto })),
     afterPlay(track) {
       const added: string[] = [];
       for (const artist of catalog.trackArtists(track.id)) {
         // Never after an unfollow, and never twice.
-        if (catalog.followState(artist.id) !== undefined) continue;
-        if (catalog.playedSongsBy(artist.id) < AUTO_FOLLOW_AFTER) continue;
-        catalog.follow(artist.id, true, now());
+        if (catalog.followState(artist.id, chat) !== undefined) continue;
+        if (catalog.playedSongsBy(artist.id, chat) < AUTO_FOLLOW_AFTER) continue;
+        catalog.follow(artist.id, true, now(), chat);
         added.push(artist.name);
       }
       return added;

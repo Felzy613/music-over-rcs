@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { OWNER, scoped, type Person } from './people.ts';
 
 /** Shows a notification on a Mac running the bot (Notification Center). Elsewhere it does nothing; the cloud host mails its alerts instead (src/alert.ts). */
 export type Notify = (title: string, message: string) => Promise<void>;
@@ -147,6 +148,68 @@ const PHONE_RESTART_MS = 2 * 60 * 60_000;
  */
 const PHONE_NOT_RESPONDING = /phone.not.responding|not responding.*phone/i;
 
+/** The troubles a watch can say, in words: the owner's own, or the same troubles named for one of the other people. */
+interface Words {
+  /** The bridge itself doesn't answer. */
+  silent: string;
+  /** No Google login at all. */
+  noLogin: string;
+  /** What is said when that kind of trouble ends or turns into another ("the bridge is responding, but … needs a fresh login"). */
+  needsLogin: string;
+  unlinked(why: string | undefined): string;
+  /** Signed out of Google Messages with no restart to try. `detail` is ` (why)` or nothing. */
+  signedOut(detail: string): string;
+  cannotReach(detail: string, hint: string): string;
+  phoneHint: string;
+  /** What is said of a bridge that is down when it can't be restarted and the phone isn't to blame. */
+  keepsTrying: string;
+  rcsOff: string;
+  rcsOn: string;
+  undelivered: string;
+  connected: string;
+  recovered: string;
+}
+
+/** The owner's words; they are as they always were. */
+const OWNER_WORDS: Words = {
+  silent: "The Google Messages bridge isn't answering. It is restarted on its own; if this lasts, restart the service in Render.",
+  noLogin: "Google Messages is logged out of the bridge. Log in again on the service's /pair page.",
+  needsLogin: 'The bridge is responding, but Google Messages needs a fresh login.',
+  unlinked: (why) => `Google Messages unlinked the bridge${why ? ` (${why})` : ''}. Restarting can't fix that; link it again on the service's /pair page (docs/cloud.md, step 4).`,
+  signedOut: (detail) => `Google Messages is logged out of the bridge${detail}. Log in again on the service's /pair page.`,
+  cannotReach: (detail, hint) => `The bridge can't reach Google Messages${detail}.${hint}`,
+  phoneHint: ' Is your phone on and online?',
+  keepsTrying: ' It keeps trying; if this lasts, restart the service in Render.',
+  rcsOff: "RCS chats are off on your phone, so songs can't be sent. Turn them on: Messages → Settings → RCS chats.",
+  rcsOn: 'Fixed: RCS chats are on again.',
+  undelivered: 'Google Messages reported an undelivered message. If texts stop arriving, restart the service in Render.',
+  connected: 'Fixed: the bridge is connected to Google Messages again.',
+  recovered: 'Fixed: the bridge recovered after its automatic restart.',
+};
+
+/**
+ * What a problem about someone else's login says. The alert's title is the same for everyone ("Music over RCS") and the owner is the one
+ * who reads it, so the person is named in the words. Nothing here promises a restart: only the owner's watch restarts the bridge.
+ */
+function personWords(id: string): Words {
+  const link = `Link it again on the Connect tab of the service's /admin/ console (pick ${id}), or take ${id} out of PEOPLE if they have left.`;
+  return {
+    silent: `The Google Messages bridge isn't answering, so ${id}'s login can't be checked. If this lasts, restart the service in Render.`,
+    noLogin: `Google Messages is logged out of the bridge for ${id}. ${link}`,
+    needsLogin: `The bridge is responding, but ${id}'s Google Messages needs a fresh login.`,
+    unlinked: (why) => `Google Messages unlinked the bridge for ${id}${why ? ` (${why})` : ''}. Restarting can't fix that. ${link}`,
+    signedOut: (detail) => `Google Messages is logged out of the bridge for ${id}${detail}. ${link}`,
+    cannotReach: (detail, hint) => `The bridge can't reach Google Messages for ${id}${detail}.${hint}`,
+    phoneHint: ` Is ${id}'s phone on and online?`,
+    keepsTrying: ` It keeps trying on its own; if this lasts, ask ${id} to check that their phone is on and online.`,
+    rcsOff: `RCS chats are off on ${id}'s phone, so songs can't be sent to them. They can turn them on: Messages → Settings → RCS chats.`,
+    rcsOn: `Fixed: RCS chats are on again on ${id}'s phone.`,
+    undelivered: `Google Messages reported an undelivered message for ${id}. If texts to ${id} stop arriving, check their phone and their link on the Connect tab; restarting the service in Render restarts the bridge for everybody.`,
+    connected: `Fixed: ${id}'s Google Messages is connected to the bridge again.`,
+    recovered: `Fixed: ${id}'s Google Messages is delivering again.`,
+  };
+}
+
 /**
  * Turns the bridge's status into problems: logged out (log in again), not reaching Google (after a while), RCS off
  * on the phone, or the bridge not running. When the bridge can't reach Google because this Mac has no internet,
@@ -158,6 +221,13 @@ const PHONE_NOT_RESPONDING = /phone.not.responding|not responding.*phone/i;
  * Only a bridge with no Google login at all can't mend itself; linking one takes a code scanned on the phone.
  * The exception is the phone not answering: the bridge's link to Google is fine then and it reconnects by itself once
  * the phone answers, so it is restarted only every two hours meanwhile, in case the bridge is what's stuck.
+ *
+ * The bridge is ONE process for every person's Google login, so a restart cuts everybody off. Only the owner's watch restarts it:
+ * a watch for anyone else (`person`) is built without a restart (giving it one throws) and says what is wrong instead, naming the
+ * person, under keys of their own (`bridge:alice`, `bridge-restart:alice`, `rcs:alice`). A restart can't mend a Google-side
+ * sign-out or a phone that is switched off, so a person's dead login would otherwise bounce the owner's connection every few minutes
+ * for as long as it lasted. The host-wide `internet` key stays one key for all. A person's watch also says nothing until their login
+ * has been seen connected once (`everConnected`): someone who has not linked yet is not "logged out".
  */
 export class BridgeWatch {
   #health: Health;
@@ -177,21 +247,65 @@ export class BridgeWatch {
   /** When the bridge started saying the phone isn't answering, and when it last said so. */
   #phoneSilentSince: number | undefined;
   #phoneSilentAt: number | undefined;
+  /** Whose login this is; the owner's unless said. */
+  #person: Person;
+  #words: Words;
+  /** Whether this login has been seen connected (always true for a watch without `everConnected`), and where that is kept. */
+  #seen: boolean;
+  #everConnected: { has(): boolean; mark(): void } | undefined;
 
   constructor(options: {
     health: Health;
     status: () => Promise<BridgeStatus>;
     online?: () => Promise<boolean>;
+    /** Restarts the bridge. Only the owner's watch may have one: the bridge is one process for everybody. */
     restart?: () => Promise<void>;
     log?: (line: string) => void;
     now?: () => Date;
+    /** Whose login this watches (the owner's when not given). Anyone else's is named in every message and has keys of their own. */
+    person?: Person;
+    /**
+     * Where "this login has been connected at least once" is kept (`mark` is called once, the first time it is seen connected). Until then
+     * the watch raises nothing and `linked()` is false. A person who has not linked yet must not be reported as logged out.
+     */
+    everConnected?: { has(): boolean; mark(): void };
   }) {
+    this.#person = options.person ?? OWNER;
+    if (!this.#person.owner && options.restart) {
+      throw new Error(`the bridge watch for ${this.#person.id} cannot restart the bridge: it is one process for every person's login, so only the owner's watch may`);
+    }
     this.#health = options.health;
     this.#status = options.status;
     this.#online = options.online;
     this.#restart = options.restart;
     this.#log = options.log ?? (() => {});
     this.#now = options.now ?? (() => new Date());
+    this.#words = this.#person.owner ? OWNER_WORDS : personWords(this.#person.id);
+    this.#everConnected = options.everConnected;
+    let seen = true;
+    if (this.#everConnected) {
+      try {
+        seen = this.#everConnected.has();
+      } catch {
+        seen = false;
+      }
+    }
+    this.#seen = seen;
+  }
+
+  /** The key of one of this login's problems: `bridge` for the owner, `bridge:alice` for a person. The host-wide `internet` has just one. */
+  #key(base: 'bridge' | 'bridge-restart' | 'rcs'): string {
+    return scoped(base, this.#person);
+  }
+
+  /** Whether this login has been seen connected (always, for a watch that does not ask). Until then nothing is said about it. */
+  linked(): boolean {
+    return this.#seen;
+  }
+
+  /** The keys under which this watch raises problems about its own login (not the host-wide `internet`). */
+  keys(): { bridge: string; restart: string; rcs: string } {
+    return { bridge: this.#key('bridge'), restart: this.#key('bridge-restart'), rcs: this.#key('rcs') };
   }
 
   async check(): Promise<void> {
@@ -199,10 +313,13 @@ export class BridgeWatch {
     try {
       status = await this.#status();
     } catch {
+      // A login that has never connected has nothing to report; the bridge not answering is the host's concern, not theirs.
+      if (!this.#seen) return;
       // launchd starts a crashed bridge again by itself; one that hangs without exiting is restarted here.
       const now = this.#now().getTime();
       this.#troubleSince ??= now;
-      this.#health.problem('bridge', "The Google Messages bridge isn't answering. It is restarted on its own; if this lasts, restart the service in Render.");
+      // Everyone's login is on this one bridge, and the owner's watch restarts it: another person waits out a long outage before adding their own word.
+      if (this.#person.owner || now - this.#troubleSince >= TROUBLE_GRACE_MS) this.#health.problem(this.#key('bridge'), this.#words.silent);
       if (this.#restartDue(now, BRIDGE_RESTART_GRACE_MS)) await this.#restartBridge("The Google Messages bridge isn't answering; restarting its bridge service.", now);
       return;
     }
@@ -212,6 +329,16 @@ export class BridgeWatch {
     // Google itself ended the link ("Unpaired from Google Messages, please re-link"), as opposed to turning the bridge away for a while.
     const unlinked = signedOut && /unpaired|re-?link/i.test(`${status.error ?? ''} ${status.message ?? ''}`);
     const connected = status.state === 'CONNECTED' || status.state === 'BACKFILLING';
+    if (!this.#seen) {
+      // Not linked yet (or the bridge is still starting): nothing is wrong until it has worked once.
+      if (!connected) return;
+      this.#seen = true;
+      try {
+        this.#everConnected?.mark();
+      } catch (err) {
+        this.#log(`could not remember that this login has connected: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     if (!noLogin && this.#online) {
       if (!(await this.#online())) {
         this.#offlineSince ??= now;
@@ -240,9 +367,9 @@ export class BridgeWatch {
       this.#troubleSince ??= now;
       this.#networkRecovery = false;
       this.#restartAttempted = false;
-      this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
+      this.#health.ok(this.#key('bridge-restart'), this.#words.needsLogin);
       if (now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
-        this.#health.problem('bridge', "Google Messages is logged out of the bridge. Log in again on the service's /pair page.");
+        this.#health.problem(this.#key('bridge'), this.#words.noLogin);
       }
     } else if (unlinked) {
       // Restarting can't undo this, so it isn't tried: only a new link, made with a code scanned on the phone, mends it.
@@ -252,11 +379,8 @@ export class BridgeWatch {
       this.#restarts = 0;
       this.#lastRestartAt = undefined;
       this.#phoneSilentSince = this.#phoneSilentAt = undefined;
-      this.#health.ok('bridge-restart', 'The bridge is responding, but Google Messages needs a fresh login.');
-      this.#health.problem(
-        'bridge',
-        `Google Messages unlinked the bridge${why ? ` (${why})` : ''}. Restarting can't fix that; link it again on the service's /pair page (docs/cloud.md, step 4).`,
-      );
+      this.#health.ok(this.#key('bridge-restart'), this.#words.needsLogin);
+      this.#health.problem(this.#key('bridge'), this.#words.unlinked(why));
     } else if (connected) {
       if (this.#networkRecovery && this.#restart && !this.#restartAttempted && this.#troubleSince !== undefined && now - this.#troubleSince >= BRIDGE_RESTART_GRACE_MS) {
         await this.#restartBridge('Google Messages still reports connected after a network outage; restarting its bridge service to refresh the session.', now);
@@ -270,8 +394,8 @@ export class BridgeWatch {
         this.#lastRestartAt = undefined;
         this.#phoneSilentSince = this.#phoneSilentAt = undefined;
       }
-      this.#health.ok('bridge', 'Fixed: the bridge is connected to Google Messages again.');
-      this.#health.ok('bridge-restart', 'Fixed: the bridge recovered after its automatic restart.');
+      this.#health.ok(this.#key('bridge'), this.#words.connected);
+      this.#health.ok(this.#key('bridge-restart'), this.#words.recovered);
     } else {
       // Brief disconnects happen; only one that lasts is worth a word. Google turning the bridge away (signed out) is
       // restarted sooner: a restart is how it tries again, and it costs nothing if it's still being turned away.
@@ -307,27 +431,32 @@ export class BridgeWatch {
         const detail = why ? ` (${why})` : '';
         const retrying = ' The bot keeps restarting it and reconnects on its own once Google lets it through (a web filter blocking Google does this).';
         if (signedOut && this.#restart) {
-          this.#health.problem('bridge', `The bridge is signed out of Google Messages${detail}.${retrying} If this lasts for hours, log in again on the service's /pair page.`);
+          this.#health.problem(this.#key('bridge'), `The bridge is signed out of Google Messages${detail}.${retrying} If this lasts for hours, log in again on the service's /pair page.`);
         } else if (signedOut) {
-          this.#health.problem('bridge', `Google Messages is logged out of the bridge${detail}. Log in again on the service's /pair page.`);
+          this.#health.problem(this.#key('bridge'), this.#words.signedOut(detail));
         } else {
-          const phone = phoneSilent || /phone/i.test(why ?? '') ? ' Is your phone on and online?' : '';
+          const phone = phoneSilent || /phone/i.test(why ?? '') ? this.#words.phoneHint : '';
           const hint = !this.#restart
-            ? phone || ' It keeps trying; if this lasts, restart the service in Render.'
+            ? phone || this.#words.keepsTrying
             : `${phoneSilent ? ' It reconnects on its own once the phone answers.' : retrying}${phone}`;
-          this.#health.problem('bridge', `The bridge can't reach Google Messages${detail}.${hint}`);
+          this.#health.problem(this.#key('bridge'), this.#words.cannotReach(detail, hint));
         }
       }
     }
-    if (status.rcsEnabled === false) this.#health.problem('rcs', "RCS chats are off on your phone, so songs can't be sent. Turn them on: Messages → Settings → RCS chats.");
-    else if (status.rcsEnabled === true) this.#health.ok('rcs', 'Fixed: RCS chats are on again.');
+    if (status.rcsEnabled === false) this.#health.problem(this.#key('rcs'), this.#words.rcsOff);
+    else if (status.rcsEnabled === true) this.#health.ok(this.#key('rcs'), this.#words.rcsOn);
   }
 
   /** A terminal bridge notice means its retries already failed, even if the status API still says CONNECTED. */
   async sendFailed(): Promise<void> {
     const now = this.#now().getTime();
+    if (!this.#seen) {
+      // Nothing can be delivered to a login that has not connected yet; that is not a failure to report.
+      this.#log('Google Messages reported an undelivered message, but this login has not connected yet; nothing to report.');
+      return;
+    }
     if (!this.#restart) {
-      this.#health.problem('bridge-restart', 'Google Messages reported an undelivered message. If texts stop arriving, restart the service in Render.');
+      this.#health.problem(this.#key('bridge-restart'), this.#words.undelivered);
       return;
     }
     if (this.#lastSendFailureRestartAt !== undefined && now - this.#lastSendFailureRestartAt < 10 * 60_000) {
@@ -366,7 +495,7 @@ export class BridgeWatch {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.#log(`could not restart the Google Messages bridge automatically: ${detail}`);
-      this.#health.problem('bridge-restart', `The bridge couldn't restart automatically (${detail}). Restart the service in Render.`);
+      this.#health.problem(this.#key('bridge-restart'), `The bridge couldn't restart automatically (${detail}). Restart the service in Render.`);
     }
   }
 }

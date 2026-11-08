@@ -9,6 +9,8 @@ export interface CheckResult {
   detail: string;
   /** What to do, when it isn't ok. */
   fix?: string;
+  /** Worth a look but not a failure: the line is ok (so it never makes the check fail), and the printer marks it. Used for the people besides the owner. */
+  warn?: boolean;
 }
 
 export interface CheckOptions {
@@ -119,13 +121,19 @@ export async function checkCloud(options: CheckOptions): Promise<CheckResult[]> 
   if (Array.isArray(s.problems) && s.problems.length > 0) add('No problems reported', false, s.problems.map((p: { message: string }) => p.message).join(' | '), 'These are the same problems the bot emails you about.');
   else add('No problems reported', true, 'none');
   if (s.oneDrive) add('Songs are saved to OneDrive', s.oneDrive.connected === true, s.oneDrive.connected ? `${s.oneDrive.savedThisMonthMb} MB saved this month${s.oneDrive.monthlyLimitMb ? ` of ${s.oneDrive.monthlyLimitMb} MB allowed` : ''}` : 'not signed in', `Open ${base}/pair and press Sign in to OneDrive (step 5).`);
-  const traffic = (s.sentThisMonthMb ?? 0) + (s.oneDrive?.savedThisMonthMb ?? 0);
+  // Everybody's songs together when the host says (people besides the owner), the owner's own otherwise.
+  const songsSent = s.sentTotalThisMonthMb ?? s.sentThisMonthMb ?? 0;
+  const traffic = songsSent + (s.oneDrive?.savedThisMonthMb ?? 0);
   add(
     'Outbound traffic this month',
     traffic < 3500,
-    `${traffic} MB: ${s.sentThisMonthMb ?? 0} MB of songs sent${s.oneDrive ? ` and ${s.oneDrive.savedThisMonthMb ?? 0} MB saved to OneDrive` : ''} (Render's free plan includes about 5,000 MB in total)`,
+    `${traffic} MB: ${songsSent} MB of songs sent${s.oneDrive ? ` and ${s.oneDrive.savedThisMonthMb ?? 0} MB saved to OneDrive` : ''} (Render's free plan includes about 5,000 MB in total)`,
     'Close to the monthly limit: lower ONEDRIVE_MAX_MB_PER_MONTH, or send fewer albums until the month is over.',
   );
+
+  // The people besides the owner, one line each. They only inform: a line is never a failure, so the check keeps meaning "the owner's bot is answering"
+  // (and a phone that has not been set up yet, or a person whose chat is gone, does not fail it). A line that wants a look says so with `warn`.
+  if (Array.isArray(s.people)) for (const one of s.people) results.push(personLine(one));
 
   if (options.sendTestAlert) {
     const alert = await ask(`${base}/admin/test-alert`, { method: 'POST', headers: auth });
@@ -133,4 +141,23 @@ export async function checkCloud(options: CheckOptions): Promise<CheckResult[]> 
     else add('A test alert is left for the Worker', true, 'the Worker mails it within five minutes: check your inbox (or the ntfy app)');
   }
   return results;
+}
+
+/** One person's line: where their chat and their Google Messages login stand, whether their phone gave the bridge its number, what they were sent. */
+function personLine(one: any): CheckResult {
+  const id = typeof one?.id === 'string' ? one.id : 'someone';
+  const bridge = one?.bridge?.state ? String(one.bridge.state) : 'not linked';
+  const number = one?.simNumber === true ? 'phone number reported' : one?.simNumber === false ? 'NO phone number reported' : 'phone number unknown';
+  const sent = typeof one?.sentThisMonthMb === 'number' ? `${one.sentThisMonthMb} MB sent this month${typeof one?.monthlyLimitMb === 'number' ? ` of ${one.monthlyLimitMb} MB allowed` : ''}` : 'nothing sent yet';
+  const onboarding = one?.onboarding;
+  const problems = Array.isArray(one?.problems) ? one.problems.map((p: { message?: unknown }) => String(p?.message ?? '')).filter(Boolean) : [];
+  const warn = onboarding?.warn === true || problems.length > 0 || one?.phase === 'room-missing';
+  const fix = onboarding?.warn === true && typeof onboarding.message === 'string' ? onboarding.message : problems.length > 0 ? problems.join(' | ') : one?.phase === 'room-missing' ? `${id}'s chat is gone: ${id} texts themself once from their phone and the bot finds the new one.` : undefined;
+  return {
+    name: `${id} (besides the owner)`,
+    ok: true,
+    detail: `chat ${one?.phase ?? 'unknown'}, Google Messages ${bridge}, ${number}, ${onboarding?.onboarded === true ? 'set up' : `not set up yet (${onboarding?.step ?? 'unknown'})`}, ${sent}`,
+    ...(warn ? { warn: true } : {}),
+    ...(warn && fix ? { fix } : {}),
+  };
 }

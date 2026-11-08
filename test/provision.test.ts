@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { bridgeRegistration, derive, patchBridgeConfig, pathsFor, synapseConfig, SYNAPSE_LOG_CONFIG, type BridgeOptions } from '../src/cloud/provision.ts';
+import { bridgeNamespaces, bridgeOwns, bridgePermissions, bridgeRegistration, derive, matrixUserId, patchBridgeConfig, pathsFor, personPassword, synapseConfig, SYNAPSE_LOG_CONFIG, type BridgeOptions } from '../src/cloud/provision.ts';
 
 /** The shape of the bridge's generated example config (`mautrix-gmessages -e`), with made-up values. */
 const EXAMPLE = `# Network-specific config options
@@ -210,5 +210,94 @@ describe('the homeserver config', () => {
 
   test('logs only warnings to the console', () => {
     assert.match(SYNAPSE_LOG_CONFIG, /root:\n {2}level: WARNING/);
+  });
+});
+
+describe('people besides the owner', () => {
+  const people = [{ id: 'alice' }, { id: 'bob' }];
+  const permissionsBlock = (text: string): string => /permissions:\n((?: {8}.*\n)+)/.exec(text)![1]!;
+
+  describe('their accounts’ passwords', () => {
+    test('are derived from the master secret: the same every start, different for each person and for each master, 64 hex characters', () => {
+      assert.equal(personPassword('m', 'alice'), personPassword('m', 'alice'));
+      assert.notEqual(personPassword('m', 'alice'), personPassword('m', 'bob'));
+      assert.notEqual(personPassword('m', 'alice'), personPassword('n', 'alice'));
+      assert.match(personPassword('m', 'alice'), /^[0-9a-f]{64}$/);
+    });
+
+    test('are the derive() of a label of their own, which no other secret here uses', () => {
+      assert.equal(personPassword('m', 'alice'), derive('m', 'user-alice'));
+      const others = ['synapse-registration', 'synapse-macaroon', 'synapse-form', 'bridge-as', 'bridge-hs', 'bridge-sender'].map((label) => derive('m', label));
+      assert.ok(!others.includes(personPassword('m', 'alice')));
+    });
+  });
+
+  describe('the bridge’s permissions', () => {
+    test('with no one else the config is exactly the owner’s alone, whether people are left out or empty', () => {
+      const alone = patchBridgeConfig(EXAMPLE, OPTIONS);
+      assert.equal(patchBridgeConfig(EXAMPLE, { ...OPTIONS, people: [] }), alone);
+      assert.equal(permissionsBlock(alone), '        "@me:localhost": admin\n');
+      assert.deepEqual(bridgePermissions(OPTIONS), ['"@me:localhost": admin']);
+    });
+
+    test('name the owner as admin and each person as a plain user, in the order listed, and nothing else', () => {
+      const patched = patchBridgeConfig(EXAMPLE, { ...OPTIONS, people });
+      assert.equal(permissionsBlock(patched), '        "@me:localhost": admin\n        "@alice:localhost": user\n        "@bob:localhost": user\n');
+      assert.ok(!patched.includes('"*": relay'), 'no relay entry for anyone');
+      assert.ok(!permissionsBlock(patched).includes('example.com'), 'none of the example config’s entries is left');
+      assert.equal(permissionsBlock(patched).match(/: admin\n/g)?.length, 1, 'only the owner is an admin');
+    });
+
+    test('change nothing else in the config', () => {
+      const alone = patchBridgeConfig(EXAMPLE, OPTIONS);
+      const shared = patchBridgeConfig(EXAMPLE, { ...OPTIONS, people });
+      assert.equal(shared.replace(permissionsBlock(shared), permissionsBlock(alone)), alone);
+    });
+
+    test('are stable: patching the output again changes nothing', () => {
+      const patched = patchBridgeConfig(EXAMPLE, { ...OPTIONS, people });
+      assert.equal(patchBridgeConfig(patched, { ...OPTIONS, people }), patched);
+    });
+
+    test('follow the homeserver’s name and the owner’s account', () => {
+      const lines = bridgePermissions({ domain: 'my.server', user: 'dave', people });
+      assert.deepEqual(lines, ['"@dave:my.server": admin', '"@alice:my.server": user', '"@bob:my.server": user']);
+    });
+
+    test('are refused for an account that cannot be a person’s, naming it', () => {
+      for (const id of ['me', 'owner', 'gmessagesbot', 'gmessages_x', 'Alice', 'a', 'alice bob', 'a:b', 'x\n  - admin', '']) {
+        assert.throws(() => patchBridgeConfig(EXAMPLE, { ...OPTIONS, people: [{ id }] }), /bridge\.permissions: ".*" cannot be a person's account/, JSON.stringify(id));
+      }
+      for (const id of ['gmessagesbot', 'gmessages_x']) assert.throws(() => patchBridgeConfig(EXAMPLE, { ...OPTIONS, people: [{ id }] }), /cannot be a person's account \(is one of the bridge's own accounts\)/, id);
+      assert.throws(() => patchBridgeConfig(EXAMPLE, { ...OPTIONS, people: [{ id: 'alice' }, { id: 'alice' }] }), /"@alice:localhost" cannot be a person's account \(is listed twice\)/);
+      assert.throws(() => patchBridgeConfig(EXAMPLE, { ...OPTIONS, user: 'dave', people: [{ id: 'dave' }] }), /"@dave:localhost" cannot be a person's account/);
+    });
+
+    test('are not written at all when one name is refused: the owner is never left with a half-written list', () => {
+      assert.throws(() => bridgePermissions({ ...OPTIONS, people: [{ id: 'alice' }, { id: 'gmessagesbot' }] }), /gmessagesbot/);
+    });
+  });
+
+  describe('the appservice’s namespaces', () => {
+    test('are the bridge’s bot and its ghost users on this homeserver, with the domain escaped, and the registration says the same', () => {
+      assert.deepEqual(bridgeNamespaces('my.server'), ['^@gmessagesbot:my\\.server$', '^@gmessages_.*:my\\.server$']);
+      const registration = bridgeRegistration({ ...OPTIONS, domain: 'my.server' });
+      for (const pattern of bridgeNamespaces('my.server')) assert.ok(registration.includes(JSON.stringify(pattern)), pattern);
+    });
+
+    test('own the bridge’s accounts and no person’s', () => {
+      assert.ok(bridgeOwns('@gmessagesbot:localhost', 'localhost'));
+      assert.ok(bridgeOwns('@gmessages_12345:localhost', 'localhost'));
+      assert.ok(!bridgeOwns('@alice:localhost', 'localhost'));
+      assert.ok(!bridgeOwns('@me:localhost', 'localhost'));
+      assert.ok(!bridgeOwns('@gmessagesbot:elsewhere', 'localhost'), 'another homeserver’s account is not claimed');
+      assert.ok(!bridgeOwns('@gmessagesbot:localhostx', 'localhost'), 'and the name is matched whole');
+      assert.equal(matrixUserId('alice', 'localhost'), '@alice:localhost');
+    });
+
+    test('are not widened by people: the registration is the same, and sign-ups stay closed', () => {
+      assert.equal(bridgeRegistration({ ...OPTIONS, people }), bridgeRegistration(OPTIONS));
+      assert.ok(synapseConfig({ serverName: 'localhost', paths: pathsFor('/data'), master: OPTIONS.master }).includes('enable_registration: false'));
+    });
   });
 });

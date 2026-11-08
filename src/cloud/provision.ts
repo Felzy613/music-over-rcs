@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
+import { personIdProblem, type Person } from '../people.ts';
 
 // The cloud host starts from an empty disk every time (the databases come back from the replica; nothing else does), so the
 // homeserver's and the bridge's settings are written afresh at each start. The secrets in them are derived from one master
@@ -10,6 +11,17 @@ import { join } from 'node:path';
 export function derive(master: string, label: string): string {
   return createHmac('sha256', master).update(`music-over-rcs:${label}`).digest('hex');
 }
+
+/**
+ * The password of a person's Matrix account (the people in `PEOPLE`, not the owner, whose password is MATRIX_PASSWORD): derived from
+ * the master secret like everything else here, so the host makes the account and the bot signs in to it without anything being kept.
+ */
+export function personPassword(master: string, id: string): string {
+  return derive(master, `user-${id}`);
+}
+
+/** A Matrix id: `@alice:localhost`. */
+export const matrixUserId = (localpart: string, domain: string): string => `@${localpart}:${domain}`;
 
 export interface CloudPaths {
   data: string;
@@ -145,15 +157,36 @@ export interface BridgeOptions {
   master: string;
   /** The Matrix account (localpart) that may use the bridge as its admin. */
   user: string;
+  /**
+   * The other people who use the bot (`PEOPLE`): each may use the bridge, as a plain user, for their own Google Messages login. Nobody
+   * else may: the homeserver's registration stays closed and the bridge's permissions name exactly these accounts.
+   */
+  people?: ReadonlyArray<Pick<Person, 'id'>>;
   databaseUri: string;
   /** Chats the bridge makes rooms for as soon as it logs in. 0 means only chats with new activity. */
   initialChats?: number;
 }
 
+const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The accounts the bridge owns on the homeserver (its bot and its ghost users, claimed exclusively in the registration below), as
+ * regular-expression sources. No Matrix account of a person may match one: the homeserver would refuse to make it.
+ */
+export function bridgeNamespaces(domain: string): string[] {
+  const escaped = escapeRegex(domain);
+  return [`^@gmessagesbot:${escaped}$`, `^@gmessages_.*:${escaped}$`];
+}
+
+/** Whether a Matrix id is one of the bridge's own (see `bridgeNamespaces`). */
+export function bridgeOwns(userId: string, domain: string): boolean {
+  return bridgeNamespaces(domain).some((pattern) => new RegExp(pattern).test(userId));
+}
+
 /** The appservice registration the homeserver reads: the same tokens the bridge's own config holds. */
 export function bridgeRegistration(options: BridgeOptions): string {
   const q = (value: string) => JSON.stringify(value);
-  const domain = options.domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const [bot, ghosts] = bridgeNamespaces(options.domain) as [string, string];
   return `id: gmessages
 url: ${q(options.appserviceUrl)}
 as_token: ${q(derive(options.master, 'bridge-as'))}
@@ -162,13 +195,32 @@ sender_localpart: ${q(derive(options.master, 'bridge-sender').slice(0, 32))}
 rate_limited: false
 namespaces:
   users:
-    - regex: ${q(`^@gmessagesbot:${domain}$`)}
+    - regex: ${q(bot)}
       exclusive: true
-    - regex: ${q(`^@gmessages_.*:${domain}$`)}
+    - regex: ${q(ghosts)}
       exclusive: true
 de.sorunome.msc2409.push_ephemeral: true
 receive_ephemeral: true
 `;
+}
+
+/**
+ * The lines of `bridge.permissions`: the owner's account administers the bridge and each person's account may use it (log in with
+ * their own Google account, nothing more). Throws, naming the account, for one that cannot be a person's: a bad or repeated name,
+ * the owner's own account, or one of the bridge's (the appservice's namespaces). The host only passes names it has already checked
+ * (`parsePeople`), so this is the last line of defence against a permission going to an account that is not meant to have it.
+ */
+export function bridgePermissions(options: Pick<BridgeOptions, 'domain' | 'user' | 'people'>): string[] {
+  const lines = [`${JSON.stringify(matrixUserId(options.user, options.domain))}: admin`];
+  const seen = new Set<string>();
+  for (const { id } of options.people ?? []) {
+    const userId = matrixUserId(id, options.domain);
+    const problem = (bridgeOwns(userId, options.domain) ? "is one of the bridge's own accounts" : undefined) ?? personIdProblem(id, [options.user]) ?? (seen.has(id) ? 'is listed twice' : undefined);
+    if (problem) throw new Error(`bridge.permissions: ${JSON.stringify(userId)} cannot be a person's account (${problem})`);
+    seen.add(id);
+    lines.push(`${JSON.stringify(userId)}: user`);
+  }
+  return lines;
 }
 
 type Scalar = string | number | boolean;
@@ -196,8 +248,9 @@ export function patchBridgeConfig(text: string, options: BridgeOptions): string 
     'matrix.message_status_events': true,
     'logging.min_level': 'info',
   };
+  const permissions = bridgePermissions(options);
   const blocks: Record<string, (indent: string) => string[]> = {
-    'bridge.permissions': (indent) => [`${indent}permissions:`, `${indent}${indent}${JSON.stringify(`@${options.user}:${options.domain}`)}: admin`],
+    'bridge.permissions': (indent) => [`${indent}permissions:`, ...permissions.map((line) => `${indent}${indent}${line}`)],
     'logging.writers': (indent) => [`${indent}writers:`, `${indent}${indent}- type: stdout`, `${indent}${indent}  format: pretty`],
   };
   const lines = text.split('\n');

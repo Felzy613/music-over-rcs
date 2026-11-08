@@ -256,6 +256,75 @@ describe('the bot’s chat room is gone', () => {
     assert.deepEqual(told, [], 'a busy homeserver says nothing about the chat');
   });
 
+  describe('one chat’s problem for each person (room:<id>), named in the alert', () => {
+    /** Two watches over one Health, as the host has: the owner's (the default key) and alice's. */
+    function pair() {
+      const told: string[] = [];
+      const health = new Health({ notify: async (_title, message) => void told.push(message) });
+      const waits: Array<() => void> = [];
+      const rooms = { owner: [OLD], alice: ['!alice-old:localhost'] };
+      const watch = (who: 'owner' | 'alice') =>
+        new RoomWatch({
+          rooms: () => rooms[who],
+          enabled: () => true,
+          join: (room) => (room === mock.roomId ? Promise.resolve() : Promise.reject(new MatrixError("Can't join remote room", 404, 'M_UNKNOWN', ''))),
+          wait: () => new Promise<void>((resolve) => waits.push(resolve)),
+          stopped: () => false,
+          health,
+          log: () => {},
+          ...(who === 'alice' ? { key: 'room:alice', name: 'alice' } : {}),
+        });
+      return { told, health, rooms, owner: watch('owner'), alice: watch('alice'), waits };
+    }
+
+    test('the two are kept apart: each in its own key, each alert saying whose it is, and the owner’s worded as it always was', async () => {
+      const { told, health, owner, alice } = pair();
+      void owner.ready();
+      void alice.ready();
+      await until(() => owner.report().state === 'gone' && alice.report().state === 'gone', 'both to be waiting');
+      assert.equal(health.has('room'), true);
+      assert.equal(health.has('room:alice'), true);
+      assert.deepEqual(health.problems().map((problem) => problem.key).sort(), ['room', 'room:alice']);
+      const mine = told.find((message) => message.startsWith("The bot's chat room is gone"))!;
+      const hers = told.find((message) => message.startsWith("alice's chat room is gone"))!;
+      assert.ok(mine && hers, told.join('\n'));
+      assert.match(mine, /\/pair/);
+      assert.match(mine, /text yourself once/);
+      assert.doesNotMatch(mine, /alice/);
+      assert.match(hers, /\(!alice-old:localhost\)/);
+      assert.match(hers, /alice needs to text themself once from their phone/);
+      assert.match(hers, /Connect page, pick alice/);
+      assert.match(hers, /Nobody else's chat is affected/);
+    });
+
+    test('one coming back clears only its own problem and says whose it was; the other goes on waiting', async () => {
+      const { told, health, rooms, owner, alice, waits } = pair();
+      void owner.ready();
+      const aliceReady = alice.ready();
+      await until(() => owner.report().state === 'gone' && alice.report().state === 'gone', 'both to be waiting');
+      rooms.alice = [mock.roomId]; // her chat is back
+      for (const wake of waits.splice(0)) wake();
+      assert.equal(await aliceReady, mock.roomId);
+      assert.equal(health.has('room:alice'), false);
+      assert.equal(health.has('room'), true, 'the owner’s is still a problem');
+      assert.equal(owner.report().state, 'gone');
+      assert.match(told.at(-1)!, /^Fixed: the bot has alice's chat room again and is answering there\.$/);
+    });
+
+    test('the owner’s coming back is said as before and leaves alice’s problem alone', async () => {
+      const { told, health, rooms, owner, alice, waits } = pair();
+      const ownerReady = owner.ready();
+      void alice.ready();
+      await until(() => owner.report().state === 'gone' && alice.report().state === 'gone', 'both to be waiting');
+      rooms.owner = [mock.roomId];
+      for (const wake of waits.splice(0)) wake();
+      assert.equal(await ownerReady, mock.roomId);
+      assert.equal(health.has('room'), false);
+      assert.equal(health.has('room:alice'), true);
+      assert.equal(told.at(-1), 'Fixed: the bot has its chat room again and is answering.');
+    });
+  });
+
   test('which failed joins mean the room is unusable', () => {
     assert.equal(roomUnusable(new MatrixError("Can't join remote room", 404, 'M_UNKNOWN', '')), true);
     assert.equal(roomUnusable(new MatrixError('You are not invited to this room.', 403, 'M_FORBIDDEN', '')), true);

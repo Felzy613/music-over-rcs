@@ -1,304 +1,38 @@
 import './load-env.ts';
 import './admin/capture.ts';
-import { adminConsole } from './admin/console.ts';
-import { checkAudio } from './audio-check.ts';
-import { fetchAudio } from './audio-fetch.ts';
-import { createBot } from './bot.ts';
-import { Catalog, choicesIn, linksIn, resumeIn, viewsIn } from './catalog.ts';
-import { alertFromEnv, allNotify } from './alert.ts';
-import { Health, BridgeWatch, bridgeStatus, macNotify, online } from './health.ts';
-import { bridgeRestarter } from './bridge-restart.ts';
-import { loadExtensions, startExtensions, stopExtensions, type ExtensionChat } from './extensions.ts';
-import { loadMatrixConfig, parseCloudBudget } from './config.ts';
-import { describeMatrixError, MatrixClient } from './matrix/client.ts';
-import { setUpLibrary } from './library/setup.ts';
-import { addSent, archivedThisMonth, trafficProblem } from './usage.ts';
-import { oneDriveFromEnv } from './archive/onedrive.ts';
-import { memoryCheck } from './cloud/memory.ts';
-import { watchJoinedRoom } from './cloud/room.ts';
-import { youTubeRelayFromEnv } from './cloud/youtube-relay.ts';
-import { createRunner, type IncomingPicture } from './runner.ts';
-import { recentTimelines } from './timeline.ts';
-import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
-import { createWaitingNotice } from './waiting-notice.ts';
-import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
-import { songSources } from './sources/songs.ts';
-import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
-import { zemerSearchFromEnv } from './sources/zemer.ts';
-import { newReleasesFromEnv } from './sources/zemer-releases.ts';
-import { zemerWhitelistFromEnv } from './sources/zemer-whitelist.ts';
+import { loadMatrixConfig } from './config.ts';
+import { addChat, startHost } from './host.ts';
+import { describeMatrixError } from './matrix/client.ts';
+import { OWNER } from './people.ts';
 
-// Answers song requests typed into one Google Messages chat, through the mautrix-gmessages bridge and a Matrix room.
-/** The memory an album's next download needs free on the host: 132 MB, that is under 380 of a 512 MB container. */
-const ALBUM_MEMORY_SPARE = 132 * 1048576;
+// Answers song requests typed into one Google Messages chat, through the mautrix-gmessages bridge and a Matrix room. This file is only the
+// entry point (`npm run matrix`, and the cloud host's cloud-main.ts imports it once the chat is chosen): what the bot is made of is
+// built in src/host.ts, once for everything the chats share (`startHost`) and once for each person's own chat (`addChat`). Here there is
+// the one chat, the owner's, from MATRIX_ACCESS_TOKEN and MATRIX_ROOM_ID.
 const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 let homeserver: string | undefined;
 
 try {
-  const config = loadMatrixConfig();
-  homeserver = config.homeserver;
-  const maxBytes = config.maxDownloadMb * 1024 * 1024;
+  // The owner's own token and room are this chat's; what is left is what every chat on the host shares.
+  const { token, roomID, ...shared } = loadMatrixConfig();
+  homeserver = shared.homeserver;
 
-  const catalog = new Catalog(config.dbPath);
-  // The owner's management console (src/admin/console.ts) reads and changes what this assembles; a few settings it can change
-  // while the bot runs (the daily message's time, the quiet hours, the gap between songs, …) are read through `settings`.
-  const settings = adminConsole.liveSettings(catalog, process.env);
-  adminConsole.provide({ catalog, env: process.env, log, settings });
-  // What goes out is counted (a cloud host's plan allows only so much a month; /status on the cloud host shows it).
-  const matrix = new MatrixClient({ token: config.token, homeserver: config.homeserver, onUpload: (bytes) => addSent(catalog, bytes) });
-  const { userId } = await matrix.whoami();
-  // The bridge invites you to each chat it creates; joining accepts the invite and does nothing if you're in already.
-  await matrix.joinRoom(config.roomID);
-
-  // This machine downloads the file, so private addresses (a NAS, say) are fine and any audio format will do.
-  // A search asks Zemer's catalog first, then music-table.com (YOUTUBE_MUSIC=off and MUSIC_TABLE=off turn them off;
-  // SONG_SOURCES sets which is asked first). Zemer's songs are YouTube Music's, so their audio comes from there.
-  const musicTable = musicTableFromEnv();
-  // YouTube turns the cloud host away at its player, so there songs come through the Cloudflare Worker (YOUTUBE_RELAY=r2).
-  const youTube = youTubeMusicFromEnv(process.env, { log, relay: youTubeRelayFromEnv(process.env, { log }) });
-  // Whether songs can be had (from this host, or through the relay), learned and logged at start.
-  void youTube?.checkStreams();
-  const zemer = youTube && zemerSearchFromEnv(process.env, { log });
-  // Whether Zemer's search answers this host, logged at start (without it, searches use YouTube Music's own search).
-  void zemer?.check();
-  const whitelist = youTube && zemerWhitelistFromEnv(process.env, { state: catalog });
-  const audio = resolvingYouTubeAudio(
-    youTube,
-    resolvingAudio(
-      musicTable,
-      {
-        checkAudio: (url) => checkAudio(url, { allowPrivateHosts: true, allowAnyAudio: true, maxBytes }),
-        fetchAudio: (url, title) => fetchAudio(url, title, { maxBytes }),
-      },
-      { maxBytes },
-    ),
-    { maxBytes },
-  );
-  // What's wrong, shown on the Mac: the chat can't carry news of its own breakdown.
-  // On a server (ALERT_URL set) problems are also sent to the alert Worker, which emails them.
-  const health = new Health({ notify: allNotify(macNotify, alertFromEnv(process.env, log)), log, save: (problems) => catalog.setState('health.problems', JSON.stringify(problems)) });
-  catalog.setState('health.problems', '[]');
-  // Zemer's artist list is what YouTube Music songs are filtered by. Zemer's server no longer answers the bot, so by default
-  // (ZEMER_CONTENT_URL unset) the saved copy is the list and nothing is asked or watched; with the URL set it changes through
-  // the day and is kept current while the bot runs, with a note if it goes a day without updating (the last good list is used meanwhile).
-  const stopWatching = whitelist?.watch((error) => {
-    if (error === undefined) health.ok('whitelist', "Fixed: Zemer's artist list is updating again.");
-    else if (whitelist.frozen) health.problem('whitelist', `Zemer's artist list now answers only its own app, so the bot keeps the last copy it saved. Artists Zemer adds wait for your word (text "pending"); text "block" and a name to hide anyone.`);
-    else if (whitelist.ageMs > 24 * 60 * 60_000) health.problem('whitelist', `Zemer's artist list hasn't updated for a day (${error}). YouTube Music songs are being checked against the old list.`);
-  });
-  void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs${whitelist.offline ? " (the saved copy: Zemer's server is not asked)" : whitelist.frozen ? ' (frozen: the server turns the bot away)' : ''}; you allowed ${whitelist.owner.allowed}, blocked ${whitelist.owner.blocked}, ${whitelist.owner.waiting} waiting`));
-  // Zemer's new releases (the feed behind the Zemer app's Latest Releases shelf): in "new", the daily message and the alerts,
-  // held to the same list. ZEMER_RELEASES=off turns them off.
-  const releases = newReleasesFromEnv({ catalog, whitelist, log });
-
-  // With ONEDRIVE_CLIENT_ID set, every song sent is also saved to the owner's OneDrive (signed in on the setup page).
-  const oneDrive = oneDriveFromEnv(process.env, { state: catalog, log });
-  // Where the host's memory stands (a cloud host's container), for the OneDrive copies and an album's downloads.
-  const memory = memoryCheck();
-  // Whether a song or an album is on its way to the chat (the runner, once it exists): a OneDrive copy waits until it isn't.
-  let sending = (): boolean => false;
-  const cloudBudget = parseCloudBudget(process.env.ONEDRIVE_MAX_MB_PER_MONTH);
-  if (cloudBudget instanceof Error) throw cloudBudget;
-  /** The settings the console can change: what the bot started with applies until the owner changes it there. */
-  const live = {
-    digestAt: () => settings.digestAt(config.digestAt),
-    quiet: () => settings.quiet(config.quiet),
-    songGapMs: () => settings.songGapMs(config.songGapMs),
-    albumDownloads: () => settings.albumDownloads(config.albumDownloads),
-    downloadsAhead: () => settings.downloadsAhead(config.downloadsAhead),
-    cloudBudget: () => settings.cloudBudget(cloudBudget),
-  };
-  // Songs kept on disk (the most played, the newest, the most viewed), album art, and the daily new-music message.
-  const library = setUpLibrary({
-    catalog,
-    musicTable,
-    audio,
-    dbPath: config.dbPath,
-    ...(oneDrive
-      ? {
-          cloudFolder: oneDrive,
-          cloudMonthlyBytes: live.cloudBudget,
-          // On a small cloud host the OneDrive copy of a big song waits for memory, or is skipped, rather than crowd out sending.
-          cloudMemory: memory,
-          cloudBusy: () => sending(),
-          onCloudFolder: (problem: string | undefined, needsLogin: boolean) =>
-            problem
-              ? health.problem('onedrive', `Songs are not being saved to OneDrive: ${problem}${needsLogin ? ' Open the setup page and sign in to OneDrive again.' : ''}`)
-              : health.ok('onedrive', 'Fixed: songs are being saved to OneDrive again.'),
-        }
-      : {}),
-    digestAt: live.digestAt,
-    prefetchMb: config.prefetchMb,
-    archiveDir: config.archiveDir,
-    onArchive: (problem) => (problem ? health.problem('archive', problem) : health.ok('archive', 'Fixed: the songs folder on the drive can be used again.')),
-    quiet: live.quiet,
-    // With no internet at all, that's the one thing said; the site isn't blamed for it.
-    onSite: (ok, problem) =>
-      ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.has('internet') ? undefined : health.problem('site', problem ?? "music-table.com isn't answering."),
-    releases,
-    onReleases: (ok, problem) =>
-      ok ? health.ok('releases', "Fixed: Zemer's new releases are being read again.") : health.has('internet') ? undefined : health.problem('releases', problem ?? "Zemer's new releases aren't being read."),
-    log,
-  });
-  // What the console shows and changes: Zemer's artist list, YouTube Music for finding artists, the releases, and the background jobs
-  // (which are made when the library starts, so asked for each time).
-  adminConsole.provide({ whitelist, youTube, releases, jobs: () => library.jobs, follows: library.follows, ...(oneDrive
-      ? {
-          // The same report as /status's: signed in or not, what was saved this month, and the allowance in force (the console may have changed it).
-          oneDrive: (): Record<string, unknown> => {
-            const budget = live.cloudBudget();
-            return { ...oneDrive.status(), savedThisMonthMb: Math.round(archivedThisMonth(catalog) / 1048576), monthlyLimitMb: budget === undefined ? null : Math.round(budget / 1048576) };
-          },
-        }
-      : {}),
-  });
-  // Add-ons kept outside this repository, in extensions/ (see src/extensions.ts). One that fails is left out.
-  const extensions = await loadExtensions({ state: catalog, health, env: process.env, log, download: (url) => matrix.downloadMedia(url) });
-  const assistant = extensions.find((extension) => extension.assistant)?.assistant;
-  const pictureTakers = extensions.filter((extension) => extension.onPicture);
-  const prepareImage = extensions.reduce((prepare, extension) => extension.pictures?.(prepare) ?? prepare, library.prepareImage);
-  const sources = songSources({ catalog, musicTable, youTube, whitelist, zemer });
-  // A YouTube Music song is checked against the list as it stands when it is sent, not only when it was found.
-  const gate = youTube && whitelist ? youTubeGate({ youTube, whitelist, catalog }) : undefined;
-  const bot = createBot({
-    catalog,
-    checkAudio: gatedAudioCheck(gate, library.checkAudio),
-    onPlay: library.onPlay,
-    browse: library.browse,
-    follows: library.follows,
-    ...(whitelist ? { artistList: whitelist } : {}),
-    ...(assistant ? { assistant } : {}),
-    // The chat's menus and where it is in them ("songs more", a 👍 on an older menu), kept across restarts.
-    views: viewsIn(catalog),
-    ...sources,
-  });
-  const bridge = new BridgeWatch({
-    health,
-    status: () => bridgeStatus({ url: config.bridgeUrl, token: config.token, userId }),
-    online,
-    restart: bridgeRestarter(),
-    log,
-  });
-  const runner = createRunner({
-    chat: matrix,
-    bot,
-    chatID: config.roomID,
-    fetchAudio: library.fetchAudio,
-    prepareImage,
-    choices: choicesIn(catalog),
-    links: linksIn(catalog),
-    // A restart (routine on a cloud host) answers what was sent while the bot was down instead of dropping it.
-    resume: resumeIn(catalog),
-    pollMs: config.pollMs,
-    // A long poll: a text is read the moment the homeserver has it (MATRIX_SYNC_WAIT_MS=0 reads every MATRIX_POLL_MS instead).
-    waitMs: config.syncWaitMs,
-    songGapMs: live.songGapMs,
-    downloadsAhead: live.downloadsAhead,
-    // An album's songs come three at a time (ALBUM_DOWNLOADS), each to disk as it arrives; another starts only while the host has
-    // room: under 380 of its 512 MB, the most it reached with one at a time being 391 (2026-10-20).
-    albumDownloads: live.albumDownloads,
-    ...(memory
-      ? {
-          memoryRoom: () => {
-            const use = memory();
-            return !use || use.limit - use.used >= ALBUM_MEMORY_SPARE;
-          },
-        }
-      : {}),
-    // An album's zip is written to disk and streamed from there, so it can be bigger than a song held in memory.
-    maxFileBytes: config.maxZipMb * 1024 * 1024,
-    onBridgeSendFailure: () => bridge.sendFailed(),
-    // Where each request's time goes, one line each in the log; the last few are in the cloud host's /status too.
-    sendStatus: config.sendStatus,
-    onTimeline: (line) => recentTimelines.add(line),
-    ...(pictureTakers.length > 0 ? { onPicture: (picture: IncomingPicture) => pictureTakers.forEach((extension) => extension.onPicture!(picture)) } : {}),
-    log,
-    // Half a minute without the homeserver is worth a word; it comes back on its own when it's restarted.
-    onPoll: (ok, failures, error) => {
-      if (ok) health.ok('homeserver', 'Fixed: the bot can reach the Matrix homeserver again.');
-      else if (failures >= 20) health.problem('homeserver', `The bot can't reach the Matrix homeserver (${error ?? 'no answer'}). It restarts on its own; if this lasts, restart the service in Render.`);
-    },
-  });
-  sending = () => runner.busy();
-  await runner.start();
-  // The daily message and the new-song alerts count as sent once the chat takes them, which it does even when the bridge
-  // can't pass them on to Google Messages (unlinked, disconnected) and they would be lost. So they wait until it can;
-  // the daily message tries again in half an hour, the alerts at the next round.
-  library.start(async (replies) => {
-    const blocked = ['bridge', 'internet'].find((key) => health.has(key));
-    if (blocked) throw new Error(blocked === 'internet' ? 'the host has no internet' : 'the bridge is not connected to Google Messages');
-    await runner.announce(replies);
-  });
-  const chat: ExtensionChat = {
-    announce: (replies) => runner.announce(replies),
-    post: (text) => matrix.sendText(config.roomID, text),
-    react: (messageId, key) => matrix.sendReaction(config.roomID, messageId, key),
-    unreact: (reactionId) => matrix.redact(config.roomID, reactionId),
-  };
-  startExtensions(extensions, chat, health);
-  // If the internet is back but Google Messages stays disconnected, restart its stale bridge session automatically. And a month's
-  // outbound traffic near what Render's free plan includes is said, before it costs anything.
-  const checkTraffic = (): void => {
-    const problem = trafficProblem(catalog);
-    if (problem) health.problem('traffic', problem);
-    else health.ok('traffic', "Fixed: this month's outbound traffic is back under the limit (a new month).");
-  };
-  // Artists Zemer has added that its frozen list doesn't know wait for the owner's word; they are told about once.
-  const tellWaiting = whitelist
-    ? createWaitingNotice({
-        list: whitelist,
-        state: catalog,
-        announce: (replies) => runner.announce(replies),
-        ready: () => !['bridge', 'internet'].some((key) => health.has(key)),
-        quiet: live.quiet,
-        log,
-      })
-    : undefined;
-  const watching = setInterval(() => {
-    void bridge.check();
-    checkTraffic();
-    void tellWaiting?.();
-  }, 60_000);
-  watching.unref();
-  void bridge.check();
-  // A word in the chat once the bot is up and the bridge can pass it on (the cloud host asks for it once, on its first start).
-  let shuttingDown = false;
-  void sendStartupMessage({
-    mode: startupModeFrom(process.env),
-    state: catalog,
-    ready: async () => {
-      await bridge.check();
-      return !['bridge', 'internet'].some((key) => health.has(key));
-    },
-    send: (replies) => runner.announce(replies),
-    stopped: () => shuttingDown,
-    log,
-  });
-  log(
-    `signed in as ${userId}, watching room ${config.roomID}, ${catalog.count()} tracks in ${config.dbPath}, Zemer ${zemer ? 'on' : youTube ? 'off (YouTube Music search instead)' : 'off'}, music-table.com ${musicTable ? 'on' : 'off'}, ${library.summary}${extensions.map((extension) => `, ${extension.summary ?? extension.name}`).join('')}. Text "search" and a song name in that chat.`,
-  );
+  const host = await startHost({ config: shared, log });
 
   const shutdown = async (code = 0) => {
     log('shutting down');
-    shuttingDown = true;
-    clearInterval(watching);
-    stopRoomWatch();
-    stopWatching?.();
-    await stopExtensions(extensions, log);
-    await library.stop();
-    await runner.stop();
-    catalog.close();
+    await host.stop();
     process.exit(code);
   };
-  // A chat deleted on the phone takes its room with it, and the bot would go on running without hearing from it. Stopping makes the host
-  // start the bot again, and that start (cloud-main.ts) says the chat is gone, mails it, and waits for a new chat on the /pair page.
-  const stopRoomWatch = watchJoinedRoom({
-    join: () => matrix.joinRoom(config.roomID),
-    onGone: () => {
-      log(`the chat room ${config.roomID} is gone (the homeserver no longer knows it or won't let the bot in); stopping so the host can wait for a new chat to be chosen`);
+  await addChat(host, OWNER, {
+    token,
+    roomID,
+    // A chat deleted on the phone takes its room with it, and the bot would go on running without hearing from it. Stopping makes the host
+    // start the bot again, and that start (cloud-main.ts) says the chat is gone, mails it, and waits for a new chat to be chosen.
+    onRoomGone: (room) => {
+      log(`the chat room ${room} is gone (the homeserver no longer knows it or won't let the bot in); stopping so the host can wait for a new chat to be chosen`);
       void shutdown(1);
     },
-    log,
   });
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());

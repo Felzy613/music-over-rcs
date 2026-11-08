@@ -13,7 +13,8 @@ import { createImageFetcher } from '../image-fetch.ts';
 import type { CoverPicture } from './id3.ts';
 import { createPictures, type Picture, type PreparedPicture } from './images.ts';
 import { liveValue, type Live } from '../live.ts';
-import { LibraryJobs, type DailyTime } from './jobs.ts';
+import type { Person } from '../people.ts';
+import { LibraryJobs, type DailyTime, type RecipientOptions } from './jobs.ts';
 import { catalogNaming, namedFetch } from './naming.ts';
 import { SongArchive, type Drive } from '../archive/archiver.ts';
 
@@ -58,6 +59,16 @@ export interface LibraryOptions {
   log: (line: string) => void;
 }
 
+/** What one person's bot needs besides what every chat shares: their own plays and follows, and songs that are not copied to the owner's OneDrive. */
+export interface PersonLibrary {
+  /** A song ready to send, tagged once `after` (its album being looked up) is done. Only the owner's are also offered to OneDrive. */
+  fetchAudio: Library['fetchAudio'];
+  /** After a song is sent to this person: counted among their plays (which start their follows). */
+  onPlay(track: Track): void;
+  /** The artists this person follows. */
+  follows: Follows;
+}
+
 /** What the chat routes need from the library: faster checks and downloads, pictures, and the background work. */
 export interface Library {
   checkAudio(url: string): Promise<AudioCheck>;
@@ -72,8 +83,24 @@ export interface Library {
   browse: Browse;
   /** Artists you follow. */
   follows: Follows;
-  /** Starts the sync, the songs kept ready and the daily message, which goes out through `announce`. */
-  start(announce: (replies: Reply[]) => Promise<void>): void;
+  /**
+   * What a person's bot uses in place of `fetchAudio`, `onPlay` and `follows`, which are the owner's: the owner gets those very
+   * ones, anyone else their own plays and follows (the catalog keeps each chat's apart) and no copy to the owner's OneDrive.
+   * The checks, `browse`, `prepareImage` and the songs kept ready are shared.
+   */
+  forPerson(person: Person): PersonLibrary;
+  /**
+   * Starts the sync, the songs kept ready and the daily message, which goes out through `announce`: the owner's chat. Without it
+   * the owner is added, when their chat is there, with `addRecipient`.
+   */
+  start(announce?: (replies: Reply[]) => Promise<void>): void;
+  /**
+   * Sends someone the daily message and the alerts for the artists they follow through their own chat, from now on (see
+   * `LibraryJobs.addRecipient`); the owner too, when `start` was given no `announce`. Before `start` they wait for it.
+   */
+  addRecipient(person: Person, options: RecipientOptions): void;
+  /** Stops sending to someone (see `LibraryJobs.removeRecipient`). */
+  removeRecipient(id: string): void;
   stop(): Promise<void>;
   jobs: LibraryJobs | undefined;
   /** A few words for the start-up line. */
@@ -118,6 +145,16 @@ export function setUpLibrary(options: LibraryOptions): Library {
     log,
   });
   let jobs: LibraryJobs | undefined;
+  /** Who is sent the daily message besides the `announce` of `start`: kept here so they can be added before the jobs exist, and removed again. */
+  const recipients = new Map<string, { person: Person; options: RecipientOptions }>();
+  /** The owner's songs sent are also offered to the cloud folder in the background, after they are fetched. */
+  const ownersFetch: Library['fetchAudio'] = archive
+    ? async (url, title, extra) => {
+        const song = await named(url, title, extra);
+        archive.offer(url, song);
+        return song;
+      }
+    : named;
   const at = liveValue(options.digestAt);
   const parts = [
     musicTable ? (at ? `daily new-music message at ${String(at.hour).padStart(2, '0')}:${String(at.minute).padStart(2, '0')}` : 'daily message off') : '',
@@ -130,24 +167,27 @@ export function setUpLibrary(options: LibraryOptions): Library {
   return {
     checkAudio: cache ? cachedCheck(cache, audio.checkAudio) : audio.checkAudio,
     // A song fetched to be sent is also offered to the cloud folder; that happens in the background, after this returns.
-    fetchAudio: archive
-      ? async (url, title, extra) => {
-          const song = await named(url, title, extra);
-          archive.offer(url, song);
-          return song;
-        }
-      : named,
+    fetchAudio: ownersFetch,
     prepareImage: createPictures({ log }),
     archive,
     onPlay: (track) => catalog.recordPlay(track.id),
     browse: catalogBrowse(catalog, undefined, categories, options.releases),
     follows: catalogFollows(catalog),
+    forPerson(person) {
+      if (person.owner) return { fetchAudio: ownersFetch, onPlay: (track) => catalog.recordPlay(track.id), follows: catalogFollows(catalog) };
+      // A person's songs are not the owner's to keep: they never go to the owner's OneDrive, or use its allowance.
+      return {
+        fetchAudio: named,
+        onPlay: (track) => catalog.recordPlay(track.id, undefined, person.chat),
+        follows: catalogFollows(catalog, person.chat),
+      };
+    },
     start(announce) {
       if (!musicTable) return;
       jobs = new LibraryJobs({
         musicTable,
         catalog,
-        announce,
+        ...(announce ? { announce } : {}),
         digestAt: options.digestAt,
         cache,
         fetchAudio: audio.fetchAudio,
@@ -159,7 +199,16 @@ export function setUpLibrary(options: LibraryOptions): Library {
         ...(options.onSite ? { onSite: options.onSite } : {}),
         ...(options.onArchive ? { onArchive: options.onArchive } : {}),
       });
+      for (const { person, options: recipient } of recipients.values()) jobs.addRecipient(person, recipient);
       jobs.start();
+    },
+    addRecipient(person, recipient) {
+      recipients.set(person.id, { person, options: recipient });
+      jobs?.addRecipient(person, recipient);
+    },
+    removeRecipient(id) {
+      recipients.delete(id);
+      jobs?.removeRecipient(id);
     },
     async stop() {
       await jobs?.stop();

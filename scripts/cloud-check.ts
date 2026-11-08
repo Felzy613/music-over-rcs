@@ -17,7 +17,7 @@ const results = await checkCloud({
   sendTestAlert: args.includes('--alert'),
 });
 for (const r of results) {
-  console.log(`${r.ok ? '✓' : '✗'} ${r.name}: ${r.detail}`);
+  console.log(`${!r.ok ? '✗' : r.warn ? '!' : '✓'} ${r.name}: ${r.detail}`);
   if (r.fix) console.log(`    → ${r.fix}`);
 }
 const failed = results.filter((r) => !r.ok).length;

@@ -199,6 +199,26 @@ export function parseCloudBudget(raw: string | undefined): number | undefined | 
   return Math.round(mb * 1024 * 1024);
 }
 
+/**
+ * The most that may be sent to one person besides the owner in a calendar month, in bytes: PERSON_MAX_MB_PER_MONTH, 1000 MB unless set,
+ * or "unlimited". What they are sent comes out of the host's outbound traffic like everything else. The owner has no such limit.
+ */
+export function parsePersonBudget(raw: string | undefined): number | undefined | Error {
+  const text = raw?.trim().toLowerCase() || '1000';
+  if (text === 'unlimited') return undefined;
+  const mb = Number(text);
+  if (!(Number.isFinite(mb) && mb >= 0)) return new Error(`PERSON_MAX_MB_PER_MONTH must be a number of MB or "unlimited" (got "${raw}")`);
+  return Math.round(mb * 1024 * 1024);
+}
+
+/** `parsePersonBudget`, but a value that is not a number is said (to `warn`) and the default is used: a typo must not lift the limit. */
+export function personBudgetOrDefault(raw: string | undefined, warn: (message: string) => void = () => {}): number | undefined {
+  const parsed = parsePersonBudget(raw);
+  if (!(parsed instanceof Error)) return parsed;
+  warn(`${parsed.message}; using 1000 MB`);
+  return parsePersonBudget(undefined) as number;
+}
+
 /** The folder kept songs move into (SONGS_ARCHIVE_DIR): a full path, or one starting with ~/. Nothing when unset. */
 export function parseArchiveDir(raw: string | undefined, home = homedir()): string | undefined | Error {
   const text = raw?.trim();
@@ -258,6 +278,25 @@ export interface MatrixConfig extends ChatSettings {
   syncWaitMs: number;
 }
 
+/**
+ * What every chat on this host shares: the homeserver, the bridge, the pacing and the limits. A chat adds its own account's token and its
+ * own room, which `addChat` (`src/host.ts`) takes as plain arguments and never from the environment.
+ */
+export type MatrixHostConfig = Omit<MatrixConfig, 'token' | 'roomID'>;
+
+/** Reads the host-wide part of the Matrix settings (see `loadMatrixHostConfig`), adding what is wrong to `problems`. */
+function readMatrixHost(env: NodeJS.ProcessEnv, problems: string[]): MatrixHostConfig {
+  const homeserver = (env.MATRIX_HOMESERVER?.trim() || DEFAULT_HOMESERVER).replace(/\/+$/, '');
+  checkUrl('MATRIX_HOMESERVER', homeserver, problems);
+  const settings = readChatSettings(env, 'MATRIX_POLL_MS', problems);
+  const bridgeUrl = (env.BRIDGE_URL?.trim() || 'http://127.0.0.1:29336').replace(/\/+$/, '');
+  checkUrl('BRIDGE_URL', bridgeUrl, problems);
+  const waitText = env.MATRIX_SYNC_WAIT_MS?.trim();
+  const syncWaitMs = waitText ? Number(waitText) : 25_000;
+  if (!(Number.isInteger(syncWaitMs) && syncWaitMs >= 0 && syncWaitMs <= 60_000)) problems.push(`MATRIX_SYNC_WAIT_MS must be a whole number of ms from 0 to 60000 (got "${waitText}")`);
+  return { homeserver, bridgeUrl, syncWaitMs, ...settings };
+}
+
 /** Reads and validates the Matrix settings, reporting every problem at once. */
 export function loadMatrixConfig(env: NodeJS.ProcessEnv = process.env, options: { room?: boolean } = {}): MatrixConfig {
   const needRoom = options.room ?? true;
@@ -267,15 +306,20 @@ export function loadMatrixConfig(env: NodeJS.ProcessEnv = process.env, options: 
   if (!token) problems.push('MATRIX_ACCESS_TOKEN is not set (the cloud host signs the bot in by itself; see docs/cloud.md)');
   const roomID = env.MATRIX_ROOM_ID?.trim() ?? '';
   if (needRoom && !roomID) problems.push("MATRIX_ROOM_ID is not set (choose your chat on the service's /pair page)");
-  const homeserver = (env.MATRIX_HOMESERVER?.trim() || DEFAULT_HOMESERVER).replace(/\/+$/, '');
-  checkUrl('MATRIX_HOMESERVER', homeserver, problems);
-  const settings = readChatSettings(env, 'MATRIX_POLL_MS', problems);
-  const bridgeUrl = (env.BRIDGE_URL?.trim() || 'http://127.0.0.1:29336').replace(/\/+$/, '');
-  checkUrl('BRIDGE_URL', bridgeUrl, problems);
-  const waitText = env.MATRIX_SYNC_WAIT_MS?.trim();
-  const syncWaitMs = waitText ? Number(waitText) : 25_000;
-  if (!(Number.isInteger(syncWaitMs) && syncWaitMs >= 0 && syncWaitMs <= 60_000)) problems.push(`MATRIX_SYNC_WAIT_MS must be a whole number of ms from 0 to 60000 (got "${waitText}")`);
+  const host = readMatrixHost(env, problems);
 
   throwIfAny(problems);
-  return { homeserver, token, roomID, bridgeUrl, syncWaitMs, ...settings };
+  return { token, roomID, ...host };
+}
+
+/**
+ * The Matrix settings that every chat on the host shares, without the token and room that `loadMatrixConfig` also wants: those are one
+ * chat's own, and with more than one chat on the host there is no single MATRIX_ACCESS_TOKEN or MATRIX_ROOM_ID to read. Reports every
+ * problem at once, like `loadMatrixConfig`.
+ */
+export function loadMatrixHostConfig(env: NodeJS.ProcessEnv = process.env): MatrixHostConfig {
+  const problems: string[] = [];
+  const host = readMatrixHost(env, problems);
+  throwIfAny(problems);
+  return host;
 }

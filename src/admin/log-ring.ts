@@ -1,4 +1,5 @@
 import { format } from 'node:util';
+import { parsePeoplePasswords } from '../people.ts';
 
 // A small, bounded memory of what the bot has logged lately, for the admin console: Render's own logs are not reachable from
 // the app, and the host's disk is wiped, so the last few hundred lines are kept in memory and nowhere else. Nothing here is
@@ -27,6 +28,8 @@ export function secretValues(env: NodeJS.ProcessEnv): string[] {
     // A URL setting is only secret when it carries something: a user, a password, a key or a token in it.
     if (/_URL$/i.test(name) && !/[@?]|token|key|secret/i.test(text)) continue;
     values.add(text);
+    // PEOPLE_PASSWORDS is `name:password` pairs: a line that has only one person's password in it is masked as well.
+    if (name === 'PEOPLE_PASSWORDS') for (const password of parsePeoplePasswords(text).values()) values.add(password);
   }
   return [...values].sort((a, b) => b.length - a.length);
 }

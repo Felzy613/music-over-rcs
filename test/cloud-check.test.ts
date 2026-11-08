@@ -85,6 +85,61 @@ describe('the host checks', () => {
     assert.match(byName(results, 'No problems reported').detail, /unlinked the bridge/);
   });
 
+  test('with people besides the owner, the traffic judged is everybody’s songs together, and the owner’s own figure alone when the host does not say', async () => {
+    const quiet = byName(await check({ ...RUNNING, sentThisMonthMb: 100, sentTotalThisMonthMb: 100 }), 'Outbound traffic this month');
+    assert.equal(quiet.ok, true);
+    assert.match(quiet.detail, /^190 MB: 100 MB of songs sent and 90 MB saved to OneDrive/);
+    const shared = byName(await check({ ...RUNNING, sentThisMonthMb: 100, sentTotalThisMonthMb: 3450, people: [{ id: 'alice', phase: 'not-started', sentThisMonthMb: 3350, monthlyLimitMb: 1000 }] }), 'Outbound traffic this month');
+    assert.equal(shared.ok, false, '3,450 and 90 are past 3,500 together, though the owner’s own 100 are not');
+    assert.match(shared.detail, /^3540 MB: 3450 MB of songs sent and 90 MB saved to OneDrive/);
+    assert.equal(byName(await check({ ...RUNNING, sentThisMonthMb: 100 }), 'Outbound traffic this month').ok, true, 'an older host says only the owner’s');
+  });
+
+  describe('the people besides the owner', () => {
+    const setUp = { id: 'alice', phase: 'running', roomMissing: false, bridge: { state: 'CONNECTED' }, simNumber: true, onboarding: { step: 'onboarded', onboarded: true, warn: false, message: 'alice is linked and their own chat has arrived.' }, problems: [], sentThisMonthMb: 40, monthlyLimitMb: 1000 };
+    const noNumber = { ...setUp, id: 'bob', phase: 'setup', simNumber: false, onboarding: { step: 'no-number', onboarded: false, warn: true, message: "The bridge has no phone number for bob's phone. Unlink bob now (below)." }, sentThisMonthMb: 0 };
+    const results = (list: unknown[]) => check({ ...RUNNING, people: list });
+    const lines = (all: CheckResult[]) => all.filter((r) => /\(besides the owner\)$/.test(r.name));
+
+    test('there is one line for each, and none on a host with nobody besides the owner', async () => {
+      assert.deepEqual(lines(await check(RUNNING)), []);
+      assert.deepEqual(lines(await check({ ...RUNNING, people: [] })), []);
+      const all = lines(await results([setUp, noNumber]));
+      assert.deepEqual(all.map((r) => r.name), ['alice (besides the owner)', 'bob (besides the owner)']);
+      assert.equal(all[0]!.detail, 'chat running, Google Messages CONNECTED, phone number reported, set up, 40 MB sent this month of 1000 MB allowed');
+      assert.match(all[1]!.detail, /^chat setup, Google Messages CONNECTED, NO phone number reported, not set up yet \(no-number\), 0 MB sent this month of 1000 MB allowed$/);
+    });
+
+    test('a person is never a failure, so the owner’s check means what it did: a broken person only gets a warning and what to do', async () => {
+      const all = await results([setUp, noNumber, { id: 'carol', phase: 'room-missing', roomMissing: true, bridge: { state: undefined }, simNumber: null, problems: [{ key: 'room:carol', message: "carol's chat room is gone" }] }]);
+      assert.deepEqual(all.filter((r) => !r.ok), [], 'every line is ok, so nothing fails the check or its exit code');
+      const [fine, bad, gone] = lines(all);
+      assert.equal(fine!.warn, undefined);
+      assert.equal(fine!.fix, undefined);
+      assert.equal(bad!.warn, true);
+      assert.match(bad!.fix!, /Unlink bob now/);
+      assert.equal(gone!.warn, true);
+      assert.match(gone!.fix!, /carol's chat room is gone/);
+      assert.match(gone!.detail, /Google Messages not linked, phone number unknown/);
+    });
+
+    test('the owner’s own lines are the same with or without people, and a person’s trouble does not change them', async () => {
+      // (Each check runs against a server of its own, so the first line's address differs.)
+      const owner = (all: CheckResult[]) => all.filter((r) => !/\(besides the owner\)$/.test(r.name) && r.name !== 'The Render host answers');
+      const alone = owner(await check(RUNNING));
+      assert.deepEqual(owner(await results([noNumber])), alone);
+      // …even with their trouble in the report's own problem list, which belongs to the owner only.
+      const troubled = owner(await check({ ...RUNNING, people: [{ ...noNumber, problems: [{ key: 'bridge:bob', message: 'bob is down' }] }] }));
+      assert.deepEqual(troubled, alone);
+    });
+
+    test('an odd report is not trusted to have the right shape, and does not throw', async () => {
+      const all = await results([{}, null, { id: 7, onboarding: 'x', problems: 'y' }]);
+      assert.equal(lines(all).length, 3);
+      assert.deepEqual(all.filter((r) => !r.ok), []);
+    });
+  });
+
   test('the host’s whole-container memory is what is judged when it reports it: now and at its highest, with who held it', async () => {
     const holders = [{ name: 'synapse', anonMb: 150 }, { name: 'bot', anonMb: 140 }];
     const comfortable = { limitMb: 512, usedMb: 320, percent: 63, currentMb: 400, processes: holders, peak: { usedMb: 380, percent: 74, at: '2026-10-18T22:00:00Z', processes: holders }, warnAtPercent: 85 };

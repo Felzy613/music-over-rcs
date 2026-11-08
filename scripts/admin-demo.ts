@@ -5,9 +5,11 @@ import { AdminConsole, type ConnectDeps } from '../src/admin/console.ts';
 import { LogRing, secretValues } from '../src/admin/log-ring.ts';
 import { SignIn } from '../src/admin/sign-in.ts';
 import { Catalog } from '../src/catalog.ts';
+import { Onboarding } from '../src/cloud/onboarding.ts';
 import { createCloudWeb } from '../src/cloud/web.ts';
 import { catalogFollows } from '../src/library/follows.ts';
 import { LibraryJobs } from '../src/library/jobs.ts';
+import { personOf } from '../src/people.ts';
 import { MusicTable } from '../src/sources/music-table.ts';
 import { YouTubeMusic } from '../src/sources/youtube-music.ts';
 import { createNewReleases, ZemerReleases } from '../src/sources/zemer-releases.ts';
@@ -144,6 +146,9 @@ admin.provide({
     tracks: catalog.count(),
     timings: ['timeline: "search achas" phone→seen 1.2s · bot 1.0s (youtube 0.21s) · 12 msgs first +1.0s last +4.3s · at Google +5.1s', 'song: "Hold On" 4.2 MB fetch 5.0s tag 0.30s upload 0.60s'],
     oneDrive: { connected: true, savedThisMonthMb: 312, monthlyLimitMb: 1500 },
+    sentThisMonthMb: 1900,
+    sentTotalThisMonthMb: 1900 + 86,
+    people: [alice()],
     edge: { lease: { holder: 'srv-demo-instance', expiresAt: Date.now() + 40_000 }, watchdog: Date.now() - 90_000, alertsWaiting: 0 },
   }),
 });
@@ -151,13 +156,40 @@ catalog.setState(`usage.${new Date().toISOString().slice(0, 7)}.sent_bytes`, Str
 catalog.setState(`usage.${new Date().toISOString().slice(0, 7)}.archived_bytes`, String(312 * 1048576));
 
 // A pretend host for the Connect page: the bridge's replies are canned, nothing is linked, and OneDrive's sign-in waits for a made-up code.
+// The made-up second person, alice, goes through the real onboarding gate (src/cloud/onboarding.ts): pick her on the Connect page, link her,
+// and watch the page wait for her to text herself.
 const bridgeSays: Array<{ at: string; text: string }> = [];
+const aliceSays: Array<{ at: string; text: string }> = [];
 let linkedPhone = false;
+let aliceLinked = false;
+let aliceChat = false;
 let chosenRoom: string | undefined = '!demo:localhost';
 let driveLogin: 'none' | 'pending' | 'done' = 'none';
 const say = (text: string): void => void bridgeSays.push({ at: new Date().toISOString(), text });
+const gate = new Onboarding({ state: catalog, person: personOf('alice') });
+function alice() {
+  const bridge = aliceLinked ? { state: 'CONNECTED', rcsEnabled: true } : { state: undefined };
+  return {
+    id: 'alice',
+    phase: aliceLinked && aliceChat ? 'running' : 'setup',
+    roomMissing: false,
+    room: aliceChat ? '!alice:localhost' : null,
+    roomGone: null,
+    error: null,
+    bridge,
+    simNumber: aliceLinked,
+    onboarding: gate.evaluate({ login: aliceLinked ? 'linked' : 'none', simNumber: aliceLinked, chatFound: aliceChat }),
+    problems: [],
+    sentThisMonthMb: aliceChat ? 86 : 0,
+    monthlyLimitMb: 1000,
+  };
+}
 const connect: ConnectDeps = {
-  async state() {
+  async state(person) {
+    if (person === 'alice') {
+      const one = alice();
+      return { phase: one.phase, botEnabled: true, room: one.room, roomGone: null, bridge: one.bridge, problems: [], person: 'alice', error: null, simNumber: one.simNumber, onboarding: one.onboarding };
+    }
     return {
       phase: linkedPhone ? (chosenRoom ? 'running' : 'setup') : 'setup',
       botEnabled: true,
@@ -168,7 +200,22 @@ const connect: ConnectDeps = {
     };
   },
   pair: {
-    async send(text) {
+    async send(text, person) {
+      if (person === 'alice') {
+        const reply = (line: string): void => void aliceSays.push({ at: new Date().toISOString(), text: line });
+        if (text === 'login google') reply('Demo bridge: open https://messages.google.com/web in a private window, start signing in, and copy the request the page makes as cURL. Then send it to me here.');
+        else if (text === 'logout') reply('Demo bridge: your logins: alice@example.com/1 (CONNECTED). Send `logout <login id>` to sign one out.');
+        else if (text.startsWith('logout ')) {
+          reply('Demo bridge: logged out.');
+          aliceLinked = false;
+          aliceChat = false;
+        } else {
+          reply(`Demo bridge: got ${text.length} characters. Now tap the emoji 🐢 in Google Messages on the phone.`);
+          setTimeout(() => (aliceLinked = true), 4000);
+          setTimeout(() => (aliceChat = true), 25_000);
+        }
+        return;
+      }
       if (text === 'login google') {
         say('Demo bridge: open https://messages.google.com/web in a private window, start signing in, and copy the request the page makes as cURL. Then send it to me here.');
       } else {
@@ -176,13 +223,14 @@ const connect: ConnectDeps = {
         setTimeout(() => (linkedPhone = true), 6000);
       }
     },
-    async log() {
-      return bridgeSays;
+    async log(person) {
+      return person === 'alice' ? aliceSays : bridgeSays;
     },
   },
-  rooms: (phone) => (phone && phone.length < 9 ? [] : ['!selfchat:localhost']),
+  rooms: (phone, person) => (person === 'alice' ? (aliceChat ? ['!alice:localhost'] : []) : phone && phone.length < 9 ? [] : ['!selfchat:localhost']),
   setRoom: (room) => void (chosenRoom = room),
-  knownPhone: () => '5551234567',
+  knownPhone: (person) => (person === 'alice' ? undefined : '5551234567'),
+  people: () => [{ id: 'alice' }],
   oneDrive: {
     status: () => ({ connected: driveLogin === 'done', savedThisMonthMb: 312, monthlyLimitMb: 1500, login: driveLogin === 'pending' ? { state: 'pending', verificationUri: 'https://microsoft.com/devicelogin', userCode: 'ABCD1234' } : { state: driveLogin } }),
     async start() {
@@ -203,6 +251,7 @@ const web = createCloudWeb({
   pair: { send: async () => {}, log: async () => [] },
   rooms: () => [],
   setRoom: () => {},
+  people: () => [{ id: 'alice' }],
   canImport: () => false,
   importCatalog: () => ({}),
 });

@@ -75,14 +75,20 @@ export interface MockMatrix extends Listening {
   reset(): void;
 }
 
-/** A stand-in for a Matrix homeserver: login, whoami, sync, send, upload, join and createRoom. */
-export async function startMockMatrix(port = 0): Promise<MockMatrix> {
+/**
+ * A stand-in for a Matrix homeserver: login, whoami, sync, send, upload, join and createRoom. A real homeserver's event ids are unique
+ * across all its rooms; two mocks standing for one homeserver (two people's chats) need `eventPrefix` to say so, and `roomId` when
+ * the chats must be told apart by their rooms (each person's room is their own). `user` and `token` make it another person's account
+ * (`@alice:localhost`, who signs in as "alice"), for tests that put several accounts behind one address.
+ */
+export async function startMockMatrix(port = 0, options: { eventPrefix?: string; roomId?: string; user?: string; token?: string } = {}): Promise<MockMatrix> {
   const listenHere: typeof listen = (listener) => listen(listener, port);
-  const userId = '@me:localhost';
+  const user = options.user ?? 'me';
+  const userId = `@${user}:localhost`;
   const password = 'mock-password-for-tests';
-  const token = 'syt_mock_token';
-  const roomId = '!portal:localhost';
-  const ghost = '@gmessages_me:localhost';
+  const token = options.token ?? 'syt_mock_token';
+  const roomId = options.roomId ?? '!portal:localhost';
+  const ghost = `@gmessages_${user}:localhost`;
   const botRoomId = '!dm-bot:localhost';
   const botUser = '@gmessagesbot:localhost';
 
@@ -116,7 +122,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
     counter++;
     const event: MockEvent = {
       type,
-      event_id: `$ev${counter}:localhost`,
+      event_id: `$ev${options.eventPrefix ?? ''}${counter}:localhost`,
       sender,
       origin_server_ts: 1_800_000_000_000 + counter * 1000,
       content,
@@ -137,7 +143,7 @@ export async function startMockMatrix(port = 0): Promise<MockMatrix> {
 
     if (req.method === 'POST' && url.pathname === '/_matrix/client/v3/login') {
       const payload = JSON.parse(body.toString('utf8')) as { identifier?: { user?: string }; password?: string };
-      if (payload.identifier?.user === 'me' && payload.password === password) {
+      if (payload.identifier?.user === user && payload.password === password) {
         return json(200, { user_id: userId, access_token: token, device_id: 'MOCKDEVICE' });
       }
       return json(403, { errcode: 'M_FORBIDDEN', error: 'Invalid username or password' });

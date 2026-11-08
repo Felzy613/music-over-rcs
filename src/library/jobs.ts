@@ -1,6 +1,7 @@
 import type { DownloadedAudio } from '../audio-fetch.ts';
 import { describe } from '../bot.ts';
 import type { Catalog } from '../catalog.ts';
+import { OWNER, OWNER_ID, scoped, type Person } from '../people.ts';
 import { releaseKey } from '../ranking.ts';
 import type { MusicTable } from '../sources/music-table.ts';
 import { splitTitle } from '../sources/titles.ts';
@@ -21,9 +22,15 @@ export interface DailyTime {
 export interface LibraryJobsOptions {
   musicTable: MusicTable;
   catalog: Catalog;
-  /** Sends the daily message into the chat (the runner's `announce`). */
-  announce(replies: Reply[]): Promise<void>;
-  /** When to send the daily new-music message, in this Mac's time. Without it, none is sent. */
+  /**
+   * Sends the daily message into the owner's chat (the runner's `announce`): with it the owner is the first recipient. A host that
+   * has no chat yet leaves it out and adds each chat, the owner's too, with `addRecipient` when it is there.
+   */
+  announce?(replies: Reply[]): Promise<void>;
+  /**
+   * When to send the daily new-music message, in this Mac's time. Without it, none is sent. Everyone is on this one clock (the
+   * host's): a person besides the owner gets it a few minutes later (see `RecipientOptions`), and the quiet hours are the host's too.
+   */
   digestAt?: Live<DailyTime | undefined>;
   /** Where songs are kept ready. Without it, nothing is downloaded ahead of time. */
   cache?: AudioCache | undefined;
@@ -58,7 +65,33 @@ export interface LibraryJobsOptions {
   onArchive?: (problem: string | undefined) => void;
 }
 
+/** Someone besides the owner is sent the daily message this many minutes after the owner's time, a step more for each person added. */
+export const DIGEST_STAGGER_MINUTES = 5;
+
+/** What one more chat is: where the daily message and the alerts for the artists someone follows go. */
+export interface RecipientOptions {
+  /** Sends into this person's chat (the runner's `announce` for it). One that rejects is retried, and never stops the others. */
+  announce(replies: Reply[]): Promise<void>;
+  /** This person's own daily time. Left out, it is the host's `digestAt` plus `digestOffsetMinutes` (the owner's own time exactly). */
+  digestAt?: Live<DailyTime | undefined>;
+  /** Minutes after the host's time that a person besides the owner is sent the daily message; by default `DIGEST_STAGGER_MINUTES` for each person added so far. */
+  digestOffsetMinutes?: number;
+}
+
+/** Who the background work writes to. */
+interface Recipient {
+  person: Person;
+  announce: (replies: Reply[]) => Promise<void>;
+  digestAt: Live<DailyTime | undefined> | undefined;
+  /** Minutes after the host's daily time (0 for the owner). */
+  offsetMinutes: number;
+  /** Whether the last new-song alert to them could not be sent, so a lasting outage is logged once, not every minute. */
+  alertFailing: boolean;
+}
+
 const HOUR_MS = 60 * 60_000;
+/** The site dates some posts a little earlier than it shows them: a message reaches back this far before the last one, or before the person was added. */
+const DIGEST_MARGIN_MS = 6 * HOUR_MS;
 /** A feed that has failed for this long is worth a word; one that fails for a moment is not. */
 const RELEASES_PROBLEM_AFTER_MS = 12 * HOUR_MS;
 /** What the daily message is made of: its replies, and what it covers. */
@@ -79,6 +112,8 @@ export const STATE = {
   digestDate: 'digest.last_date',
   digestSentAt: 'digest.last_sent_at',
   digestRetryAfter: 'digest.retry_after',
+  /** When a person besides the owner was first seen: their first daily message reaches back no further than this (less the margin). */
+  digestSince: 'digest.since',
 } as const;
 
 /** The calendar day in this Mac's time zone, as YYYY-MM-DD. */
@@ -123,17 +158,93 @@ export class LibraryJobs {
   #siteFailures = 0;
   /** Since when the archive's drive has been away (this run). */
   #archiveAwaySince: number | undefined;
-  /** Whether the last new-song alert could not be sent, so a lasting outage is logged once, not every minute. */
-  #alertFailing = false;
   /** Whether Zemer's feed is failing, so that is logged once, and again when it is back. */
   #releasesFailing = false;
   /** What the background work last did, for the admin console (in memory only: nothing is written to the database for it). */
   #lastRound: { at: number; error: string | undefined } | undefined;
+  /**
+   * Who gets the daily message and the alerts, by person id; the owner first when there is one. The sync, Zemer's feed, the songs
+   * kept ready and the scan are shared and run once whoever is here; only what is sent, and the marks of what was sent, are
+   * each person's own. People come and go while the host runs (`addRecipient`, `removeRecipient`): a round works from the list
+   * as it is when each step starts.
+   */
+  #recipients = new Map<string, Recipient>();
 
   constructor(options: LibraryJobsOptions) {
     this.#o = options;
     this.#log = options.log ?? (() => {});
     this.#now = options.now ?? (() => new Date());
+    if (options.announce) this.addRecipient(OWNER, { announce: options.announce });
+  }
+
+  /**
+   * Starts sending someone the daily message and the alerts for the artists they follow, through their own chat. Safe at any time,
+   * from any state: a person seen for the first time is seeded so they get nothing from before they came (their first daily message
+   * reaches back no further than when they were added, less the margin for late-dated posts, and an alert needs a follow made
+   * after they came anyway); one already known (the host restarted, their chat came back) carries on from the marks they have.
+   * Adding someone again replaces how they are reached and keeps everything else. The owner is `OWNER`; his state is the plain
+   * keys, and he is seeded the way he always was, on the first look at the schedule.
+   */
+  addRecipient(person: Person, options: RecipientOptions): void {
+    const known = this.#recipients.get(person.id);
+    if (known) {
+      known.announce = options.announce;
+      known.digestAt = options.digestAt;
+      if (!person.owner && options.digestOffsetMinutes !== undefined) known.offsetMinutes = options.digestOffsetMinutes;
+      return;
+    }
+    const others = [...this.#recipients.values()].filter((recipient) => !recipient.person.owner).length;
+    this.#recipients.set(person.id, {
+      person,
+      announce: options.announce,
+      digestAt: options.digestAt,
+      offsetMinutes: person.owner ? 0 : (options.digestOffsetMinutes ?? DIGEST_STAGGER_MINUTES * (others + 1)),
+      alertFailing: false,
+    });
+    if (!person.owner) this.#seed(person);
+  }
+
+  /** Stops sending to someone: nothing more goes to them. Their marks stay, so adding them again carries on. Says whether they were here. */
+  removeRecipient(id: string): boolean {
+    const removed = this.#recipients.delete(id);
+    if (removed) this.#log(`${id === OWNER_ID ? 'the owner' : id} is no longer sent the daily message or alerts`);
+    return removed;
+  }
+
+  /** Who is sent the daily message and the alerts now, the owner first when there is one. */
+  recipients(): Person[] {
+    return this.#recipientList().map((recipient) => recipient.person);
+  }
+
+  #recipientList(): Recipient[] {
+    return [...this.#recipients.values()].sort((a, b) => Number(b.person.owner) - Number(a.person.owner));
+  }
+
+  /** The first sight of a person: notes when, once, so their first daily message does not reach back to before they came. */
+  #seed(person: Person): void {
+    const { catalog } = this.#o;
+    if (catalog.getState(scoped(STATE.digestDate, person)) !== undefined || catalog.getState(scoped(STATE.digestSince, person)) !== undefined) return;
+    catalog.setState(scoped(STATE.digestSince, person), this.#now().toISOString());
+    this.#log(`${person.id} is new here: their daily message covers what is new from now on`);
+  }
+
+  /**
+   * Runs `work` for each recipient in turn. One that fails never stops the others (the failure of anyone but the owner is logged
+   * and the round goes on; the owner's is thrown once the rest have had their turn, as it always was). Someone removed while the
+   * others are being served is skipped.
+   */
+  async #forEach(recipients: Recipient[], what: string, work: (recipient: Recipient) => Promise<unknown>): Promise<void> {
+    let ownerFailed: { error: unknown } | undefined;
+    for (const recipient of recipients) {
+      if (this.#recipients.get(recipient.person.id) !== recipient) continue;
+      try {
+        await work(recipient);
+      } catch (err) {
+        if (recipient.person.owner) ownerFailed = { error: err };
+        else this.#log(`${what} for ${recipient.person.id} failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (ownerFailed) throw ownerFailed.error;
   }
 
   start(): void {
@@ -171,8 +282,8 @@ export class LibraryJobs {
       else if (!this.#keptReady && this.#o.cache) await this.keepReady();
       else await this.#watch();
       await this.syncReleases();
-      if (this.#digestDue()) await this.sendDigest();
-      await this.alertFollowed();
+      await this.#sendDueDigests();
+      await this.#alertEveryone();
       if (!this.#o.catalog.getState(STATE.scanDone)) await this.scanStep();
       this.#lastRound = { at: this.#now().getTime(), error: undefined };
     } catch (err) {
@@ -280,11 +391,12 @@ export class LibraryJobs {
   }
 
   /**
-   * While you follow anyone: a look at the site's RSS feed every few minutes (one small request), and a sync when it
-   * shows a post the catalog doesn't have, so new songs by the artists you follow come quickly.
+   * While anyone we send to follows anyone: a look at the site's RSS feed every few minutes (one small request), and a sync
+   * when it shows a post the catalog doesn't have, so new songs by the artists they follow come quickly. One look for all of them.
    */
   async #watch(): Promise<void> {
-    if (this.#o.catalog.followed().length === 0) return;
+    const sendingTo = new Set(this.#recipientList().map((recipient) => recipient.person.chat));
+    if (!this.#o.catalog.followingChats().some((chat) => sendingTo.has(chat))) return;
     const now = this.#now().getTime();
     if (now - this.#lastWatch < (this.#o.watchEveryMs ?? 15 * 60_000)) return;
     this.#lastWatch = now;
@@ -296,17 +408,35 @@ export class LibraryJobs {
     }
   }
 
+  /** The new-song alerts of everyone who follows anyone, each from their own follows and marks, one after the other. */
+  async #alertEveryone(): Promise<void> {
+    const following = new Set(this.#o.catalog.followingChats());
+    await this.#forEach(
+      this.#recipientList().filter((recipient) => following.has(recipient.person.chat)),
+      'the new-song alert',
+      (recipient) => this.#alertTo(recipient),
+    );
+  }
+
   /**
-   * New posts by artists you follow, sent on their own: the song's card and a line (a 👍 on either gets it).
-   * Nothing in the quiet hours; those wait for the next round after them.
+   * New posts by artists someone follows (the owner by default; others by their id), sent on their own: the song's card and a line
+   * (a 👍 on either gets it). Nothing in the quiet hours (the host's); those wait for the next round after them. What was told
+   * is marked for them alone. Says how many were told; nothing for a person who is not sent to.
    */
-  async alertFollowed(): Promise<number> {
+  async alertFollowed(who: string = OWNER_ID): Promise<number> {
+    const recipient = this.#recipients.get(who);
+    return recipient ? this.#alertTo(recipient) : 0;
+  }
+
+  async #alertTo(recipient: Recipient): Promise<number> {
     const { catalog } = this.#o;
+    const { person } = recipient;
+    const chat = person.chat;
     const now = this.#now();
     if (this.#inQuietHours(now)) return 0;
     const since = new Date(now.getTime() - 2 * 24 * HOUR_MS);
-    const posts = catalog.postsToAlert(since);
-    const releases = this.#o.releases?.toAlert(since) ?? [];
+    const posts = catalog.postsToAlert(since, chat);
+    const releases = this.#o.releases?.toAlert(since, chat) ?? [];
     if (posts.length === 0 && releases.length === 0) return 0;
     const replies: Reply[] = [];
     const chips: Array<{ label: string; postback: string }> = [];
@@ -340,17 +470,17 @@ export class LibraryJobs {
       chipsValidMs: 24 * HOUR_MS,
     });
     try {
-      await this.#o.announce(replies);
+      await recipient.announce(replies);
     } catch (err) {
-      if (!this.#alertFailing) this.#log(`could not send the new-song alert (it is tried again every minute): ${err instanceof Error ? err.message : String(err)}`);
-      this.#alertFailing = true;
+      if (!recipient.alertFailing) this.#log(`could not send the new-song alert${person.owner ? '' : ` to ${person.id}`} (it is tried again every minute): ${err instanceof Error ? err.message : String(err)}`);
+      recipient.alertFailing = true;
       return 0;
     }
-    this.#alertFailing = false;
-    catalog.markAlerted(posts.map((post) => post.slug), now);
-    this.#o.releases?.markAlerted(releases.map((release) => release.id), now);
+    recipient.alertFailing = false;
+    catalog.markAlerted(posts.map((post) => post.slug), now, chat);
+    this.#o.releases?.markAlerted(releases.map((release) => release.id), now, chat);
     const alerted = posts.length + releases.length;
-    this.#log(`alerted ${alerted} new ${alerted === 1 ? 'release' : 'releases'} by artists you follow`);
+    this.#log(`alerted ${person.owner ? '' : `${person.id}: `}${alerted} new ${alerted === 1 ? 'release' : 'releases'} by artists ${person.owner ? 'you follow' : 'they follow'}`);
     return alerted;
   }
 
@@ -421,56 +551,88 @@ export class LibraryJobs {
 
   /**
    * What the daily message would say right now (after a sync), without sending it or marking anything. `since`
-   * widens it, to see what a message with more in it looks like.
+   * widens it, to see what a message with more in it looks like. It is the owner's unless another person is named (by id);
+   * nothing for one who is not sent to.
    */
-  async previewDigest(since?: Date): Promise<DigestContents> {
+  async previewDigest(since?: Date, who: string = OWNER_ID): Promise<DigestContents> {
+    const person = this.#recipients.get(who)?.person ?? (who === OWNER_ID ? OWNER : undefined);
+    if (!person) return { replies: [], slugs: [], covered: [], releaseIds: [] };
     await this.sync();
     await this.syncReleases();
-    return this.#digest(since);
+    return this.#digest(person, since);
   }
 
-  /** Builds and sends the daily message, and remembers which posts it covered. Returns how many posts were in it. */
-  async sendDigest(since?: Date): Promise<number> {
-    const { catalog } = this.#o;
+  /**
+   * Builds and sends the daily message, and remembers which posts it covered. Returns how many posts were in it. It is the
+   * owner's unless another person is named (by id); a person who is not sent to gets nothing.
+   */
+  async sendDigest(since?: Date, who: string = OWNER_ID): Promise<number> {
+    const recipient = this.#recipients.get(who);
+    if (!recipient) return 0;
     const now = this.#now();
     await this.sync();
     await this.syncReleases();
-    const { replies, slugs, covered, releaseIds } = this.#digest(since);
+    return this.#deliverDigest(recipient, since, now);
+  }
+
+  /** The daily message of everyone it is due for: the site and Zemer's feed are read once for all of them, then each is sent theirs. */
+  async #sendDueDigests(): Promise<void> {
+    const due = this.#recipientList().filter((recipient) => this.#digestDue(recipient));
+    if (due.length === 0) return;
+    const now = this.#now();
+    await this.sync();
+    await this.syncReleases();
+    await this.#forEach(due, 'the daily message', (recipient) => this.#deliverDigest(recipient, undefined, now));
+  }
+
+  /** Builds and sends one person's daily message and marks, for them alone, what it covered. */
+  async #deliverDigest(recipient: Recipient, since: Date | undefined, now: Date): Promise<number> {
+    const { catalog } = this.#o;
+    const { person } = recipient;
+    const chat = person.chat;
+    const { replies, slugs, covered, releaseIds } = this.#digest(person, since);
     if (replies.length === 0) {
-      catalog.markAnnounced(covered, now);
-      catalog.setState(STATE.digestDate, localDay(now));
-      this.#log('daily message: nothing new today, so none was sent');
+      catalog.markAnnounced(covered, now, chat);
+      catalog.setState(scoped(STATE.digestDate, person), localDay(now));
+      this.#log(`daily message${person.owner ? '' : ` for ${person.id}`}: nothing new today, so none was sent`);
       return 0;
     }
     try {
-      await this.#o.announce(replies);
+      await recipient.announce(replies);
     } catch (err) {
-      catalog.setState(STATE.digestRetryAfter, new Date(now.getTime() + 30 * 60_000).toISOString());
-      this.#log(`daily message could not be sent (trying again in 30 minutes): ${err instanceof Error ? err.message : String(err)}`);
+      catalog.setState(scoped(STATE.digestRetryAfter, person), new Date(now.getTime() + 30 * 60_000).toISOString());
+      this.#log(`daily message${person.owner ? '' : ` to ${person.id}`} could not be sent (trying again in 30 minutes): ${err instanceof Error ? err.message : String(err)}`);
       return 0;
     }
-    catalog.markAnnounced([...slugs, ...covered], now);
-    this.#o.releases?.markAnnounced(releaseIds, now);
-    catalog.setState(STATE.digestDate, localDay(now));
-    catalog.setState(STATE.digestSentAt, now.toISOString());
+    catalog.markAnnounced([...slugs, ...covered], now, chat);
+    this.#o.releases?.markAnnounced(releaseIds, now, chat);
+    catalog.setState(scoped(STATE.digestDate, person), localDay(now));
+    catalog.setState(scoped(STATE.digestSentAt, person), now.toISOString());
     const sent = slugs.length + releaseIds.length;
-    this.#log(`daily message sent: ${sent} new release${sent === 1 ? '' : 's'}`);
+    this.#log(`daily message sent${person.owner ? '' : ` to ${person.id}`}: ${sent} new release${sent === 1 ? '' : 's'}`);
     return sent;
   }
 
-  #digest(sinceOverride?: Date): DigestContents {
+  #digest(person: Person, sinceOverride?: Date): DigestContents {
     const { catalog, musicTable } = this.#o;
+    const chat = person.chat;
     const now = this.#now();
-    const sentAt = catalog.getState(STATE.digestSentAt);
+    const sentAt = catalog.getState(scoped(STATE.digestSentAt, person));
     // Since the last message (with a margin for posts the site dated a little earlier), or the last day for the first.
-    const since = sinceOverride ?? (sentAt ? new Date(Date.parse(sentAt) - 6 * HOUR_MS) : new Date(now.getTime() - 24 * HOUR_MS));
+    let since = sinceOverride ?? (sentAt ? new Date(Date.parse(sentAt) - DIGEST_MARGIN_MS) : new Date(now.getTime() - 24 * HOUR_MS));
+    if (!sinceOverride && !person.owner) {
+      // A person's first message does not reach back to before they came (less the same margin): their marks are empty, so everything
+      // the last day brought would be new to them. This holds past the first message, though by then the last one is what counts.
+      const joined = Date.parse(catalog.getState(scoped(STATE.digestSince, person)) ?? '');
+      if (!Number.isNaN(joined) && joined - DIGEST_MARGIN_MS > since.getTime()) since = new Date(joined - DIGEST_MARGIN_MS);
+    }
     // Zemer's new releases. A song both have is Zemer's: music-table.com's copy of one Zemer has (announced or not, so a song
     // isn't announced twice) is left out, and counts as announced.
-    const releases = this.#o.releases?.toAnnounce(since) ?? [];
+    const releases = this.#o.releases?.toAnnounce(since, chat) ?? [];
     const theirs = new Set((this.#o.releases?.list() ?? []).filter((release) => Date.parse(release.releasedAt) > since.getTime() - 3 * 24 * HOUR_MS).map((release) => releaseKey(release.songs === 1 ? 'single' : 'album', release)));
     const items: DigestItem[] = [];
     const covered: string[] = [];
-    for (const post of catalog.postsToAnnounce(since)) {
+    for (const post of catalog.postsToAnnounce(since, undefined, chat)) {
       if (post.audioFiles === 0) {
         items.push({ post });
         continue;
@@ -513,6 +675,13 @@ export class LibraryJobs {
     keptReady: boolean;
     cache: { files: number; bytes: number } | null;
     following: number;
+    /** The people besides the owner who are sent the daily message and alerts (the fields above are the owner's). */
+    people: Array<{
+      id: string;
+      digest: { at: string | null; lastDate: string | null; lastSentAt: string | null; retryAfter: string | null };
+      alertFailing: boolean;
+      following: number;
+    }>;
   } {
     const { catalog } = this.#o;
     const state = (key: string): string | null => catalog.getState(key) ?? null;
@@ -521,6 +690,23 @@ export class LibraryJobs {
     const at = liveValue(this.#o.digestAt);
     const quiet = liveValue(this.#o.quiet);
     const clock = (time: DailyTime): string => `${String(time.hour).padStart(2, '0')}:${String(time.minute).padStart(2, '0')}`;
+    const people = this.#recipientList()
+      .filter((recipient) => !recipient.person.owner)
+      .map((recipient) => {
+        const { person } = recipient;
+        const time = this.#digestTime(recipient);
+        return {
+          id: person.id,
+          digest: {
+            at: time ? clock(time) : null,
+            lastDate: state(scoped(STATE.digestDate, person)),
+            lastSentAt: state(scoped(STATE.digestSentAt, person)),
+            retryAfter: state(scoped(STATE.digestRetryAfter, person)),
+          },
+          alertFailing: recipient.alertFailing,
+          following: catalog.followed(person.chat).length,
+        };
+      });
     return {
       started: this.#timers.length > 0,
       busy: this.#running !== undefined,
@@ -534,11 +720,12 @@ export class LibraryJobs {
       digest: { at: at ? clock(at) : null, lastDate: state(STATE.digestDate), lastSentAt: state(STATE.digestSentAt), retryAfter: state(STATE.digestRetryAfter) },
       quiet: quiet ? `${clock(quiet.from)}-${clock(quiet.to)}` : null,
       inQuietHours: inQuietHours(quiet, this.#now()),
-      alertFailing: this.#alertFailing,
+      alertFailing: this.#recipients.get(OWNER_ID)?.alertFailing ?? false,
       releasesFailing: this.#releasesFailing,
       keptReady: this.#keptReady,
       cache: this.#o.cache ? this.#o.cache.stats() : null,
       following: catalog.followed().length,
+      people,
     };
   }
 
@@ -547,22 +734,36 @@ export class LibraryJobs {
     return Number.isNaN(last) || this.#now().getTime() - last >= (this.#o.syncEveryMs ?? 3 * HOUR_MS);
   }
 
-  #digestDue(): boolean {
+  /**
+   * The time someone's daily message is due: their own if they have one, else the host's one clock (everyone is on it, and the quiet
+   * hours are the host's too) a few minutes later for each person after the owner, so the messages do not all go at once.
+   */
+  #digestTime(recipient: Recipient): DailyTime | undefined {
+    if (recipient.digestAt) return liveValue(recipient.digestAt);
     const at = liveValue(this.#o.digestAt);
+    if (!at || recipient.offsetMinutes === 0) return at;
+    const minutes = Math.min(at.hour * 60 + at.minute + recipient.offsetMinutes, 23 * 60 + 59);
+    return { hour: Math.floor(minutes / 60), minute: minutes % 60 };
+  }
+
+  #digestDue(recipient: Recipient): boolean {
+    const at = this.#digestTime(recipient);
     if (!at) return false;
     const { catalog } = this.#o;
+    const { person } = recipient;
     const now = this.#now();
     const today = localDay(now);
     const reached = now.getHours() * 60 + now.getMinutes() >= at.hour * 60 + at.minute;
-    const last = catalog.getState(STATE.digestDate);
+    const last = catalog.getState(scoped(STATE.digestDate, person));
     if (last === undefined) {
-      // The first time the bot runs with this on: no surprise message in the middle of the day. Today's comes at the
-      // scheduled time if that's still ahead, otherwise the first one is tomorrow's.
-      catalog.setState(STATE.digestDate, reached ? today : localDay(new Date(now.getTime() - 24 * HOUR_MS)));
+      // The first time the bot runs with this on (for the owner) or the first time someone is seen (see `addRecipient`): no
+      // surprise message in the middle of the day. Today's comes at the scheduled time if that's still ahead, otherwise the
+      // first one is tomorrow's.
+      catalog.setState(scoped(STATE.digestDate, person), reached ? today : localDay(new Date(now.getTime() - 24 * HOUR_MS)));
       return false;
     }
     if (last === today || !reached) return false;
-    const retryAfter = Date.parse(catalog.getState(STATE.digestRetryAfter) ?? '');
+    const retryAfter = Date.parse(catalog.getState(scoped(STATE.digestRetryAfter, person)) ?? '');
     return Number.isNaN(retryAfter) || now.getTime() >= retryAfter;
   }
 }

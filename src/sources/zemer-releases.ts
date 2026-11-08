@@ -196,12 +196,18 @@ export interface NewReleases {
   list(): NewRelease[];
   /** What the last read of the feed found, and which of its releases the artist list held back and why. */
   status(): ReleasesStatus;
-  /** The releases that came out after `since` and have not been in a daily message, newest first. */
-  toAnnounce(since: Date): NewRelease[];
-  markAnnounced(ids: string[], at: Date): void;
-  /** The releases first seen since `since` by an artist you follow, none of whose songs you've had, and not alerted yet. */
-  toAlert(since: Date): Array<NewRelease & { artists: string[] }>;
-  markAlerted(ids: string[], at: Date): void;
+  /**
+   * The releases that came out after `since` and have not been in a daily message, newest first. `chat` is whose message:
+   * the owner's when left out, else a person's id (`Person.chat`); the marks are each chat's own.
+   */
+  toAnnounce(since: Date, chat?: string): NewRelease[];
+  markAnnounced(ids: string[], at: Date, chat?: string): void;
+  /**
+   * The releases first seen since `since` by an artist the chat follows, none of whose songs it has had, and not alerted to it
+   * yet. Every release is held to Zemer's artist list whoever asks.
+   */
+  toAlert(since: Date, chat?: string): Array<NewRelease & { artists: string[] }>;
+  markAlerted(ids: string[], at: Date, chat?: string): void;
 }
 
 export interface NewReleasesDeps {
@@ -305,14 +311,14 @@ export function createNewReleases(deps: NewReleasesDeps): NewReleases {
     sync,
     list,
     status: () => ({ ...status, held: [...status.held] }),
-    toAnnounce: (since) => list().filter((release) => release.announcedAt === undefined && Date.parse(release.releasedAt) > since.getTime()),
-    markAnnounced: (ids, at) => catalog.markReleasesAnnounced(ids, at),
-    toAlert(since) {
-      const followed = catalog.followedSince();
+    toAnnounce: (since, chat = '') => catalog.releases(chat).filter((release) => allows(release) && release.announcedAt === undefined && Date.parse(release.releasedAt) > since.getTime()),
+    markAnnounced: (ids, at, chat = '') => catalog.markReleasesAnnounced(ids, at, chat),
+    toAlert(since, chat = '') {
+      const followed = catalog.followedSince(chat);
       if (followed.length === 0) return [];
       const alerts: Array<NewRelease & { artists: string[] }> = [];
-      for (const release of catalog.unalertedReleases(since)) {
-        if (!allows(release) || catalog.releaseHad(release.id)) continue;
+      for (const release of catalog.unalertedReleases(since, chat)) {
+        if (!allows(release) || catalog.releaseHad(release.id, chat)) continue;
         // The feed names the artist in one alphabet; the list may know them in the other, and a follow was made from either.
         const listed = whitelist.artist(release.artistId);
         const keys = new Set([release.artist, listed?.name, listed?.altName].flatMap((name) => (name ? splitArtists(name).map(artistKey) : [])));
@@ -321,7 +327,7 @@ export function createNewReleases(deps: NewReleasesDeps): NewReleases {
       }
       return alerts;
     },
-    markAlerted: (ids, at) => catalog.markReleasesAlerted(ids, at),
+    markAlerted: (ids, at, chat = '') => catalog.markReleasesAlerted(ids, at, chat),
   };
 }
 

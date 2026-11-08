@@ -79,6 +79,8 @@ There are three ways to run it:
 | Album art, daily message, lists | Yes | Yes | Not wired in |
 | Official? | No: the bridge reverse-engineers Google Messages for web | No: the same kind of bridge | Yes |
 
+**More than one person (built, not live yet).** With `PEOPLE=name` in Render's environment the host can also serve someone else from their own "message yourself" chat and their own Google account: their own searches, follows, daily message and alerts, the same artist rules as yours (they cannot change them), and songs sent one file at a time, taking turns with yours. It is built and tested but not deployed, and parts of it stay unproven until tried with a real second phone: the bridge accepting a second login, the extra traffic against Render's 5 GB, and whether Google tolerates a second pairing from the same address. [How it runs](docs/cloud.md#other-people-people) has the steps and the list.
+
 ## Get started
 
 - **Try it in your browser first**, no accounts needed: `npm install`, then `npm run simulate:web -- --open`. A Google-Messages-style chat runs the real bot against the real site and shows every step it takes. See [the simulator](docs/simulator.md). `npm run simulate:admin -- --open` does the same for [the management console](docs/admin.md), on made-up data.
@@ -114,7 +116,7 @@ There are three ways to run it:
 ## Development
 
 ```bash
-npm test             # 900+ tests, no network: mocks of a Matrix homeserver, music-table.com, Beeper and Google's API
+npm test             # 1,400+ tests, no network: mocks of a Matrix homeserver, music-table.com, Beeper and Google's API
 npm run typecheck
 ```
 

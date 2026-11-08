@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { loadBeeperConfig, loadConfig, loadMatrixConfig, parseArchiveDir } from '../src/config.ts';
+import { loadBeeperConfig, loadConfig, loadMatrixConfig, loadMatrixHostConfig, parseArchiveDir } from '../src/config.ts';
 
 const valid = {
   RBM_AGENT_ID: 'bot@rbm.goog',
@@ -220,5 +220,33 @@ describe('loadMatrixConfig', () => {
   test('the room is optional for scripts that do not watch one', () => {
     assert.equal(loadMatrixConfig({ MATRIX_ACCESS_TOKEN: 'token' }, { room: false }).roomID, '');
     assert.throws(() => loadMatrixConfig({ MATRIX_ACCESS_TOKEN: 'token' }), /MATRIX_ROOM_ID is not set/);
+  });
+});
+
+describe('the Matrix settings of a host with more than one chat', () => {
+  const matrix = { MATRIX_ACCESS_TOKEN: 'owners-token', MATRIX_ROOM_ID: '!owner:localhost' };
+
+  test('the settings every chat shares are read without a token or a room, and are the ones loadMatrixConfig reads', () => {
+    const host = loadMatrixHostConfig({});
+    assert.ok(!('token' in host) && !('roomID' in host));
+    const { token, roomID, ...rest } = loadMatrixConfig(matrix);
+    assert.equal(token, 'owners-token');
+    assert.equal(roomID, '!owner:localhost');
+    assert.deepEqual(host, rest);
+    const custom = { MATRIX_HOMESERVER: 'http://localhost:9008/', MATRIX_POLL_MS: '2500', MAX_ZIP_MB: '60', ALBUM_DOWNLOADS: '2', MATRIX_SYNC_WAIT_MS: '0', BRIDGE_STATUS_EVENTS: '1' };
+    const { token: _t, roomID: _r, ...restCustom } = loadMatrixConfig({ ...matrix, ...custom });
+    assert.deepEqual(loadMatrixHostConfig(custom), restCustom);
+  });
+
+  test('reports every problem at once, as loadMatrixConfig does, minus the token and room', () => {
+    assert.throws(
+      () => loadMatrixHostConfig({ MATRIX_HOMESERVER: 'nope', MATRIX_POLL_MS: '5', MATRIX_SYNC_WAIT_MS: '90000' }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        for (const needle of ['MATRIX_HOMESERVER', 'MATRIX_POLL_MS', 'MATRIX_SYNC_WAIT_MS']) assert.ok(err.message.includes(needle), needle);
+        assert.ok(!err.message.includes('MATRIX_ACCESS_TOKEN') && !err.message.includes('MATRIX_ROOM_ID'));
+        return true;
+      },
+    );
   });
 });

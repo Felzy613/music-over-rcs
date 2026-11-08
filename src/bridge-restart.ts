@@ -21,6 +21,9 @@ const launchctl: Exec = (file, args) =>
  *
  * On a server there is no launchd: BRIDGE_PIDFILE names the file where the process supervisor (src/cloud/supervise.ts, started by deploy/cloud/entrypoint.ts)
  * writes the bridge's process id, and the restart is a SIGTERM to it, which the supervisor answers by starting it again.
+ *
+ * The bridge is one process for every person's Google login, so a restart cuts everybody off. Only the owner's `BridgeWatch` is given
+ * this function (`ownerBridge` in src/host.ts); a person's watch is built without one, and `BridgeWatch` refuses to take both.
  */
 export function bridgeRestarter(
   env: NodeJS.ProcessEnv = process.env,

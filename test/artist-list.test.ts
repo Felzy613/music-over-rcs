@@ -450,6 +450,20 @@ describe('the chat’s commands for the artist list', () => {
     assert.match(texts(await ask('help'))[0]!, /pending — artists waiting for your OK · allow \/ block <artist>/);
   });
 
+  test('a song held back because of a block is worded for the owner, who can lift it, and plainly for a chat without the list, which cannot', async () => {
+    const reason = 'you blocked its artist (text "allow" and their name to undo that)';
+    const catalog = new Catalog(':memory:');
+    const song = catalog.add({ title: 'Blue Horizon', artist: 'The Night Owls', url: 'https://music.youtube.com/watch?v=blue0000001', artistIds: [night] });
+    const refuse = async () => ({ ok: false as const, reason });
+    const owner = createBot({ catalog, checkAudio: refuse, artistList: new ZemerWhitelist({ baseUrl: 'http://127.0.0.1:1', checkEveryMs: 0, retryAfterMs: 0 }) });
+    const bare = createBot({ catalog, checkAudio: refuse });
+    const ask = async (bot: typeof owner) => texts(await bot.handle({ from: '+1', messageId: 'm', postback: `play:${song.id}` }));
+    assert.deepEqual(await ask(owner), [`I can't send "The Night Owls — Blue Horizon": ${reason}.`]);
+    const plain = await ask(bare);
+    assert.deepEqual(plain, [`I can't send "The Night Owls — Blue Horizon": its artist isn't one I send.`]);
+    assert.doesNotMatch(plain.join(' '), /allow|you blocked/);
+  });
+
   test('the message about waiting artists is the same one "pending" gives', () => {
     const replies = waitingArtistsReplies([{ id: newcomer, name: 'Newcomer Band' }]);
     assert.match(texts(replies)[0]!, /^Zemer has an artist on its list that I can't check/);

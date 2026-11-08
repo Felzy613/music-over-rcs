@@ -35,6 +35,13 @@ export interface RoomWatchDeps {
   stopped(): boolean;
   health: Pick<Health, 'problem' | 'ok'>;
   log(line: string): void;
+  /** The key this chat's problem is kept under in `health`: `room` for the owner's chat (the default), `room:<id>` for a person's. */
+  key?: string;
+  /**
+   * Whose chat this is when it is a person's, not the owner's: the alert names them and says what they, not the owner, can do about it.
+   * The owner's alert (no name) is worded as it always was.
+   */
+  name?: string;
 }
 
 /**
@@ -55,9 +62,11 @@ export class RoomWatch {
   #findFailed = '';
   #slowed = false;
   #room: string | undefined;
+  #key: string;
 
   constructor(deps: RoomWatchDeps) {
     this.#deps = deps;
+    this.#key = deps.key ?? 'room';
   }
 
   /** The rooms `find` gives, or none when it fails (the bridge hasn't made its database yet): said once per different failure. */
@@ -130,7 +139,7 @@ export class RoomWatch {
         this.#told = '';
         this.#slowed = false;
         this.#room = joined;
-        d.health.ok('room', 'Fixed: the bot has its chat room again and is answering.');
+        d.health.ok(this.#key, d.name ? `Fixed: the bot has ${d.name}'s chat room again and is answering there.` : 'Fixed: the bot has its chat room again and is answering.');
         return joined;
       }
       if (slowed) {
@@ -156,8 +165,10 @@ export class RoomWatch {
         d.log(`the chat room cannot be joined (${gone.join(', ')}): waiting for your chat to come back (text yourself on the phone) or to be chosen on the setup page, not restarting`);
       }
       d.health.problem(
-        'room',
-        `The bot's chat room is gone (${gone.join(', ')}): the homeserver no longer knows it or won't let the bot in, which usually means the chat was deleted on the phone. The bot is waiting, not crashing, and finds your chat by itself: text yourself once from your phone, and it starts answering in that chat within a minute or two. If it doesn't, open the service's /pair page and choose your "message yourself" chat there.`,
+        this.#key,
+        d.name
+          ? `${d.name}'s chat room is gone (${gone.join(', ')}): the homeserver no longer knows it or won't let ${d.name}'s account in, which usually means ${d.name} deleted the chat on their phone. The bot is waiting, not crashing, and finds ${d.name}'s chat by itself: ${d.name} needs to text themself once from their phone, and the bot starts answering in that chat within a minute or two. If it doesn't, open the console's Connect page, pick ${d.name} and choose their "message yourself" chat there. Nobody else's chat is affected.`
+          : `The bot's chat room is gone (${gone.join(', ')}): the homeserver no longer knows it or won't let the bot in, which usually means the chat was deleted on the phone. The bot is waiting, not crashing, and finds your chat by itself: text yourself once from your phone, and it starts answering in that chat within a minute or two. If it doesn't, open the service's /pair page and choose your "message yourself" chat there.`,
       );
       await d.wait();
     }

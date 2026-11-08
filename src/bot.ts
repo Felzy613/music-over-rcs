@@ -277,6 +277,9 @@ export function describe(track: Track): string {
 
 const say = (text: string, chips?: Chip[]): Reply => (chips ? { kind: 'text', text, chips } : { kind: 'text', text });
 
+/** How a song held back because the owner blocked its artist is worded for the owner (src/sources/youtube-music.ts, zemer.ts). Only the owner can lift a block. */
+const OWNER_BLOCK_WORDS = /you blocked its artist \(text "allow" and their name to undo that\)/;
+
 function chipLabel(n: number, title: string): string {
   const chars = Array.from(`${n}. ${title}`);
   return chars.length <= MAX_CHIP_LABEL ? chars.join('') : `${chars.slice(0, MAX_CHIP_LABEL - 1).join('')}…`;
@@ -1163,7 +1166,8 @@ export function createBot(deps: BotDeps): Bot {
     const replies = msg.postback !== undefined ? await onPostback(msg.postback) : await onText(msg);
     const after = views.current();
     if (after && after.id !== before && !replies.some((reply) => reply.kind === 'text' && reply.chips)) replies.push(choicesReply(after));
-    return replies;
+    // A chat with no artist list (anyone but the owner) is not told that "you" blocked the artist, or to text "allow": it can't.
+    return deps.artistList ? replies : replies.map((reply) => (reply.kind === 'text' && OWNER_BLOCK_WORDS.test(reply.text) ? { ...reply, text: reply.text.replace(OWNER_BLOCK_WORDS, "its artist isn't one I send") } : reply));
   }
 
   return {

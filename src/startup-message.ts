@@ -1,3 +1,4 @@
+import { OWNER, scoped, type Person } from './people.ts';
 import type { Reply } from './types.ts';
 
 /** off: never; once: the first time this catalog starts a bot, and never again; always: at every start. */
@@ -6,6 +7,15 @@ export type StartupMode = 'off' | 'once' | 'always';
 export const STARTUP_SENT_KEY = 'hello.sent';
 
 export const STARTUP_TEXT = `I'm running in the cloud now, so I keep working when your Mac's internet drops. Text "search" and a song name and I'll send it.`;
+
+/** What anyone besides the owner is told the first time their chat is up: the owner's words are about the owner's Mac, so these are plain. */
+export const PERSON_STARTUP_TEXT = `Hi, I'm Music over RCS. Text "search" and a song name and I'll send it. Text "help" for the other commands.`;
+
+/** The state key that remembers a person was told: the owner's is the one it has always been, anyone else's has their id in it. */
+export const startupKey = (person: Person = OWNER): string => scoped(STARTUP_SENT_KEY, person);
+
+/** The hello for a person: the owner's own words, plain ones for anyone else. */
+export const startupText = (person: Person = OWNER): string => (person.owner ? STARTUP_TEXT : PERSON_STARTUP_TEXT);
 
 /** STARTUP_MESSAGE=off|once|always. Without it: off (the cloud host sets it to once). */
 export function startupModeFrom(env: NodeJS.ProcessEnv = process.env): StartupMode {
@@ -22,6 +32,8 @@ export interface StartupMessageOptions {
   ready: () => Promise<boolean>;
   send: (replies: Reply[]) => Promise<void>;
   text?: string;
+  /** The state key that remembers the hello was sent (`hello.sent`, the owner's; a person's has their id in it, see `startupKey`). */
+  key?: string;
   /** Tries before giving up (the next start tries again for `once`), and the wait between them. */
   attempts?: number;
   everyMs?: number;
@@ -35,7 +47,8 @@ export interface StartupMessageOptions {
 export async function sendStartupMessage(options: StartupMessageOptions): Promise<boolean> {
   const { mode, state, ready, send, log } = options;
   if (mode === 'off') return false;
-  if (mode === 'once' && state.getState(STARTUP_SENT_KEY)) return false;
+  const key = options.key ?? STARTUP_SENT_KEY;
+  if (mode === 'once' && state.getState(key)) return false;
   const attempts = options.attempts ?? 20;
   const everyMs = options.everyMs ?? 30_000;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref()));
@@ -44,7 +57,7 @@ export async function sendStartupMessage(options: StartupMessageOptions): Promis
     try {
       if (await ready()) {
         await send([{ kind: 'text', text: options.text ?? STARTUP_TEXT }]);
-        state.setState(STARTUP_SENT_KEY, (options.now?.() ?? new Date()).toISOString());
+        state.setState(key, (options.now?.() ?? new Date()).toISOString());
         log?.('sent the startup message');
         return true;
       }

@@ -41,7 +41,10 @@ export interface View {
   lastMore?: Category | undefined;
 }
 
-/** Where the views are kept, and which one is current. */
+/**
+ * Where the views are kept, and which one is current. A store is for one chat (`viewsIn(catalog, key, chat)`, one for each
+ * person, src/people.ts): the views it opens are that chat's, and `get` finds no other chat's, whatever number it is given.
+ */
 export interface ViewStore {
   /** A new view (the current one is not changed). */
   open(key: ViewKey, parent?: number): View;
