@@ -81,7 +81,7 @@ There are three ways to run it:
 
 ## Get started
 
-- **Try it in your browser first**, no accounts needed: `npm install`, then `npm run simulate:web -- --open`. A Google-Messages-style chat runs the real bot against the real site and shows every step it takes. See [the simulator](docs/simulator.md).
+- **Try it in your browser first**, no accounts needed: `npm install`, then `npm run simulate:web -- --open`. A Google-Messages-style chat runs the real bot against the real site and shows every step it takes. See [the simulator](docs/simulator.md). `npm run simulate:admin -- --open` does the same for [the management console](docs/admin.md), on made-up data.
 - **Set it up for your phone** (a Render account, a Cloudflare account, and an Android phone with Google Messages and RCS on): [How it runs](docs/cloud.md), steps 1 to 7. Most of the time is waiting for the first build and for the bridge to make its rooms.
 
 ## Documentation
@@ -92,6 +92,7 @@ There are three ways to run it:
 | [The library](docs/library.md) | The catalog, the site sync and full scan, songs kept ready, the daily message, alerts, `npm run library` |
 | [Zemer and YouTube Music](docs/youtube-music.md) | Zemer's catalog and how a search reads it, Zemer's artist list and how it stays current, where the audio comes from, the order of the sources, and what breaks it |
 | [music-table.com](docs/music-table.md) | How the site is used, how matching and spelling fixes work, how it behaves toward the site |
+| [The management console](docs/admin.md) | A web page on the live bot: see everything it knows and does, allow or block artists and single songs (including ones found on YouTube), change the few live settings, trigger refreshes, read the log |
 | [The simulator](docs/simulator.md) | Trying the bot in a browser or a terminal |
 | [Configuration](docs/configuration.md) | Every setting in `.env` |
 | [How it runs](docs/cloud.md) | The Render service and the Cloudflare Worker and bucket: how it fits together, setting it up, linking Google Messages, saving songs to OneDrive, deploying, day to day, what has been proven |

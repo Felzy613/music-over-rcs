@@ -1,4 +1,6 @@
 import './load-env.ts';
+import './admin/capture.ts';
+import { adminConsole } from './admin/console.ts';
 import { checkAudio } from './audio-check.ts';
 import { fetchAudio } from './audio-fetch.ts';
 import { createBot } from './bot.ts';
@@ -10,7 +12,7 @@ import { loadExtensions, startExtensions, stopExtensions, type ExtensionChat } f
 import { loadMatrixConfig, parseCloudBudget } from './config.ts';
 import { describeMatrixError, MatrixClient } from './matrix/client.ts';
 import { setUpLibrary } from './library/setup.ts';
-import { addSent, trafficProblem } from './usage.ts';
+import { addSent, archivedThisMonth, trafficProblem } from './usage.ts';
 import { oneDriveFromEnv } from './archive/onedrive.ts';
 import { memoryCheck } from './cloud/memory.ts';
 import { watchJoinedRoom } from './cloud/room.ts';
@@ -18,6 +20,7 @@ import { youTubeRelayFromEnv } from './cloud/youtube-relay.ts';
 import { createRunner, type IncomingPicture } from './runner.ts';
 import { recentTimelines } from './timeline.ts';
 import { sendStartupMessage, startupModeFrom } from './startup-message.ts';
+import { createWaitingNotice } from './waiting-notice.ts';
 import { musicTableFromEnv, resolvingAudio } from './sources/music-table.ts';
 import { songSources } from './sources/songs.ts';
 import { gatedAudioCheck, resolvingYouTubeAudio, youTubeGate, youTubeMusicFromEnv } from './sources/youtube-music.ts';
@@ -37,6 +40,10 @@ try {
   const maxBytes = config.maxDownloadMb * 1024 * 1024;
 
   const catalog = new Catalog(config.dbPath);
+  // The owner's management console (src/admin/console.ts) reads and changes what this assembles; a few settings it can change
+  // while the bot runs (the daily message's time, the quiet hours, the gap between songs, …) are read through `settings`.
+  const settings = adminConsole.liveSettings(catalog, process.env);
+  adminConsole.provide({ catalog, env: process.env, log, settings });
   // What goes out is counted (a cloud host's plan allows only so much a month; /status on the cloud host shows it).
   const matrix = new MatrixClient({ token: config.token, homeserver: config.homeserver, onUpload: (bytes) => addSent(catalog, bytes) });
   const { userId } = await matrix.whoami();
@@ -75,9 +82,10 @@ try {
   // bot runs, with a note on the Mac if it goes a day without updating (the last good list is used meanwhile).
   const stopWatching = whitelist?.watch((error) => {
     if (error === undefined) health.ok('whitelist', "Fixed: Zemer's artist list is updating again.");
+    else if (whitelist.frozen) health.problem('whitelist', `Zemer's artist list now answers only its own app, so the bot keeps the last copy it saved. Artists Zemer adds wait for your word (text "pending"); text "block" and a name to hide anyone.`);
     else if (whitelist.ageMs > 24 * 60 * 60_000) health.problem('whitelist', `Zemer's artist list hasn't updated for a day (${error}). YouTube Music songs are being checked against the old list.`);
   });
-  void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs`));
+  void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs${whitelist.frozen ? ' (frozen: the server turns the bot away)' : ''}; you allowed ${whitelist.owner.allowed}, blocked ${whitelist.owner.blocked}, ${whitelist.owner.waiting} waiting`));
   // Zemer's new releases (the feed behind the Zemer app's Latest Releases shelf): in "new", the daily message and the alerts,
   // held to the same list. ZEMER_RELEASES=off turns them off.
   const releases = newReleasesFromEnv({ catalog, whitelist, log });
@@ -90,6 +98,15 @@ try {
   let sending = (): boolean => false;
   const cloudBudget = parseCloudBudget(process.env.ONEDRIVE_MAX_MB_PER_MONTH);
   if (cloudBudget instanceof Error) throw cloudBudget;
+  /** The settings the console can change: what the bot started with applies until the owner changes it there. */
+  const live = {
+    digestAt: () => settings.digestAt(config.digestAt),
+    quiet: () => settings.quiet(config.quiet),
+    songGapMs: () => settings.songGapMs(config.songGapMs),
+    albumDownloads: () => settings.albumDownloads(config.albumDownloads),
+    downloadsAhead: () => settings.downloadsAhead(config.downloadsAhead),
+    cloudBudget: () => settings.cloudBudget(cloudBudget),
+  };
   // Songs kept on disk (the most played, the newest, the most viewed), album art, and the daily new-music message.
   const library = setUpLibrary({
     catalog,
@@ -99,7 +116,7 @@ try {
     ...(oneDrive
       ? {
           cloudFolder: oneDrive,
-          cloudMonthlyBytes: cloudBudget,
+          cloudMonthlyBytes: live.cloudBudget,
           // On a small cloud host the OneDrive copy of a big song waits for memory, or is skipped, rather than crowd out sending.
           cloudMemory: memory,
           cloudBusy: () => sending(),
@@ -109,11 +126,11 @@ try {
               : health.ok('onedrive', 'Fixed: songs are being saved to OneDrive again.'),
         }
       : {}),
-    digestAt: config.digestAt,
+    digestAt: live.digestAt,
     prefetchMb: config.prefetchMb,
     archiveDir: config.archiveDir,
     onArchive: (problem) => (problem ? health.problem('archive', problem) : health.ok('archive', 'Fixed: the songs folder on the drive can be used again.')),
-    quiet: config.quiet,
+    quiet: live.quiet,
     // With no internet at all, that's the one thing said; the site isn't blamed for it.
     onSite: (ok, problem) =>
       ok ? health.ok('site', 'Fixed: music-table.com is answering again.') : health.has('internet') ? undefined : health.problem('site', problem ?? "music-table.com isn't answering."),
@@ -121,6 +138,18 @@ try {
     onReleases: (ok, problem) =>
       ok ? health.ok('releases', "Fixed: Zemer's new releases are being read again.") : health.has('internet') ? undefined : health.problem('releases', problem ?? "Zemer's new releases aren't being read."),
     log,
+  });
+  // What the console shows and changes: Zemer's artist list, YouTube Music for finding artists, the releases, and the background jobs
+  // (which are made when the library starts, so asked for each time).
+  adminConsole.provide({ whitelist, youTube, releases, jobs: () => library.jobs, follows: library.follows, ...(oneDrive
+      ? {
+          // The same report as /status's: signed in or not, what was saved this month, and the allowance in force (the console may have changed it).
+          oneDrive: (): Record<string, unknown> => {
+            const budget = live.cloudBudget();
+            return { ...oneDrive.status(), savedThisMonthMb: Math.round(archivedThisMonth(catalog) / 1048576), monthlyLimitMb: budget === undefined ? null : Math.round(budget / 1048576) };
+          },
+        }
+      : {}),
   });
   // Add-ons kept outside this repository, in extensions/ (see src/extensions.ts). One that fails is left out.
   const extensions = await loadExtensions({ state: catalog, health, env: process.env, log, download: (url) => matrix.downloadMedia(url) });
@@ -136,6 +165,7 @@ try {
     onPlay: library.onPlay,
     browse: library.browse,
     follows: library.follows,
+    ...(whitelist ? { artistList: whitelist } : {}),
     ...(assistant ? { assistant } : {}),
     // The chat's menus and where it is in them ("songs more", a 👍 on an older menu), kept across restarts.
     views: viewsIn(catalog),
@@ -161,11 +191,11 @@ try {
     pollMs: config.pollMs,
     // A long poll: a text is read the moment the homeserver has it (MATRIX_SYNC_WAIT_MS=0 reads every MATRIX_POLL_MS instead).
     waitMs: config.syncWaitMs,
-    songGapMs: config.songGapMs,
-    ...(config.downloadsAhead ? { downloadsAhead: config.downloadsAhead } : {}),
+    songGapMs: live.songGapMs,
+    downloadsAhead: live.downloadsAhead,
     // An album's songs come three at a time (ALBUM_DOWNLOADS), each to disk as it arrives; another starts only while the host has
     // room: under 380 of its 512 MB, the most it reached with one at a time being 391 (2026-10-20).
-    ...(config.albumDownloads ? { albumDownloads: config.albumDownloads } : {}),
+    albumDownloads: live.albumDownloads,
     ...(memory
       ? {
           memoryRoom: () => {
@@ -212,9 +242,21 @@ try {
     if (problem) health.problem('traffic', problem);
     else health.ok('traffic', "Fixed: this month's outbound traffic is back under the limit (a new month).");
   };
+  // Artists Zemer has added that its frozen list doesn't know wait for the owner's word; they are told about once.
+  const tellWaiting = whitelist
+    ? createWaitingNotice({
+        list: whitelist,
+        state: catalog,
+        announce: (replies) => runner.announce(replies),
+        ready: () => !['bridge', 'internet'].some((key) => health.has(key)),
+        quiet: live.quiet,
+        log,
+      })
+    : undefined;
   const watching = setInterval(() => {
     void bridge.check();
     checkTraffic();
+    void tellWaiting?.();
   }, 60_000);
   watching.unref();
   void bridge.check();

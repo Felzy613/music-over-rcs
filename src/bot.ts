@@ -158,11 +158,50 @@ export interface BotDeps {
   browse?: Browse;
   /** Artists you follow ("follow …", "unfollow …", "following"), and following for you after several plays. */
   follows?: Follows;
+  /** Zemer's artist list as the owner keeps it ("pending", "allow …", "block …"); see zemer-whitelist.ts. */
+  artistList?: ArtistList;
   /** An assistant elsewhere (an add-on, see extensions.ts) that messages starting with its word go to. */
   assistant?: Assistant;
   /** Where the chat's menus, artists, albums and lists are kept, and which is current (see views.ts). In memory unless given. */
   views?: ViewStore;
   now?: () => Date;
+}
+
+/** An artist by name, with the id the lists know them by. */
+export interface WaitingArtist {
+  id: string;
+  name: string;
+}
+
+/**
+ * The artist list the owner can add to and take from. Zemer's own list can't be read any more (it answers only its app), so
+ * artists that Zemer has added since wait here for the owner to say they are men, and the owner can block anyone.
+ */
+export interface ArtistList {
+  /** Artists on Zemer's list that the bot can't tell are men; their songs are held back until allowed. */
+  pending(): WaitingArtist[];
+  /** Lets a waiting artist's songs through (or lifts a block), by name or id. Returns who it was. */
+  allow(ref: string): WaitingArtist[];
+  /** Stops an artist's songs, by name or id. Returns who it was. */
+  block(ref: string): WaitingArtist[];
+}
+
+/** The chat's message about artists waiting for a word: a line to 👍 for each, with what a 👍 means said plainly. */
+export function waitingArtistsReplies(waiting: readonly WaitingArtist[]): Reply[] {
+  const many = waiting.length !== 1;
+  return [
+    {
+      kind: 'text',
+      text: `Zemer has ${many ? `${waiting.length} artists` : 'an artist'} on its list that I can't check: ${many ? 'they come' : 'it comes'} from its new releases, which don't say who is a woman. I'm holding their songs back until you say.`,
+    },
+    ...waiting.map((artist): Reply => ({ kind: 'text', text: artistLine(artist.name), postback: `allow:${artist.id}` })),
+    {
+      kind: 'text',
+      text: 'Tap 👍 on a name only if that artist is a man (or a group of men), and I\'ll send their songs. Text "block" and a name to never send theirs.',
+      chips: waiting.map((artist, i) => ({ label: chipLabel(i + 1, artist.name), postback: `allow:${artist.id}` })),
+      chipsValidMs: LIST_VALID_MS,
+    },
+  ];
 }
 
 /** An AI assistant elsewhere that a message starting with its word is passed on to; its answers come back on their own. */
@@ -221,6 +260,8 @@ export const BROWSE_HELP_TEXT = helpText({ browse: true, follows: true, finder: 
 const TRENDING = new Set(['trending', 'top', 'top songs', 'top 10', 'popular', 'hot', 'whats hot', 'what s hot', 'trending songs', 'charts']);
 const NEWEST = new Set(['new', 'newest', 'latest', 'new music', 'new songs', 'new releases', 'whats new', 'what s new', 'latest music']);
 const MORE = new Set(['more', 'next', 'show more', 'more please', 'next page']);
+/** Who is waiting for the owner's word about Zemer's artist list. */
+const PENDING_WORDS = new Set(['pending', 'waiting', 'pending artists', 'waiting artists', 'artists pending', 'artists waiting']);
 /** "zip", "send zip" or "whole album": the album on screen as one zip. */
 const ZIP_WORDS = new Set(['zip', 'send zip', 'send the zip', 'the zip', 'whole album', 'the whole album', 'send whole album', 'send the whole album']);
 /** "all" sends every song on the list on screen (the runner turns it into an `all:` postback); at most this many. */
@@ -365,7 +406,7 @@ export function createBot(deps: BotDeps): Bot {
   const now = deps.now ?? (() => new Date());
   const views = deps.views ?? memoryViews();
   const help = (): string => {
-    const text = helpText({ browse: Boolean(deps.browse), follows: Boolean(deps.follows), finder: Boolean(deps.finder || deps.albums), releases: Boolean(deps.browse?.refreshNew) });
+    const text = helpText({ browse: Boolean(deps.browse), follows: Boolean(deps.follows), finder: Boolean(deps.finder || deps.albums), releases: Boolean(deps.browse?.refreshNew), artistList: Boolean(deps.artistList) });
     const word = deps.assistant?.word;
     return word ? `${text}\n${word} <message> — ask ${deps.assistant!.name}; the answer comes back here` : text;
   };
@@ -820,6 +861,32 @@ export function createBot(deps: BotDeps): Bot {
     return openList({ kind: 'artist', artistId, shown: 0 }, `🎤 ${name} · ${plural(releases, 'release')} on music-table.com, newest first`, `I have no songs by ${name}.`, parent);
   }
 
+  /** "pending" (who is waiting for a word), and a 👍 on one of them or "allow …". */
+  function waiting(): Reply[] {
+    const list = deps.artistList?.pending() ?? [];
+    return list.length === 0 ? [say('No artists are waiting for your word.')] : waitingArtistsReplies(list);
+  }
+
+  function allowArtist(ref: string): Reply[] {
+    const list = deps.artistList;
+    if (!list) return [say(help())];
+    const allowed = list.allow(ref);
+    if (allowed.length === 0) return [say(`I'm not holding anyone called "${ref}". Text "pending" to see who is waiting.`)];
+    const names = orList(allowed.map((artist) => artist.name));
+    return [say(`✅ ${names}: their songs come through now, and their new releases show up in "new" within half an hour. Text "block ${allowed[0]!.name}" to undo that.`)];
+  }
+
+  /** "block …" and "allow …", with a name. */
+  function artistListFor(word: string, name: string): Reply[] | undefined {
+    const list = deps.artistList;
+    if (!list || (word !== 'block' && word !== 'allow')) return undefined;
+    if (!name) return [say(word === 'allow' ? 'Text "allow" and the name of an artist from "pending".' : 'Text "block" and the name of an artist, like "block Beri Weber".')];
+    if (word === 'allow') return allowArtist(name);
+    const blocked = list.block(name);
+    if (blocked.length === 0) return [say(`I don't know an artist called "${name}" on the list. Try the name as a 🎤 line writes it.`)];
+    return [say(`🚫 Blocked ${orList(blocked.map((artist) => artist.name))}: none of their songs will come through. Text "allow ${blocked[0]!.name}" to undo that.`)];
+  }
+
   /** "follow …", "unfollow …" and "following". */
   function followFor(tokens: string[]): Reply[] | undefined {
     const follows = deps.follows;
@@ -1038,6 +1105,8 @@ export function createBot(deps: BotDeps): Bot {
         return musicTableArtist(Number(arg), there?.id ?? views.current()?.id);
       case 'post':
         return postSongs(arg);
+      case 'allow':
+        return allowArtist(arg);
       case 'play': {
         const track = /^\d+$/.test(arg) ? deps.catalog.get(Number(arg)) : undefined;
         return track ? play(track) : [say('That track is no longer in the catalog.')];
@@ -1063,6 +1132,11 @@ export function createBot(deps: BotDeps): Bot {
     if (MORE.has(phrase)) return more();
     const first = FIRST_WORD.exec(raw);
     const rest = first ? raw.slice(first[0].length).trim() : '';
+    if (deps.artistList) {
+      if (PENDING_WORDS.has(phrase)) return waiting();
+      const ruled = first ? artistListFor(first[1]!.toLowerCase(), rest) : undefined;
+      if (ruled) return ruled;
+    }
     if (first && isSearch(first[1]!)) return search(rest);
     if (first && isZemerOnly(first[1]!)) return search(rest.replace(/^music\b[\s:,-]*/i, '').trim(), { zemerOnly: true });
     if (first && kind) return search(rest, { only: kind });

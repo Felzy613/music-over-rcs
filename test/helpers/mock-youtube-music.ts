@@ -4,6 +4,8 @@ import { listen, readText, type Listening } from './servers.ts';
 export const SONG_FILTER = 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D';
 /** And its albums filter (SearchFilter.FILTER_ALBUM). */
 export const ALBUM_FILTER = 'EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D';
+/** And its artists filter (SearchFilter.FILTER_ARTIST), which the admin console searches with. */
+export const ARTIST_FILTER = 'EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D';
 
 export interface MockAlbumTrack {
   /** Left out for a song that can't be played (greyed out on the real page): it has no video id. */
@@ -138,6 +140,20 @@ function row(song: MockSong): unknown {
 
 const AT_A_TIME = 100;
 
+/** An artist row of an artists search: the channel id it opens, the name, "Artist • 1.2K subscribers", and a picture. */
+function artistRow(name: string): unknown {
+  return {
+    musicResponsiveListItemRenderer: {
+      navigationEndpoint: { browseEndpoint: { browseId: artistId(name), browseEndpointContextSupportedConfigs: { browseEndpointContextMusicConfig: { pageType: 'MUSIC_PAGE_TYPE_ARTIST' } } } },
+      thumbnail: { musicThumbnailRenderer: { thumbnail: { thumbnails: [{ url: `https://yt3.googleusercontent.com/${artistId(name)}=w60-h60-l90-rj` }, { url: `https://yt3.googleusercontent.com/${artistId(name)}=w120-h120-l90-rj` }] } } },
+      flexColumns: [
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: name }] } } },
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: 'Artist' }, { text: ' • ' }, { text: '1.2K subscribers' }] } } },
+      ],
+    },
+  };
+}
+
 function albumRow(album: MockAlbum): unknown {
   const second: Array<{ text: string; navigationEndpoint?: unknown }> = [{ text: 'Album' }, { text: ' • ' }, ...joinCredit(album.artists)];
   if (album.year) second.push({ text: ' • ' }, { text: String(album.year) });
@@ -266,6 +282,15 @@ export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum
         return json(200, {
           responseContext: {},
           contents: { tabbedSearchResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{ musicShelfRenderer: { contents: matching.map(albumRow) } }] } } } }] } },
+        });
+      }
+      if (body.params === ARTIST_FILTER) {
+        // Every artist credited on a song that matches, once each, in the order they first appear.
+        const names = [...new Set(songs.filter((song) => { const text = words(`${song.title} ${song.artists.join(' ')}`); return wanted.some((word) => text.some((have) => have.startsWith(word))); }).flatMap((song) => song.artists))];
+        const matching = names.filter((name) => wanted.some((word) => words(name).some((have) => have.startsWith(word))));
+        return json(200, {
+          responseContext: {},
+          contents: { tabbedSearchResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{ musicShelfRenderer: { contents: matching.map(artistRow) } }] } } } }] } },
         });
       }
       const found = songs.filter((song) => {

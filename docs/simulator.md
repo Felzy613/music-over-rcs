@@ -29,6 +29,10 @@ Options:
 
 It listens on `127.0.0.1` only, and answers only pages loaded from that address with its own header, so another website can't drive it. It uses the live sites, so it needs the internet; with `MUSIC_TABLE=off` and `YOUTUBE_MUSIC=off` it uses only the catalog. A YouTube Music song can't be played in the browser (its link only works with the headers the bot sends); run it with `--full` to download it.
 
+## The management console
+
+`npm run simulate:admin -- --open` runs the owner's [management console](admin.md) on made-up data: the real console and web door in front of the mock servers the tests use (a Zemer list that has turned the bot away, YouTube Music, the releases feed, music-table.com) and an in-memory catalog. It listens on `127.0.0.1:8789` (`--port` changes it) and you sign in with any user name and the password `demo-password` (`--auto` skips the page, on that machine only). Nothing real is reached and nothing is saved.
+
 ## In a terminal
 
 ```bash

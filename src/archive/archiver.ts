@@ -1,4 +1,5 @@
 import type { DownloadedAudio } from '../audio-fetch.ts';
+import { liveValue, type Live } from '../live.ts';
 import { addArchived, archivedThisMonth } from '../usage.ts';
 import type { UploadSource } from './onedrive.ts';
 
@@ -20,7 +21,7 @@ export interface SongArchiveOptions {
   /** Where a song goes in the folder: "Artist/Album/01 Title.mp3". */
   placeOf: (url: string, audio: { fileName: string; mimeType: string }) => string;
   /** The most to upload in a calendar month, in bytes. Undefined for no limit. */
-  monthlyBudgetBytes?: number | undefined;
+  monthlyBudgetBytes?: Live<number | undefined>;
   /**
    * What memory there is and how much is used, for a host with little (see memory.ts). The song offered is the one that was sent, tags
    * and cover already written in, and it goes up straight from its Blob a 10 MiB piece at a time, so it costs about two pieces however
@@ -159,7 +160,7 @@ export class SongArchive {
     const place = this.#options.placeOf(url, audio);
     const marker = `archive.done:${place}`;
     if (state.getState(marker)) return;
-    const budget = this.#options.monthlyBudgetBytes;
+    const budget = liveValue(this.#options.monthlyBudgetBytes);
     const when = now?.() ?? new Date();
     if (budget !== undefined && archivedThisMonth(state, when) + audio.bytes > budget) {
       const month = when.toISOString().slice(0, 7);

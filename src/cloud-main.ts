@@ -1,6 +1,10 @@
 import './load-env.ts';
+import './admin/capture.ts';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import { AdminAccount, Sessions, sessionBinding } from './admin/account.ts';
+import { adminConsole } from './admin/console.ts';
+import { SignIn } from './admin/sign-in.ts';
 import { Catalog } from './catalog.ts';
 import { ensureTokenPatiently, waitForHomeserver } from './cloud/bootstrap.ts';
 import { Pairing, chatNumber, ownChatRooms, selfChatRooms } from './cloud/pairing.ts';
@@ -54,11 +58,17 @@ const memoryWatch = new MemoryWatch({ log });
 
 const oneDrive = oneDriveFromEnv(env, { state: catalog, log });
 const cloudBudget = parseCloudBudget(env.ONEDRIVE_MAX_MB_PER_MONTH);
-const oneDriveReport = (): Record<string, unknown> => ({
-  ...oneDrive!.status(),
-  savedThisMonthMb: Math.round(archivedThisMonth(catalog) / 1048576),
-  monthlyLimitMb: cloudBudget instanceof Error || cloudBudget === undefined ? null : Math.round(cloudBudget / 1048576),
-});
+// The settings the owner's console can change while the bot runs sit over the environment (src/admin/settings.ts): the allowance shown
+// here is the one in force.
+const liveSettings = adminConsole.liveSettings(catalog, env);
+const oneDriveReport = (): Record<string, unknown> => {
+  const budget = liveSettings.cloudBudget(cloudBudget instanceof Error ? undefined : cloudBudget);
+  return {
+    ...oneDrive!.status(),
+    savedThisMonthMb: Math.round(archivedThisMonth(catalog) / 1048576),
+    monthlyLimitMb: budget === undefined ? null : Math.round(budget / 1048576),
+  };
+};
 
 // The bucket the lease, the alerts and the Worker's notes live in (the same one the databases are backed up to).
 const bucket = s3FromEnv(env);
@@ -77,44 +87,52 @@ async function edgeReport(): Promise<Record<string, unknown> | undefined> {
 }
 
 const page = readFileSync(new URL('./cloud/pair.html', import.meta.url), 'utf8');
+/** What /status reports, and the management console's overview (src/admin/console.ts) shows. */
+async function statusReport(): Promise<Record<string, unknown>> {
+  const bridge = session
+    ? await bridgeStatus({ url: bridgeUrl, token: session.token, userId: session.userId }).catch((err: unknown) => ({ state: undefined, error: err instanceof Error ? err.message : String(err) }))
+    : { state: undefined, error: 'the homeserver is not ready yet' };
+  let problems: unknown = [];
+  try {
+    problems = JSON.parse(catalog.getState('health.problems') || '[]');
+  } catch {
+    // a half-written value is not worth failing the report for
+  }
+  const room = roomWatch?.report();
+  return {
+    phase: phase === 'setup' && room?.state === 'gone' ? 'room-missing' : phase,
+    botEnabled,
+    uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+    memoryMb: Math.round(process.memoryUsage.rss() / 1048576),
+    // The whole container: what it uses against its limit, who holds it, and the highest it has reached since the start.
+    memory: memoryWatch.report() ?? null,
+    node: process.version,
+    // The room the bot joined (given, or found by itself), or the one it was given while it waits.
+    room: room?.room ?? roomChosen() ?? null,
+    // The rooms that could not be joined (the chat was deleted and the bridge made another), and since when.
+    roomGone: room?.state === 'gone' ? { rooms: room.gone, since: room.since } : null,
+    bridge,
+    problems,
+    tracks: catalog.count(),
+    sentThisMonthMb: Math.round(sentThisMonth(catalog) / 1048576),
+    // The last few requests' timelines (and songs' and albums'), so a check doesn't need a log search.
+    timings: recentTimelines.list(),
+    ...(oneDrive ? { oneDrive: oneDriveReport() } : {}),
+    ...(bucket ? { edge: await edgeReport() } : {}),
+  };
+}
+// Signing in to the pages: the owner's own user name and password, kept in the database (src/admin/account.ts), or the ADMIN_TOKEN from Render.
+const signIn = new SignIn({ token: env.ADMIN_TOKEN, account: new AdminAccount({ state: catalog }), sessions: new Sessions({ state: catalog, binding: sessionBinding(env.ADMIN_TOKEN?.trim() || undefined) }), log });
+adminConsole.provide({ catalog, env, status: statusReport, startedAt, log, settings: liveSettings, signIn, ...(oneDrive ? { oneDrive: oneDriveReport } : {}) });
+
 const web = createCloudWeb({
   adminToken: env.ADMIN_TOKEN?.trim() || undefined,
   pageHtml: page,
+  admin: adminConsole,
+  signIn,
   testAlert: bucket ? () => outboxNotify({ s3: bucket, log })('Test alert', 'This is a test from npm run cloud:check. If you can read it, alerts work.') : undefined,
   oneDrive: oneDrive ? { status: oneDriveReport, start: async () => ({ ...(await oneDrive.startLogin()) }) } : undefined,
-  async status() {
-    const bridge = session
-      ? await bridgeStatus({ url: bridgeUrl, token: session.token, userId: session.userId }).catch((err: unknown) => ({ state: undefined, error: err instanceof Error ? err.message : String(err) }))
-      : { state: undefined, error: 'the homeserver is not ready yet' };
-    let problems: unknown = [];
-    try {
-      problems = JSON.parse(catalog.getState('health.problems') || '[]');
-    } catch {
-      // a half-written value is not worth failing the report for
-    }
-    const room = roomWatch?.report();
-    return {
-      phase: phase === 'setup' && room?.state === 'gone' ? 'room-missing' : phase,
-      botEnabled,
-      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
-      memoryMb: Math.round(process.memoryUsage.rss() / 1048576),
-      // The whole container: what it uses against its limit, who holds it, and the highest it has reached since the start.
-      memory: memoryWatch.report() ?? null,
-      node: process.version,
-      // The room the bot joined (given, or found by itself), or the one it was given while it waits.
-      room: room?.room ?? roomChosen() ?? null,
-      // The rooms that could not be joined (the chat was deleted and the bridge made another), and since when.
-      roomGone: room?.state === 'gone' ? { rooms: room.gone, since: room.since } : null,
-      bridge,
-      problems,
-      tracks: catalog.count(),
-      sentThisMonthMb: Math.round(sentThisMonth(catalog) / 1048576),
-      // The last few requests' timelines (and songs' and albums'), so a check doesn't need a log search.
-      timings: recentTimelines.list(),
-      ...(oneDrive ? { oneDrive: oneDriveReport() } : {}),
-      ...(bucket ? { edge: await edgeReport() } : {}),
-    };
-  },
+  status: statusReport,
   pair: {
     async send(text) {
       if (!session) throw new Error('The homeserver is not ready yet; try again in a minute.');
@@ -143,7 +161,7 @@ await new Promise<void>((resolve, reject) => {
   web.once('error', reject);
   web.listen(port, env.HOST?.trim() || '0.0.0.0', resolve);
 });
-log(`web door open on port ${(web.address() as AddressInfo).port}${env.ADMIN_TOKEN ? '' : ' (ADMIN_TOKEN is not set: only /healthz works)'}`);
+log(`web door open on port ${(web.address() as AddressInfo).port}${signIn.configured ? '' : ' (ADMIN_TOKEN is not set and there is no account: only /healthz works)'}`);
 
 // Starts looking now that the door is open: see the MemoryWatch declared above.
 memoryWatch.start();

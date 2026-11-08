@@ -59,6 +59,7 @@ try {
   // bot runs, with a note on the Mac if it goes a day without updating (the last good list is used meanwhile).
   const stopWatching = whitelist?.watch((error) => {
     if (error === undefined) health.ok('whitelist', "Fixed: Zemer's artist list is updating again.");
+    else if (whitelist.frozen) health.problem('whitelist', `Zemer's artist list now answers only its own app, so the bot keeps the last copy it saved. Artists Zemer adds wait for your word (text "pending"); text "block" and a name to hide anyone.`);
     else if (whitelist.ageMs > 24 * 60 * 60_000) health.problem('whitelist', `Zemer's artist list hasn't updated for a day (${error}). YouTube Music songs are being checked against the old list.`);
   });
   void whitelist?.warm().then(() => whitelist.loaded && log(`Zemer's artist list: ${whitelist.size.artists} artists, ${whitelist.size.blocked} blocked songs`));
@@ -90,6 +91,7 @@ try {
     onPlay: library.onPlay,
     browse: library.browse,
     follows: library.follows,
+    ...(whitelist ? { artistList: whitelist } : {}),
     // The chat's menus and where it is in them, kept across restarts.
     views: viewsIn(catalog),
     ...sources,

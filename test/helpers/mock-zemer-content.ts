@@ -20,6 +20,8 @@ export interface MockZemerContent extends Listening {
   requests: string[];
   /** Paths that answer HTTP 503. */
   failing: Set<string>;
+  /** Every path answers HTTP 403 with Cloudflare's "Attention Required" page, as the real server has since November 2026. */
+  refusing: boolean;
   /** Paths that answer only after this many milliseconds. */
   delayMs: number;
   /** The list answers with no artists in it. */
@@ -44,6 +46,7 @@ export async function startMockZemerContent(initial: MockArtist[]): Promise<Mock
     gate: 1_791_727_258_813,
     requests: [],
     failing: new Set(),
+    refusing: false,
     delayMs: 0,
     emptyList: false,
     publish(change) {
@@ -56,6 +59,7 @@ export async function startMockZemerContent(initial: MockArtist[]): Promise<Mock
       mock.gate = 1_791_727_258_813;
       mock.requests = [];
       mock.failing = new Set();
+      mock.refusing = false;
       mock.delayMs = 0;
       mock.emptyList = false;
     },
@@ -69,6 +73,10 @@ export async function startMockZemerContent(initial: MockArtist[]): Promise<Mock
       res.end(JSON.stringify(body));
     };
     if (mock.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, mock.delayMs));
+    if (mock.refusing) {
+      res.writeHead(403, { 'content-type': 'text/html; charset=UTF-8' });
+      return res.end('<!DOCTYPE html><title>Attention Required! | Cloudflare</title>');
+    }
     if (mock.failing.has(path)) return json(503, { error: 'unavailable' });
 
     if (path === '/whitelist/version') return json(200, { update: '9', updatedAt: new Date(mock.gate).toISOString(), updatedAtMs: mock.gate - 203_813, gate: mock.gate });

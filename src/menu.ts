@@ -73,7 +73,7 @@ export function closingLine(more: Category[], hasAlbums: boolean, hasSongs: bool
 }
 
 /** The whole help, as one message: every command (a message has to start with one), as far as this bot has them. */
-export function helpText(has: { browse: boolean; follows: boolean; finder: boolean; releases?: boolean }): string {
+export function helpText(has: { browse: boolean; follows: boolean; finder: boolean; releases?: boolean; artistList?: boolean }): string {
   return [
     'Start each message with a command:',
     'search <words> — artists, albums and songs',
@@ -95,5 +95,6 @@ export function helpText(has: { browse: boolean; follows: boolean; finder: boole
         : ['trending · new · chanukah · purim · wedding · vocal — music-table.com lists']
       : []),
     ...(has.follows ? ['follow / unfollow <artist> · following'] : []),
+    ...(has.artistList ? ['pending — artists waiting for your OK · allow / block <artist>'] : []),
   ].join('\n');
 }

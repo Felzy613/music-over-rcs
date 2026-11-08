@@ -13,6 +13,7 @@
     "start": "node --disable-warning=ExperimentalWarning src/main.ts",
     "simulate": "node --disable-warning=ExperimentalWarning src/simulate.ts",
     "simulate:web": "node --disable-warning=ExperimentalWarning src/simulate-web.ts",
+    "simulate:admin": "node --disable-warning=ExperimentalWarning scripts/admin-demo.ts",
     "catalog": "node --disable-warning=ExperimentalWarning scripts/catalog.ts",
     "invite-tester": "node scripts/invite-tester.ts",
     "send-test": "node scripts/send-test.ts",

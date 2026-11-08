@@ -509,7 +509,7 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
     }
     const albumIds = idsOf(page.album);
     const verdict = whitelist.verdict(albumId, albumIds);
-    if (!verdict.ok) throw new ZemerError(verdict.why === 'blocked' ? "Zemer's list blocks that album" : verdict.why === 'female' ? "it has a female singer, which I don't send" : "its artist isn't on Zemer's artist list");
+    if (!verdict.ok) throw new ZemerError(verdict.why === 'blocked' ? "Zemer's list blocks that album" : verdict.why === 'owner' ? 'you blocked its artist (text "allow" and their name to undo that)' : verdict.why === 'female' ? "it has a female singer, which I don't send" : "its artist isn't on Zemer's artist list");
     const songs: Array<{ number: number; track: Track; seconds?: number }> = [];
     for (const song of page.songs) {
       // A song credited to the album's artist (or to nobody) is the album artist's.

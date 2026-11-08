@@ -76,7 +76,13 @@ export async function openFrontDoor(options: FrontDoorOptions): Promise<FrontDoo
         port: options.upstream.port,
         method: req.method,
         path: req.url,
-        headers: { ...passable(req.headers, [...HOP_BY_HOP, 'expect', 'host']), host: `${upstreamHost}:${options.upstream.port}` },
+        // The visitor's own address goes along as X-Forwarded-Host (replacing any the visitor sent), so the bot's door can tell whether a
+        // request that names an Origin came from its own site.
+        headers: {
+          ...passable(req.headers, [...HOP_BY_HOP, 'expect', 'host', 'x-forwarded-host']),
+          host: `${upstreamHost}:${options.upstream.port}`,
+          ...(req.headers.host ? { 'x-forwarded-host': req.headers.host } : {}),
+        },
         timeout: idleMs,
       },
       (answer) => {

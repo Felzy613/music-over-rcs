@@ -6,6 +6,7 @@ import { AudioFetchError, type DownloadedAudio } from './audio-fetch.ts';
 import { ALL_WORDS, joinLists, type Bot } from './bot.ts';
 import type { DownloadedImage } from './image-fetch.ts';
 import type { Picture, PreparedPicture } from './library/images.ts';
+import { liveValue, type Live } from './live.ts';
 import { writeWithCrc32, zipBlob, zipEntryOverhead, zipName, zipSize } from './library/zip.ts';
 import { seconds, Timeline } from './timeline.ts';
 import type { AlbumSong, Chip, Incoming, NumberedChoice, Reply } from './types.ts';
@@ -233,13 +234,13 @@ export interface RunnerOptions {
   /** The oldest request still answered after a restart (default 2 hours): older ones are left alone. */
   catchUpMs?: number;
   /** Songs downloading at once, ahead of their turn (default 3). A small host holds each whole file in memory, so it sets fewer. */
-  downloadsAhead?: number;
+  downloadsAhead?: Live<number | undefined>;
   /**
    * An album's songs downloading at once (default 3). Each is written to disk as soon as it arrives, so this is about the source
    * and memory, not order; fewer start when `memoryRoom` says so, or the songs are big, and after YouTube has turned the relay
    * away once, the rest of the album goes one at a time.
    */
-  albumDownloads?: number;
+  albumDownloads?: Live<number | undefined>;
   /** Whether the host has memory to spare for another download now (the cloud host: under 380 of its 512 MB). Always, without it. */
   memoryRoom?: () => boolean;
   /**
@@ -250,9 +251,9 @@ export interface RunnerOptions {
   maxAnswersPerMinute?: number;
   /**
    * The least time between two songs, so the phone has sent one before the next arrives (three 👍 in a row, "all").
-   * A song's card waits with it. 0, the default, sends them as fast as they're ready.
+   * A song's card waits with it. 0, the default, sends them as fast as they're ready. May be a function, read each time a song is sent.
    */
-  songGapMs?: number;
+  songGapMs?: Live<number>;
   /** The most one file sent to the chat may weigh, in bytes; an album bigger than this goes as several ZIPs. Defaults to 100 MB. */
   maxFileBytes?: number;
   /** Where an album's songs wait on disk while its ZIP is made and sent (the system's temporary folder unless given). */
@@ -307,10 +308,10 @@ export function createRunner(options: RunnerOptions): Runner {
   const pollMs = options.pollMs ?? 1500;
   const typingRefreshMs = options.typingRefreshMs ?? 20_000;
   const maxAnswers = options.maxAnswersPerMinute ?? MAX_ANSWERS_PER_MINUTE;
-  const songGapMs = options.songGapMs ?? 0;
+  const songGapMs = (): number => liveValue(options.songGapMs ?? 0);
   const catchUpMs = options.catchUpMs ?? CATCH_UP_MS;
-  const downloadsAhead = Math.max(1, options.downloadsAhead ?? DOWNLOADS_AHEAD);
-  const albumDownloads = Math.max(1, options.albumDownloads ?? ALBUM_DOWNLOADS);
+  const downloadsAhead = (): number => Math.max(1, liveValue(options.downloadsAhead) ?? DOWNLOADS_AHEAD);
+  const albumDownloads = (): number => Math.max(1, liveValue(options.albumDownloads) ?? ALBUM_DOWNLOADS);
 
   const seen = new Set<string>();
   /** Messages that arrived while the bot was down, answered by the first tick. */
@@ -488,7 +489,7 @@ export function createRunner(options: RunnerOptions): Runner {
   /** Waits until the last song has had songGapMs to go out from the phone. */
   async function songTurn(): Promise<void> {
     if (lastSongAt === undefined) return;
-    const wait = lastSongAt + songGapMs - now();
+    const wait = lastSongAt + songGapMs() - now();
     if (wait <= 0) return;
     log(`next song in ${Math.ceil(wait / 1000)} s`);
     await pause(wait);
@@ -527,7 +528,7 @@ export function createRunner(options: RunnerOptions): Runner {
    */
   async function fetchAlbum<T>(songs: readonly AlbumSong[], missing: string[], use: (song: AlbumSong, file: DownloadedAudio, i: number) => Promise<T>): Promise<T[]> {
     const results: Array<T | undefined> = Array.from({ length: songs.length }, () => undefined);
-    let width = albumDownloads;
+    let width = albumDownloads();
     let biggest = SONG_BYTES_GUESS;
     let started = 0;
     let inFlight = 0;
@@ -592,7 +593,7 @@ export function createRunner(options: RunnerOptions): Runner {
     const ahead: Array<Promise<{ file: DownloadedAudio; ms: number; title: string } | undefined>> = [];
     let started = 0;
     const next = async (): Promise<DownloadedAudio | undefined> => {
-      while (started < album.songs.length && ahead.length < downloadsAhead) {
+      while (started < album.songs.length && ahead.length < downloadsAhead()) {
         const song = album.songs[started++]!;
         const start = now();
         ahead.push(
@@ -709,7 +710,7 @@ export function createRunner(options: RunnerOptions): Runner {
     let started = 0;
     let sentSongs = 0;
     const startDownloads = (): void => {
-      while (started < songs.length && started - sentSongs < downloadsAhead) {
+      while (started < songs.length && started - sentSongs < downloadsAhead()) {
         const song = songs[started++]!;
         const start = now();
         const file = options.fetchAudio(song.url, song.title, song.after ? { after: song.after } : undefined).then((got) => {

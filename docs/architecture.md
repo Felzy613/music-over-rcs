@@ -66,12 +66,14 @@ src/matrix-main.ts      starts the bot on the bridge route: assembles everything
 src/beeper-main.ts      starts the Beeper route   (npm run beeper)
 src/main.ts, server.ts  the RCS for Business webhook server (npm start)
 src/simulate*.ts        the terminal and browser simulators
-scripts/                command-line tools: catalog, library, music-table, cloud-check, beeper-*, send-test, invite-tester
+scripts/                command-line tools: catalog, library, music-table, cloud-check, beeper-*, send-test, invite-tester, admin-demo (the console on made-up data)
 src/cloud-main.ts      the cloud host's entry: the web door (/healthz, /ping, /status, /pair, /admin/*), signing in, then matrix-main.ts
 src/cloud/              the host's parts: boot (the start-up sequence), supervise (keeps the processes running; the lease client), lease and s3 (the lease in R2), provision (Synapse's and the bridge's settings), front-door (the web port, open from the first moment), web, pairing, room (what to do when the chat's room is gone), memory (who holds the container's memory), youtube-relay (YouTube songs by way of the Worker, through the bucket), check
 src/alert.ts            problems left as files in the bucket's alerts/ folder, for the Worker to mail
 src/archive/            saving each sent song to OneDrive (onedrive.ts: Microsoft's device-code sign-in and upload sessions; archiver.ts: the queue, the memory guard, the monthly allowance)
 src/startup-message.ts  the one hello in the chat when the cloud bot first comes up
+src/admin/              the owner's management console, served by the cloud host's web door under /admin/ (docs/admin.md): console.ts (router, views, changes), settings.ts (every setting, and the six that change live), actions.ts (one at a time, cooldowns), audit.ts, log-ring.ts (the last 500 log lines, masked), site/ (the page: plain HTML, CSS and JS)
+src/live.ts             a value that may be a function read each time (the live settings)
 deploy/cloud/           entrypoint.ts (the container's PID 1) and litestream.yml (the database backups)
 cloudflare/             the Worker: every five minutes it checks the host, keeps it awake and mails the alerts
 Dockerfile, render.yaml the image (Synapse, the bridge, Litestream, Node) and the Render service

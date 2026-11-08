@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
+<title>Sign in · Music over RCS</title>
+<link rel="stylesheet" href="/login.css">
+</head>
+<body>
+<main>
+  <h1>Music over RCS</h1>
+  <p class="muted">Sign in to the console.</p>
+  <form id="form" autocomplete="on">
+    <label for="user">User name</label>
+    <input id="user" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <p id="error" class="error" role="alert" hidden></p>
+    <button id="go" type="submit">Sign in</button>
+  </form>
+  <p class="muted small">Haven't set your own yet? Use any user name and the host's <code>ADMIN_TOKEN</code> as the password, then make your own on the Account page.</p>
+  <noscript><p class="error">Signing in needs JavaScript.</p></noscript>
+</main>
+<script src="/login.js"></script>
+</body>
+</html>

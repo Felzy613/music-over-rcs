@@ -1,6 +1,6 @@
 # Configuration
 
-**The live bot's settings are Render's environment variables** ([How it runs](cloud.md#settings) lists the ones that matter there); changing one in Render restarts the service. The rest of this page lists every setting the code reads. A `.env` file in the project folder (copy `.env.example`) is only for running something on your own computer: the simulator, the tests, or the Beeper and RCS for Business routes. Real environment variables win over the file. `.env` holds access tokens, is in `.gitignore`, is created readable only by you, and should never be shared.
+**The live bot's settings are Render's environment variables** ([How it runs](cloud.md#settings) lists the ones that matter there); changing one in Render restarts the service. Six of them can also be changed without a restart from the [management console](admin.md#the-settings) (`DIGEST_TIME`, `QUIET_HOURS`, `SONG_GAP_SECONDS`, `ALBUM_DOWNLOADS`, `DOWNLOADS_AHEAD`, `ONEDRIVE_MAX_MB_PER_MONTH`): what it sets sits over the environment until you go back to it there, and the console lists every setting below with where its value comes from. The rest of this page lists every setting the code reads. A `.env` file in the project folder (copy `.env.example`) is only for running something on your own computer: the simulator, the tests, or the Beeper and RCS for Business routes. Real environment variables win over the file. `.env` holds access tokens, is in `.gitignore`, is created readable only by you, and should never be shared.
 
 ## The bridge route (Matrix)
 

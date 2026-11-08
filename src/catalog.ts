@@ -460,6 +460,50 @@ export class Catalog {
     return Number(this.#db.prepare('DELETE FROM tracks WHERE id = ?').run(id).changes) > 0;
   }
 
+  // --- read-only views for the admin console ---
+
+  /** How many rows each table holds (follows: only those being followed). */
+  tableCounts(): Record<string, number> {
+    const one = (sql: string): number => Number(this.#db.prepare(sql).get()?.n) || 0;
+    return {
+      tracks: one('SELECT COUNT(*) AS n FROM tracks'),
+      artists: one('SELECT COUNT(*) AS n FROM artists'),
+      sitePosts: one('SELECT COUNT(*) AS n FROM site_posts'),
+      plays: one('SELECT COUNT(*) AS n FROM plays'),
+      follows: one('SELECT COUNT(*) AS n FROM follows WHERE following = 1'),
+      audioCache: one('SELECT COUNT(*) AS n FROM audio_cache'),
+      zemerReleases: one('SELECT COUNT(*) AS n FROM zemer_releases'),
+      views: one('SELECT COUNT(*) AS n FROM views'),
+      messageLinks: one('SELECT COUNT(*) AS n FROM message_links'),
+      state: one('SELECT COUNT(*) AS n FROM state'),
+    };
+  }
+
+  /** The songs added last, newest first, with when. */
+  recentTracks(limit: number): Array<Track & { addedAt: string }> {
+    return this.#db
+      .prepare(`SELECT ${TRACK_COLUMNS}, added_at FROM tracks ORDER BY id DESC LIMIT ?`)
+      .all(Math.max(1, Math.min(200, limit)))
+      .map((row) => ({ ...toTrack(row), addedAt: String(row.added_at) }));
+  }
+
+  /** The chat's newest menus and pages (views), newest first: what each is of, how many lines it has shown, when it was made and last used. */
+  recentViews(limit: number): Array<{ id: number; parent: number | null; kind: string; key: string; shown: number; at: string; usedAt: string }> {
+    return this.#db
+      .prepare('SELECT id, parent, kind, key, shown, at, used_at FROM views ORDER BY id DESC LIMIT ?')
+      .all(Math.max(1, Math.min(100, limit)))
+      .map((row) => {
+        let shown = 0;
+        try {
+          const lines: unknown = JSON.parse(String(row.shown));
+          shown = Array.isArray(lines) ? lines.length : 0;
+        } catch {
+          // unreadable: counted as none
+        }
+        return { id: Number(row.id), parent: row.parent === null || row.parent === undefined ? null : Number(row.parent), kind: String(row.kind), key: String(row.key).slice(0, 200), shown, at: String(row.at), usedAt: String(row.used_at) };
+      });
+  }
+
   // --- plays: what you ask for, so the most played songs can be kept ready ---
 
   recordPlay(trackId: number, at: Date = new Date()): void {

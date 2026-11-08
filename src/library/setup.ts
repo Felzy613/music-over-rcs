@@ -12,6 +12,7 @@ import { catalogFollows, type Follows } from './follows.ts';
 import { createImageFetcher } from '../image-fetch.ts';
 import type { CoverPicture } from './id3.ts';
 import { createPictures, type Picture, type PreparedPicture } from './images.ts';
+import { liveValue, type Live } from '../live.ts';
 import { LibraryJobs, type DailyTime } from './jobs.ts';
 import { catalogNaming, namedFetch } from './naming.ts';
 import { SongArchive, type Drive } from '../archive/archiver.ts';
@@ -29,7 +30,7 @@ export interface LibraryOptions {
   };
   /** The catalog file; the kept songs go in an "audio-cache" folder beside it. */
   dbPath: string;
-  digestAt: DailyTime | undefined;
+  digestAt: Live<DailyTime | undefined>;
   /** Disk space for songs kept ready, in MB: Infinity for no limit, 0 for none kept. */
   prefetchMb: number;
   /** A folder (on an external drive, say) the kept songs move into whenever it's there. */
@@ -37,7 +38,7 @@ export interface LibraryOptions {
   /** Told how that folder is doing: nothing when fine, or what's wrong. */
   onArchive?: (problem: string | undefined) => void;
   /** No alerts for new songs by followed artists in these hours. */
-  quiet?: { from: DailyTime; to: DailyTime } | undefined;
+  quiet?: Live<{ from: DailyTime; to: DailyTime } | undefined>;
   /** Told whether the site answers (for alerts on the Mac). */
   onSite?: (ok: boolean, problem?: string) => void;
   /** Zemer's new releases: "new" lists them with the site's, and the daily message and the alerts carry them. */
@@ -47,7 +48,7 @@ export interface LibraryOptions {
   /** A cloud folder (OneDrive) every song sent is also saved to, in the background, sorted and tagged. */
   cloudFolder?: Drive | undefined;
   /** The most to save to it in a calendar month, in bytes (it shares the host's outbound traffic with the songs sent). Undefined for no limit. */
-  cloudMonthlyBytes?: number | undefined;
+  cloudMonthlyBytes?: Live<number | undefined>;
   /** Where the host's memory stands, for holding back a song that would not fit (see SongArchive). Undefined for no limit. */
   cloudMemory?: (() => { limit: number; used: number } | undefined) | undefined;
   /** Whether a song or an album is on its way to the chat: a copy to the cloud folder waits until it isn't. */
@@ -117,7 +118,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
     log,
   });
   let jobs: LibraryJobs | undefined;
-  const at = options.digestAt;
+  const at = liveValue(options.digestAt);
   const parts = [
     musicTable ? (at ? `daily new-music message at ${String(at.hour).padStart(2, '0')}:${String(at.minute).padStart(2, '0')}` : 'daily message off') : '',
     options.releases ? "Zemer's new releases in the lists, the daily message and the alerts" : '',
@@ -147,7 +148,7 @@ export function setUpLibrary(options: LibraryOptions): Library {
         musicTable,
         catalog,
         announce,
-        digestAt: at,
+        digestAt: options.digestAt,
         cache,
         fetchAudio: audio.fetchAudio,
         log,

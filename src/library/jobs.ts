@@ -5,6 +5,7 @@ import { releaseKey } from '../ranking.ts';
 import type { MusicTable } from '../sources/music-table.ts';
 import { splitTitle } from '../sources/titles.ts';
 import type { NewReleases } from '../sources/zemer-releases.ts';
+import { liveValue, type Live } from '../live.ts';
 import type { Reply } from '../types.ts';
 import { prefetch, songsToKeep, type AudioCache } from './audio-cache.ts';
 import type { Categories } from './categories.ts';
@@ -23,7 +24,7 @@ export interface LibraryJobsOptions {
   /** Sends the daily message into the chat (the runner's `announce`). */
   announce(replies: Reply[]): Promise<void>;
   /** When to send the daily new-music message, in this Mac's time. Without it, none is sent. */
-  digestAt?: DailyTime | undefined;
+  digestAt?: Live<DailyTime | undefined>;
   /** Where songs are kept ready. Without it, nothing is downloaded ahead of time. */
   cache?: AudioCache | undefined;
   /** How many songs to keep ready. */
@@ -39,7 +40,7 @@ export interface LibraryJobsOptions {
   /** Category ids (for marking vocal songs in the daily message during Sefirah and the Three Weeks). */
   categories?: Categories | undefined;
   /** No "new from an artist you follow" alerts in these hours (they wait for the morning). */
-  quiet?: { from: DailyTime; to: DailyTime } | undefined;
+  quiet?: Live<{ from: DailyTime; to: DailyTime } | undefined>;
   /** How often to look for new posts while you follow anyone: the RSS feed, one small request. */
   watchEveryMs?: number;
   /** Zemer's new releases, which go in the daily message and the alerts beside music-table.com's. Without it, only the site's do. */
@@ -84,6 +85,15 @@ export const STATE = {
 export const localDay = (date: Date): string =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
+/** Whether `now` falls in the quiet hours (which may run past midnight); never when there are none. */
+export function inQuietHours(quiet: { from: DailyTime; to: DailyTime } | undefined, now: Date): boolean {
+  if (!quiet) return false;
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  const from = quiet.from.hour * 60 + quiet.from.minute;
+  const to = quiet.to.hour * 60 + quiet.to.minute;
+  return from <= to ? minutes >= from && minutes < to : minutes >= from || minutes < to;
+}
+
 /** Reads "9:00", "09:30" or "21:15". "off" means no daily message. Anything else is a mistake worth reporting. */
 export function parseDailyTime(raw: string | undefined, fallback = '09:00'): DailyTime | undefined | Error {
   const text = (raw?.trim() || fallback).toLowerCase();
@@ -117,6 +127,8 @@ export class LibraryJobs {
   #alertFailing = false;
   /** Whether Zemer's feed is failing, so that is logged once, and again when it is back. */
   #releasesFailing = false;
+  /** What the background work last did, for the admin console (in memory only: nothing is written to the database for it). */
+  #lastRound: { at: number; error: string | undefined } | undefined;
 
   constructor(options: LibraryJobsOptions) {
     this.#o = options;
@@ -162,8 +174,29 @@ export class LibraryJobs {
       if (this.#digestDue()) await this.sendDigest();
       await this.alertFollowed();
       if (!this.#o.catalog.getState(STATE.scanDone)) await this.scanStep();
+      this.#lastRound = { at: this.#now().getTime(), error: undefined };
     } catch (err) {
+      this.#lastRound = { at: this.#now().getTime(), error: err instanceof Error ? err.message : String(err) };
       this.#log(`background work failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Runs `work` when no round is running and keeps the scheduled rounds out of its way until it is done, so something the owner
+   * starts from the admin console (a sync, the daily message) never overlaps the minute-by-minute round doing the same thing.
+   */
+  async exclusive<T>(work: () => Promise<T>): Promise<T> {
+    while (this.#running) await this.#running.catch(() => {});
+    let finish!: () => void;
+    const hold = new Promise<void>((resolve) => (finish = resolve));
+    const mine = hold.finally(() => {
+      if (this.#running === mine) this.#running = undefined;
+    });
+    this.#running = mine;
+    try {
+      return await work();
+    } finally {
+      finish();
     }
   }
 
@@ -230,10 +263,10 @@ export class LibraryJobs {
    * changed costs next to nothing). A feed that can't be had is logged once, and told only when it stays away for hours:
    * music-table.com carries on alone meanwhile.
    */
-  async syncReleases(): Promise<void> {
+  async syncReleases(maxAgeMs?: number): Promise<void> {
     const releases = this.#o.releases;
     if (!releases) return;
-    const result = await releases.sync(this.#o.releasesEveryMs ?? 30 * 60_000);
+    const result = await releases.sync(maxAgeMs ?? this.#o.releasesEveryMs ?? 30 * 60_000);
     if (result.ok) {
       if (this.#releasesFailing) this.#log("Zemer's new releases are being read again");
       this.#releasesFailing = false;
@@ -322,12 +355,7 @@ export class LibraryJobs {
   }
 
   #inQuietHours(now: Date): boolean {
-    const quiet = this.#o.quiet;
-    if (!quiet) return false;
-    const minutes = now.getHours() * 60 + now.getMinutes();
-    const from = quiet.from.hour * 60 + quiet.from.minute;
-    const to = quiet.to.hour * 60 + quiet.to.minute;
-    return from <= to ? minutes >= from && minutes < to : minutes >= from || minutes < to;
+    return inQuietHours(liveValue(this.#o.quiet), now);
   }
 
   /**
@@ -466,13 +494,61 @@ export class LibraryJobs {
     };
   }
 
+  /** What the background work is doing and when it last did what, for the admin console. Reads the catalog's small-facts table; writes nothing. */
+  report(): {
+    started: boolean;
+    busy: boolean;
+    lastRoundAt: string | null;
+    lastRoundError: string | null;
+    lastSync: string | null;
+    syncEveryMs: number;
+    nextSyncDue: string | null;
+    siteFailures: number;
+    scan: { done: string | null; offset: number };
+    digest: { at: string | null; lastDate: string | null; lastSentAt: string | null; retryAfter: string | null };
+    quiet: string | null;
+    inQuietHours: boolean;
+    alertFailing: boolean;
+    releasesFailing: boolean;
+    keptReady: boolean;
+    cache: { files: number; bytes: number } | null;
+    following: number;
+  } {
+    const { catalog } = this.#o;
+    const state = (key: string): string | null => catalog.getState(key) ?? null;
+    const lastSync = Date.parse(catalog.getState(STATE.lastSync) ?? '');
+    const syncEveryMs = this.#o.syncEveryMs ?? 3 * HOUR_MS;
+    const at = liveValue(this.#o.digestAt);
+    const quiet = liveValue(this.#o.quiet);
+    const clock = (time: DailyTime): string => `${String(time.hour).padStart(2, '0')}:${String(time.minute).padStart(2, '0')}`;
+    return {
+      started: this.#timers.length > 0,
+      busy: this.#running !== undefined,
+      lastRoundAt: this.#lastRound ? new Date(this.#lastRound.at).toISOString() : null,
+      lastRoundError: this.#lastRound?.error ?? null,
+      lastSync: state(STATE.lastSync),
+      syncEveryMs,
+      nextSyncDue: Number.isNaN(lastSync) ? null : new Date(lastSync + syncEveryMs).toISOString(),
+      siteFailures: this.#siteFailures,
+      scan: { done: state(STATE.scanDone), offset: Number(catalog.getState(STATE.scanOffset) ?? 0) || 0 },
+      digest: { at: at ? clock(at) : null, lastDate: state(STATE.digestDate), lastSentAt: state(STATE.digestSentAt), retryAfter: state(STATE.digestRetryAfter) },
+      quiet: quiet ? `${clock(quiet.from)}-${clock(quiet.to)}` : null,
+      inQuietHours: inQuietHours(quiet, this.#now()),
+      alertFailing: this.#alertFailing,
+      releasesFailing: this.#releasesFailing,
+      keptReady: this.#keptReady,
+      cache: this.#o.cache ? this.#o.cache.stats() : null,
+      following: catalog.followed().length,
+    };
+  }
+
   #syncDue(): boolean {
     const last = Date.parse(this.#o.catalog.getState(STATE.lastSync) ?? '');
     return Number.isNaN(last) || this.#now().getTime() - last >= (this.#o.syncEveryMs ?? 3 * HOUR_MS);
   }
 
   #digestDue(): boolean {
-    const at = this.#o.digestAt;
+    const at = liveValue(this.#o.digestAt);
     if (!at) return false;
     const { catalog } = this.#o;
     const now = this.#now();

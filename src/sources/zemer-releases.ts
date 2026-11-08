@@ -154,6 +154,34 @@ export function zemerReleasesFromEnv(env: NodeJS.ProcessEnv = process.env, optio
   return new ZemerReleases(url ? { ...options, url } : options);
 }
 
+/** A release in the feed that the artist list did not let through, and why (the admin console shows these). */
+export interface HeldRelease {
+  id: string;
+  title: string;
+  artist: string;
+  artistId: string;
+  releasedAt: string;
+  songs: number;
+  /** In plain words. */
+  why: string;
+  /** Whether the artist is waiting for the owner's word. */
+  waiting: boolean;
+}
+
+/** What the last read of the feed found, for the admin console. Kept in memory only. */
+export interface ReleasesStatus {
+  /** ISO time of the last read, or null when there has been none this run. */
+  lastAttemptAt: string | null;
+  lastOk: boolean | null;
+  problem: string | null;
+  /** ISO time the feed started failing, while it is. */
+  failingSince: string | null;
+  inFeed: number;
+  passed: number;
+  fresh: number;
+  held: HeldRelease[];
+}
+
 /** How a sync went. A failure says since when the feed has been failing, so a lasting one can be told from a blip. */
 export type ReleasesSync = { ok: true; seen: number; fresh: NewRelease[] } | { ok: false; problem: string; since: Date };
 
@@ -166,6 +194,8 @@ export interface NewReleases {
   sync(maxAgeMs?: number): Promise<ReleasesSync>;
   /** Every release the artist list lets through now, newest first. */
   list(): NewRelease[];
+  /** What the last read of the feed found, and which of its releases the artist list held back and why. */
+  status(): ReleasesStatus;
   /** The releases that came out after `since` and have not been in a daily message, newest first. */
   toAnnounce(since: Date): NewRelease[];
   markAnnounced(ids: string[], at: Date): void;
@@ -194,6 +224,27 @@ export function createNewReleases(deps: NewReleasesDeps): NewReleases {
   let last: ReleasesSync | undefined;
   let flight: Promise<ReleasesSync> | undefined;
   let told = false;
+  const status: ReleasesStatus = { lastAttemptAt: null, lastOk: null, problem: null, failingSince: null, inFeed: 0, passed: 0, fresh: 0, held: [] };
+  const MAX_HELD = 100;
+
+  /** Why the artist list holds a release back, in words. */
+  const heldBecause = (release: FeedRelease): { why: string; waiting: boolean } => {
+    const first = whitelist.verdict(release.id, [release.artistId]);
+    const verdict = first.ok && release.videoId ? whitelist.verdict(release.videoId, [release.artistId]) : first;
+    if (verdict.ok) return { why: 'held back', waiting: false };
+    switch (verdict.why) {
+      case 'blocked':
+        return { why: "Zemer's list blocks it", waiting: false };
+      case 'female':
+        return { why: "Zemer's list flags the artist as a woman", waiting: false };
+      case 'owner':
+        return { why: 'you blocked the artist', waiting: false };
+      default:
+        return whitelist.pending().some((artist) => artist.id === release.artistId)
+          ? { why: "the artist isn't on the saved list: waiting for your word", waiting: true }
+          : { why: "the artist isn't on the saved list", waiting: false };
+    }
+  };
 
   /** Whether the artist list lets a release through: its artist is on it, not a woman, and neither the album nor its single song is blocked. */
   const allows = (release: FeedRelease): boolean => whitelist.allows(release.id, [release.artistId]) && (!release.videoId || whitelist.allows(release.videoId, [release.artistId]));
@@ -205,19 +256,31 @@ export function createNewReleases(deps: NewReleasesDeps): NewReleases {
       const at = now();
       const fresh: NewRelease[] = [];
       let seen = 0;
+      let waiting = 0;
+      const held: HeldRelease[] = [];
       for (const release of latest) {
-        if (!allows(release)) continue;
+        if (!allows(release)) {
+          // With Zemer's list frozen (it turned the bot away) an artist it doesn't know may be one Zemer added since: the
+          // feed shows who is on Zemer's list but not who is a woman, so the owner is asked, and the release stays out until then.
+          if (!whitelist.artist(release.artistId) && whitelist.consider(release.artistId, release.artist)) waiting += 1;
+          if (held.length < MAX_HELD) held.push({ id: release.id, title: release.title, artist: release.artist, artistId: release.artistId, releasedAt: release.releasedAt, songs: release.songs, ...heldBecause(release) });
+          continue;
+        }
         seen += 1;
         if (catalog.saveRelease(release, at).isNew) fresh.push({ ...release, firstSeenAt: at.toISOString() });
       }
+      if (waiting > 0) log(`${waiting} artist${waiting === 1 ? '' : 's'} in Zemer's feed ${waiting === 1 ? 'is' : 'are'} not on the frozen artist list and wait${waiting === 1 ? 's' : ''} for the owner's word`);
       catalog.pruneReleases(new Date(at.getTime() - KEEP_DAYS * DAY_MS));
       if (fresh.length > 0 || !told) log(`read Zemer's new releases: ${latest.length} in the feed, ${seen} pass Zemer's list, ${fresh.length} new here`);
       told = true;
+      Object.assign(status, { lastAttemptAt: at.toISOString(), lastOk: true, problem: null, failingSince: null, inFeed: latest.length, passed: seen, fresh: fresh.length, held });
       return { ok: true, seen, fresh };
     } catch (err) {
       const problem = err instanceof SourceError ? err.message : `something went wrong reading Zemer's new releases (${err instanceof Error ? err.message : String(err)})`;
       if (!(err instanceof SourceError)) log(problem);
-      return { ok: false, problem, since: last && !last.ok ? last.since : now() };
+      const since = last && !last.ok ? last.since : now();
+      Object.assign(status, { lastAttemptAt: now().toISOString(), lastOk: false, problem, failingSince: since.toISOString() });
+      return { ok: false, problem, since };
     }
   }
 
@@ -241,6 +304,7 @@ export function createNewReleases(deps: NewReleasesDeps): NewReleases {
   return {
     sync,
     list,
+    status: () => ({ ...status, held: [...status.held] }),
     toAnnounce: (since) => list().filter((release) => release.announcedAt === undefined && Date.parse(release.releasedAt) > since.getTime()),
     markAnnounced: (ids, at) => catalog.markReleasesAnnounced(ids, at),
     toAlert(since) {

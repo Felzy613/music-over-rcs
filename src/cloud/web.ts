@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { isSameSite } from '../admin/same-site.ts';
 
 /** One thing the bridge's bot said while pairing. */
 export interface PairLine {
@@ -34,6 +35,20 @@ export interface CloudDeps {
   testAlert?: (() => Promise<void>) | undefined;
   /** The /pair page. */
   pageHtml: string;
+  /** The management console under /admin/ (src/admin/console.ts), registered with what the bot has once it is up. */
+  admin?: { handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> } | undefined;
+  /**
+   * Signing in with a page (src/admin/sign-in.ts): /login, a session cookie, the owner's own user name and password. With it, a browser that
+   * is not signed in is sent to the sign-in page instead of being asked for a Basic password, and the ADMIN_TOKEN still works as a header.
+   */
+  signIn?:
+    | {
+        configured: boolean;
+        authorized(req: IncomingMessage): boolean;
+        handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
+        redirectToLogin(req: IncomingMessage, res: ServerResponse): boolean;
+      }
+    | undefined;
 }
 
 const MAX_JSON_BYTES = 64 * 1024;
@@ -111,12 +126,29 @@ export function createCloudWeb(deps: CloudDeps): Server {
         res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
         return void res.end(req.method === 'HEAD' ? undefined : 'pong (this answers 500 on purpose, for a monitor that expects it)');
       }
-      if (!deps.adminToken) return send(res, 503, { error: 'ADMIN_TOKEN is not set, so nothing but /healthz and /ping is available' });
-      const given = passwordIn(req.headers.authorization);
-      if (given === undefined || !sameSecret(given, deps.adminToken)) {
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        res.writeHead(401, { 'www-authenticate': `Basic realm="${REALM}", charset="UTF-8"`, 'content-type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
-        return void res.end(JSON.stringify({ error: 'unauthorized' }));
+      if (deps.signIn) {
+        // The sign-in page, its files, signing in and out: open, and doing their own checks.
+        if (await deps.signIn.handle(req, res)) return;
+        if (!deps.signIn.configured) return send(res, 503, { error: 'Nothing can sign in: ADMIN_TOKEN is not set and no account has been made, so nothing but /healthz and /ping is available' });
+        if (!deps.signIn.authorized(req)) {
+          // A browser goes to the sign-in page; anything else is told how to sign in. No Basic prompt: the page is the way in.
+          if (req.headers.authorization) await new Promise((resolve) => setTimeout(resolve, 300));
+          if (deps.signIn.redirectToLogin(req, res)) return;
+          res.writeHead(401, { 'www-authenticate': `Bearer realm="${REALM}"`, 'content-type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
+          return void res.end(JSON.stringify({ error: 'unauthorized: sign in at /login, or send the admin password as a Bearer token' }));
+        }
+        // Anything that changes something and relies on the session cookie (no Authorization header, which a page on another site could not add)
+        // must come from this site: the older POST routes below (/pair/send, /setup/room, /onedrive/start, the catalog import) have no header check of
+        // their own, and the cookie's SameSite=Lax alone would not stop a request from a sibling site on a shared domain.
+        if (!req.headers.authorization && req.method !== 'GET' && req.method !== 'HEAD' && !isSameSite(req.headers)) return send(res, 403, { error: 'Refused: the request came from another site.' });
+      } else {
+        if (!deps.adminToken) return send(res, 503, { error: 'ADMIN_TOKEN is not set, so nothing but /healthz and /ping is available' });
+        const given = passwordIn(req.headers.authorization);
+        if (given === undefined || !sameSecret(given, deps.adminToken)) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          res.writeHead(401, { 'www-authenticate': `Basic realm="${REALM}", charset="UTF-8"`, 'content-type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
+          return void res.end(JSON.stringify({ error: 'unauthorized' }));
+        }
       }
 
       if (req.method === 'GET' && path === '/status') return send(res, 200, await deps.status());
@@ -172,6 +204,8 @@ export function createCloudWeb(deps: CloudDeps): Server {
           await rm(dir, { recursive: true, force: true });
         }
       }
+      // The management console: its pages and /admin/api/…, behind the same password as everything above.
+      if (deps.admin && (await deps.admin.handle(req, res))) return;
       send(res, 404, { error: 'not found' });
     } catch (err) {
       if (res.headersSent) return void res.end();

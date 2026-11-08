@@ -32,6 +32,8 @@ const API_PATH = '/youtubei/v1/';
 const SONG_FILTER = 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D';
 /** Zemer's SearchFilter.FILTER_ALBUM: albums, EPs and singles (anything with an album page). */
 const ALBUM_FILTER = 'EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D';
+/** Zemer's SearchFilter.FILTER_ARTIST: only artists (the admin console's way of finding who to allow). */
+const ARTIST_FILTER = 'EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D';
 const VIDEO_ID = /^[\w-]{11}$/;
 /** What the address of an album looks like (the id of its page). */
 const ALBUM_ID = /^MPREb_[\w-]{4,40}$/;
@@ -191,8 +193,8 @@ function largerCover(url: string): string {
   return url.replace(/=w\d+-h\d+(?=[^/]*$)/, '=w544-h544');
 }
 
-/** One row of a songs search: the title, then "artists • album • 5:41". */
-function parseSong(item: unknown): YouTubeHit | undefined {
+/** One row of a songs search: the title, then "artists • album • 5:41". `names` is who each credited channel id is, as the credit writes them. */
+function parseSongRow(item: unknown): { hit: YouTubeHit; names: Record<string, string> } | undefined {
   const videoId =
     str(at(item, 'playlistItemData', 'videoId')) ??
     str(at(item, 'overlay', 'musicItemThumbnailOverlayRenderer', 'content', 'musicPlayButtonRenderer', 'playNavigationEndpoint', 'watchEndpoint', 'videoId'));
@@ -220,35 +222,101 @@ function parseSong(item: unknown): YouTubeHit | undefined {
     written.shift();
   }
   const artist = written[0] && seconds(written[0]) === undefined ? written[0] : '';
-  const artistIds = artist ? [...new Set((groups[0] ?? []).flatMap((run) => (run.id && run.page !== 'MUSIC_PAGE_TYPE_ALBUM' ? [run.id] : [])))] : [];
+  const credited = artist ? (groups[0] ?? []).filter((run) => run.id && run.page !== 'MUSIC_PAGE_TYPE_ALBUM') : [];
+  const artistIds = [...new Set(credited.map((run) => run.id!))];
+  const artistNames = Object.fromEntries(credited.filter((run) => run.text.trim()).map((run) => [run.id!, run.text.trim()]));
   const album = groups.flat().find((run) => run.page === 'MUSIC_PAGE_TYPE_ALBUM')?.text;
   const durationSeconds = written.map(seconds).findLast((value) => value !== undefined);
   const thumbnails = list(at(item, 'thumbnail', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails'));
   const cover = str(at(thumbnails[thumbnails.length - 1], 'url'));
 
   return {
-    videoId,
-    title,
-    artist,
-    artistIds,
-    ...(album ? { album } : {}),
-    ...(durationSeconds !== undefined ? { durationSeconds } : {}),
-    ...(cover ? { cover: largerCover(cover) } : {}),
+    hit: {
+      videoId,
+      title,
+      artist,
+      artistIds,
+      ...(album ? { album } : {}),
+      ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+      ...(cover ? { cover: largerCover(cover) } : {}),
+    },
+    names: artistNames,
   };
 }
 
-export function parseSearch(response: unknown): YouTubeHit[] {
+/** A song found by a search, and who is behind each of its credited channel ids. */
+export interface YouTubeSongRow {
+  hit: YouTubeHit;
+  names: Record<string, string>;
+}
+
+export function parseSearchRows(response: unknown): YouTubeSongRow[] {
   const sections = list(at(response, 'contents', 'tabbedSearchResultsRenderer', 'tabs', 0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents'));
   const seen = new Set<string>();
-  const hits: YouTubeHit[] = [];
+  const hits: YouTubeSongRow[] = [];
   for (const section of sections) {
     const rows = [...list(at(section, 'musicShelfRenderer', 'contents')), ...list(at(section, 'itemSectionRenderer', 'contents'))];
     for (const row of rows) {
-      const hit = parseSong(at(row, 'musicResponsiveListItemRenderer'));
-      if (hit && !seen.has(hit.videoId)) {
-        seen.add(hit.videoId);
-        hits.push(hit);
+      const parsed = parseSongRow(at(row, 'musicResponsiveListItemRenderer'));
+      if (parsed && !seen.has(parsed.hit.videoId)) {
+        seen.add(parsed.hit.videoId);
+        hits.push(parsed);
       }
+    }
+  }
+  return hits;
+}
+
+export function parseSearch(response: unknown): YouTubeHit[] {
+  return parseSearchRows(response).map((row) => row.hit);
+}
+
+/** An artist in a search's results (their channel, which Zemer's list is keyed by). */
+export interface YouTubeArtistHit {
+  /** The artist's channel id ("UC…"). */
+  id: string;
+  name: string;
+  /** Their picture, from one of Google's picture hosts. */
+  picture?: string;
+  /** What the row says under the name ("Artist • 1.2M subscribers"). */
+  detail?: string;
+}
+
+/** Pictures are shown only from Google's own picture hosts: what a search returns is not ours. */
+const PICTURE_HOSTS = ['googleusercontent.com', 'ggpht.com', 'ytimg.com', 'gstatic.com'];
+export function safePicture(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:' && PICTURE_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`)) ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The rows of an artists search: a channel id, a name and a picture each. */
+export function parseArtistSearch(response: unknown): YouTubeArtistHit[] {
+  const sections = list(at(response, 'contents', 'tabbedSearchResultsRenderer', 'tabs', 0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents'));
+  const seen = new Set<string>();
+  const hits: YouTubeArtistHit[] = [];
+  for (const section of sections) {
+    const rows = [...list(at(section, 'musicShelfRenderer', 'contents')), ...list(at(section, 'itemSectionRenderer', 'contents'))];
+    for (const row of rows) {
+      const item = at(row, 'musicResponsiveListItemRenderer');
+      const id = str(at(item, 'navigationEndpoint', 'browseEndpoint', 'browseId'));
+      if (!id || !/^UC[\w-]{10,60}$/.test(id) || seen.has(id)) continue;
+      const columns = list(at(item, 'flexColumns')).map((column) =>
+        list(at(column, 'musicResponsiveListItemFlexColumnRenderer', 'text', 'runs'))
+          .map((run) => str(at(run, 'text')) ?? '')
+          .join('')
+          .trim(),
+      );
+      const name = columns[0];
+      if (!name) continue;
+      seen.add(id);
+      const thumbnails = list(at(item, 'thumbnail', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails'));
+      const picture = safePicture(str(at(thumbnails[thumbnails.length - 1], 'url')));
+      hits.push({ id, name, ...(columns[1] ? { detail: columns[1] } : {}), ...(picture ? { picture } : {}) });
     }
   }
   return hits;
@@ -443,9 +511,20 @@ export class YouTubeMusic {
   }
 
   async search(query: string): Promise<YouTubeHit[]> {
+    return (await this.searchRows(query)).map((row) => row.hit);
+  }
+
+  /** The same search with who is behind each credited channel id, for the admin console. */
+  async searchRows(query: string): Promise<YouTubeSongRow[]> {
     // Zemer sends no visitor id with a search: a stale one can make YouTube answer with nothing at all.
     const response = await this.#logged(`searching "${query}"`, () => this.#post('search', WEB_REMIX, { query, params: SONG_FILTER }));
-    return parseSearch(response);
+    return parseSearchRows(response);
+  }
+
+  /** Artists matching a search, best match first (the admin console's way of finding who to allow). */
+  async searchArtists(query: string): Promise<YouTubeArtistHit[]> {
+    const response = await this.#logged(`searching artists "${query}"`, () => this.#post('search', WEB_REMIX, { query, params: ARTIST_FILTER }));
+    return parseArtistSearch(response);
   }
 
   /** Whether YouTube is turning this host away with its bot check right now (see TURNED_AWAY_MS). */
@@ -946,7 +1025,13 @@ export function createYouTubeAlbumSource(deps: YouTubeLookupDeps): AlbumSource {
 
 /** Why something was held back, in words for the chat; `what` is "song" or "album". */
 const refusal = (why: Extract<Verdict, { ok: false }>['why'], what: string): string =>
-  why === 'blocked' ? `Zemer's list blocks that ${what}` : why === 'female' ? "it has a female singer, which I don't send" : "its artist isn't on Zemer's artist list";
+  why === 'blocked'
+    ? `Zemer's list blocks that ${what}`
+    : why === 'owner'
+      ? `you blocked its artist (text "allow" and their name to undo that)`
+      : why === 'female'
+        ? "it has a female singer, which I don't send"
+        : "its artist isn't on Zemer's artist list";
 
 /**
  * Checks a YouTube Music song against Zemer's list as it stands now, when it is about to be sent, not only when it was
@@ -968,7 +1053,8 @@ export function youTubeGate(deps: {
       if (err instanceof SourceError) return `${err.message}, so I can't check it`;
       throw err;
     }
-    const ids = deps.catalog.artistIdsOf(url);
+    // A song the owner allowed by itself needs no stored credits: the verdict also holds it to the artists credited when it was allowed.
+    const ids = deps.catalog.artistIdsOf(url) ?? (deps.whitelist.songAllowed(videoId) ? [] : undefined);
     if (!ids) return "it hasn't been checked against Zemer's artist list";
     const verdict = deps.whitelist.verdict(videoId, ids);
     return verdict.ok ? undefined : refusal(verdict.why, 'song');
