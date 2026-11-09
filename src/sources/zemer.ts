@@ -1,8 +1,9 @@
 import { SourceError, type Album, type AlbumSource, type ArtistPage, type ArtistRef, type Finder, type Findings, type FoundSong, type TrackSource } from '../bot.ts';
 import type { NewTrack, TrackAlbum } from '../catalog.ts';
 import { parseQuery, tokenize } from '../query.ts';
+import { artistMatch } from '../ranking.ts';
 import type { Track } from '../types.ts';
-import { TURNED_AWAY, YouTubeMusicError, type YouTubeMusic } from './youtube-music.ts';
+import { TURNED_AWAY, YouTubeMusicError, type YouTubeArtistPage, type YouTubeArtistSong, type YouTubeMusic } from './youtube-music.ts';
 import type { ZemerWhitelist } from './zemer-whitelist.ts';
 
 // Zemer's own catalog (search.zemer.io), what the Zemer app searches since it stopped searching YouTube Music itself
@@ -353,6 +354,17 @@ export interface ZemerFinderDeps {
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /**
+ * When the words are an artist's name (exactly, or the start of it), how many such artists have their whole page of
+ * releases and top songs brought into a search made on YouTube Music's own search, which finds only ten or twenty of
+ * each kind: the other half of "all their albums".
+ */
+const NAMED_ARTISTS_OPENED = 2;
+/** How many artists one search lists (the first five show; "artists more" the rest). */
+const ARTISTS_LISTED = 10;
+/** How many songs and albums a search on YouTube Music's own search is asked for (its first page holds about twenty of each). */
+const YOUTUBE_LISTED = 50;
+
+/**
  * Zemer as the bot's first place to look: one search finds songs, albums and artists, an artist opens into all of their
  * songs (most played first) and albums (newest first), and an album into its songs. Whatever doesn't pass Zemer's
  * artist list (checked here too, by the artists' channel ids) is left out, and the songs that are shown are stored in
@@ -467,27 +479,116 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
     return [...kept.values()];
   }
 
+  /** An artist's page on YouTube Music in Zemer's shapes: their releases (a single is one marked so), and songs with how often they were played. */
+  const releasesOf = (page: YouTubeArtistPage): ZemerRelease[] =>
+    [...page.albums, ...page.singles].map((release): ZemerRelease => ({
+      id: release.browseId,
+      title: release.title,
+      artist: page.name,
+      artistId: page.id,
+      ...(release.year ? { year: release.year } : {}),
+      ...(release.cover ? { cover: release.cover } : {}),
+      single: release.single,
+    }));
+  const idsOfSong = (song: YouTubeArtistSong, page: YouTubeArtistPage): string[] => (song.artistIds.length > 0 ? song.artistIds : [page.id]);
+  const songsOf = (page: YouTubeArtistPage, releases: Map<string, ZemerRelease>): FoundSong[] =>
+    once(
+      page.songs.filter((song) => whitelist.allows(song.videoId, idsOfSong(song, page))),
+      (a, b) => (a.plays ?? 0) > (b.plays ?? 0),
+    ).map((song) => {
+      const zemerSong: ZemerSong = {
+        videoId: song.videoId,
+        title: song.title,
+        artist: song.artist || page.name,
+        ...(song.artistIds[0] ? { artistId: song.artistIds[0] } : {}),
+        ...(song.seconds ? { seconds: song.seconds } : {}),
+        ...(song.plays !== undefined ? { plays: song.plays } : {}),
+        ...(song.album ? { album: song.album } : {}),
+        ...(song.cover ? { cover: song.cover } : {}),
+      };
+      return found(zemerSong, idsOfSong(song, page), song.album ? releases.get(song.album.id) : undefined);
+    });
+  /** The artist's page, held to Zemer's list: undefined when YouTube Music has no such artist or they may not be offered. */
+  async function youTubeArtist(artistId: string): Promise<YouTubeArtistPage | undefined> {
+    const page = await deps.youTube.artist(artistId);
+    return page && whitelist.allows(artistId, [artistId]) ? page : undefined;
+  }
+
+  /**
+   * Zemer's answer made from YouTube Music alone (Zemer's search is off or can't be reached): the songs and albums its
+   * own search finds, the artists it finds (held to Zemer's list), and, for the one or two artists the words name, their
+   * whole page: every album and single and their hundred most played songs, which its search lists only a few of.
+   */
   async function fromYouTube(query: string, why: string): Promise<Findings> {
     const { songs, albums } = deps.fallback ?? {};
     if (!songs && !albums) throw new ZemerError(why);
     note(`${why}; asking YouTube Music's own search instead`);
+    const tokens = parseQuery(query);
     let tracks: Track[];
     let releases: Album[];
+    let hits: Awaited<ReturnType<YouTubeMusic['searchArtists']>>;
     try {
-      [tracks, releases] = await Promise.all([
-        songs ? songs.lookup(query, 10, { relevant: true }) : Promise.resolve([]),
-        albums ? albums.search(query, 10).catch(() => []) : Promise.resolve([]),
+      [tracks, releases, hits] = await Promise.all([
+        songs ? songs.lookup(query, YOUTUBE_LISTED, { relevant: true }) : Promise.resolve([]),
+        albums ? albums.search(query, YOUTUBE_LISTED).catch(() => []) : Promise.resolve([]),
+        // The whole words first, then each word alone: "lipa vnusni" finds no artist, "lipa" finds Lipa Schmeltzer.
+        Promise.all([...new Set([query, ...tokens.filter((token) => token.length >= 3).slice(0, 3)])].map((ask) => deps.youTube.searchArtists(ask).catch((): typeof hits => []))).then((lists) => [...new Map(lists.flat().map((hit) => [hit.id, hit])).values()]),
       ]);
     } catch (err) {
       if (!(err instanceof SourceError)) throw err;
       throw new ZemerError(`${why}, and ${err.message}`);
     }
-    return {
-      songs: tracks.map((track): FoundSong => ({ id: `t${track.id}`, title: track.title, artist: track.artist, keep: async () => track })),
-      albums: releases.filter((release) => !release.single),
-      singles: releases.filter((release) => release.single),
-      artists: [],
+    const artists = hits
+      .filter((hit) => whitelist.allows(hit.id, [hit.id]))
+      .slice(0, ARTISTS_LISTED)
+      .map((hit): ArtistRef => {
+        const aka = akaOf([hit.id]);
+        return { id: hit.id, name: hit.name, ...(aka ? { aka } : {}) };
+      });
+    // The artists the words name get their whole page, so "lipa schmeltzer" lists all 33 of his albums, not the ten a search
+    // holds, and "lipa vnusni" finds his "ונתנו" (YouTube can't read Latin letters as Hebrew ones; the menu's ranking can).
+    // Only the words that are part of the name need to name them; the others are for the title.
+    const namesArtist = (artist: ArtistRef): boolean => {
+      const nameWords = tokens.filter((token) => (artistMatch(artist, [token])?.tier ?? 0) >= 2);
+      return nameWords.length > 0 && (artistMatch(artist, nameWords)?.tier ?? 0) >= 2;
     };
+    const named = artists.filter(namesArtist).slice(0, NAMED_ARTISTS_OPENED);
+    const pages = (await Promise.all(named.map((artist) => youTubeArtist(artist.id).catch(() => undefined)))).flatMap((page) => (page ? [page] : []));
+    const pageReleases = pages.flatMap((page) => releasesOf(page).filter(allowedRelease));
+    const top = pages.flatMap((page) => songsOf(page, releasesIn(releasesOf(page))));
+    const have = new Set(top.map((song) => sameTitle(song.title, song.artist)));
+    const searched = tracks
+      .map((track): FoundSong => ({ id: `t${track.id}`, title: track.title, artist: track.artist, keep: async () => track }))
+      .filter((song) => !have.has(sameTitle(song.title, song.artist)));
+    const releaseAlbums = pageReleases.map(toAlbum);
+    // The same album from both (the album search, and the artist's page) is one, as the search credits it; then the same title twice is one.
+    const seenIds = new Set<string>();
+    const byId = [...releases, ...releaseAlbums].filter((release) => !seenIds.has(release.id) && seenIds.add(release.id));
+    const all = once(byId, (a, b) => (a.songs ?? 0) > (b.songs ?? 0));
+    note(`YouTube Music: ${plural(artists.length, 'artist')} pass Zemer's list${pages.length > 0 ? `; opened ${pages.map((page) => `${page.name} (${plural(page.albums.length, 'album')}, ${plural(page.singles.length, 'single')}, ${plural(page.songs.length, 'song')})`).join(' and ')}` : ''}`);
+    return {
+      songs: [...top, ...searched],
+      albums: all.filter((release) => !release.single),
+      singles: all.filter((release) => release.single),
+      artists,
+    };
+  }
+
+  /** An artist's page made from YouTube Music's: every album, and every single among them (marked so, newest first), and their most played songs. */
+  async function artistFromYouTube(artistId: string): Promise<ArtistPage | undefined> {
+    const page = await youTubeArtist(artistId);
+    if (!page) return undefined;
+    const aka = akaOf([artistId]);
+    const releases = releasesOf(page).filter(allowedRelease);
+    // Where a source has no songs list for its singles, a single is listed with the albums, so the newest of both are together.
+    const year = (release: ZemerRelease): number => release.year ?? 0;
+    const albums = once([...releases], (a, b) => (a.songs ?? 0) > (b.songs ?? 0))
+      .sort((a, b) => year(b) - year(a))
+      .map(toAlbum);
+    const songs = songsOf(page, releasesIn(releases)).sort((a, b) => (b.plays ?? 0) - (a.plays ?? 0));
+    const singles = releases.filter((release) => release.single).length;
+    note(`YouTube Music has ${plural(songs.length, 'song')}, ${plural(albums.length - singles, 'album')} and ${plural(singles, 'single')} by ${page.name}`);
+    return { artist: { id: page.id, name: page.name, ...(aka ? { aka } : {}) }, songs, albums, singles };
   }
 
   async function open(albumId: string): ReturnType<AlbumSource['open']> {
@@ -584,10 +685,20 @@ export function createZemerFinder(deps: ZemerFinderDeps): Finder & { albums: Alb
       return { songs, albums, singles, artists };
     },
     async artist(artistId): Promise<ArtistPage | undefined> {
-      if (!deps.zemer) return undefined;
       if (youTube.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);
       await whitelist.ready();
-      const page = await deps.zemer.artist(artistId);
+      let page: ZemerArtistPage | undefined;
+      if (deps.zemer) {
+        try {
+          page = await deps.zemer.artist(artistId);
+        } catch (err) {
+          if (!(err instanceof SourceError)) throw err;
+          note(`${err.message}; opening the artist on YouTube Music instead`);
+          return artistFromYouTube(artistId);
+        }
+      } else {
+        return artistFromYouTube(artistId);
+      }
       if (!page || !whitelist.allows(artistId, [artistId])) return undefined;
       const aka = akaOf([artistId]);
       const releases = releasesIn(page.albums, page.singles);

@@ -25,6 +25,19 @@ export interface MockAlbum {
   firstPage?: number;
 }
 
+/** An artist's page as YouTube Music shows it: a few of each shelf, and "see all" pages behind them (shaped like the real answers, October 2026). */
+export interface MockArtistPage {
+  name: string;
+  /** Most played first. */
+  songs: Array<{ videoId: string; title: string; artists?: string[]; plays: string; album?: { browseId: string; title: string } }>;
+  /** Newest first. */
+  albums: Array<{ browseId: string; title: string; year: number }>;
+  /** Newest first. An `ep` is on the singles shelf too, labelled "EP". */
+  singles: Array<{ browseId: string; title: string; year: number; ep?: boolean }>;
+  /** How many cards of each shelf the page itself holds (the real one holds ten), and how many top songs (the real one, five). Default 2. */
+  shown?: number;
+}
+
 export interface MockSong {
   videoId: string;
   title: string;
@@ -184,6 +197,35 @@ function trackRow(track: MockAlbumTrack, number: number): unknown {
   };
 }
 
+function artistSongRow(song: MockArtistPage['songs'][number], fallbackArtist: string): unknown {
+  return {
+    musicResponsiveListItemRenderer: {
+      playlistItemData: { videoId: song.videoId },
+      flexColumns: [
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: song.title }] } } },
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: joinCredit(song.artists ?? [fallbackArtist]) } } },
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: song.plays }] } } },
+        ...(song.album
+          ? [{ musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: song.album.title, navigationEndpoint: { browseEndpoint: { browseId: song.album.browseId } } }] } } }]
+          : []),
+      ],
+    },
+  };
+}
+
+function releaseCard(release: { browseId: string; title: string; year: number }, label: string | undefined): unknown {
+  return {
+    musicTwoRowItemRenderer: {
+      title: { runs: [{ text: release.title }] },
+      subtitle: { runs: label ? [{ text: label }, { text: ' • ' }, { text: String(release.year) }] : [{ text: String(release.year) }] },
+      navigationEndpoint: { browseEndpoint: { browseId: release.browseId } },
+      thumbnailRenderer: { musicThumbnailRenderer: { thumbnail: { thumbnails: [{ url: `https://lh3.googleusercontent.com/${release.browseId}=w226-h226-l90-rj` }, { url: `https://lh3.googleusercontent.com/${release.browseId}=w544-h544-l90-rj` }] } } },
+    },
+  };
+}
+
+const singleLabel = (single: { ep?: boolean }): string => (single.ep ? 'EP' : 'Single');
+
 const words = (text: string): string[] => text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 
 /**
@@ -192,7 +234,7 @@ const words = (text: string): string[] => text.toLowerCase().match(/[\p{L}\p{N}]
  * refused as a bot check, a retired client version is HTTP 400, and a media link answers 403 unless the request carries
  * the client's own User-Agent and a Range header.
  */
-export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum[] = []): Promise<MockYouTubeMusic> {
+export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum[] = [], artistPages: MockArtistPage[] = []): Promise<MockYouTubeMusic> {
   const byId = new Map(songs.map((song) => [song.videoId, song]));
   let origin = '';
 
@@ -317,7 +359,53 @@ export async function startMockYouTubeMusic(songs: MockSong[], albums: MockAlbum
         const next = from + AT_A_TIME < (album?.tracks.length ?? 0) ? [{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: `CONT:${album!.browseId}:${from + AT_A_TIME}` } } } }] : [];
         return json(200, { onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [...rows, ...next] } }] });
       }
-      mock.browses.push(String(body.browseId));
+      mock.browses.push(`${body.browseId}${typeof body.params === 'string' ? `?${body.params}` : ''}`);
+      const asked = String(body.browseId ?? '');
+      const page = artistPages.find((candidate) => asked === artistId(candidate.name) || asked === `MPAD${artistId(candidate.name)}` || asked === `VLTOP${artistId(candidate.name)}`);
+      if (page) {
+        const shown = page.shown ?? 2;
+        const grid = (items: unknown[]) => json(200, { responseContext: {}, contents: { singleColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{ gridRenderer: { items } }] } } } }] } } });
+        if (asked.startsWith('MPAD')) {
+          return body.params === 'SINGLES' ? grid(page.singles.map((single) => releaseCard(single, singleLabel(single)))) : grid(page.albums.map((album) => releaseCard(album, 'Album')));
+        }
+        if (asked.startsWith('VLTOP')) {
+          return json(200, { responseContext: {}, contents: { singleColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{ musicPlaylistShelfRenderer: { contents: page.songs.map((song) => artistSongRow(song, page.name)) } }] } } } }] } } });
+        }
+        const more = (params: string) => ({ moreContentButton: { buttonRenderer: { navigationEndpoint: { browseEndpoint: { browseId: `MPAD${artistId(page.name)}`, params } } } } });
+        const carousel = (title: string, cards: unknown[], params: string | undefined) => ({
+          musicCarouselShelfRenderer: { header: { musicCarouselShelfBasicHeaderRenderer: { title: { runs: [{ text: title }] }, ...(params ? more(params) : {}) } }, contents: cards },
+        });
+        return json(200, {
+          responseContext: {},
+          header: { musicImmersiveHeaderRenderer: { title: { runs: [{ text: page.name }] } } },
+          contents: {
+            singleColumnBrowseResultsRenderer: {
+              tabs: [
+                {
+                  tabRenderer: {
+                    content: {
+                      sectionListRenderer: {
+                        contents: [
+                          {
+                            musicShelfRenderer: {
+                              title: { runs: [{ text: 'Top songs' }] },
+                              contents: page.songs.slice(0, shown).map((song) => artistSongRow(song, page.name)),
+                              bottomEndpoint: { browseEndpoint: { browseId: `VLTOP${artistId(page.name)}` } },
+                            },
+                          },
+                          carousel('Albums', page.albums.slice(0, shown).map((album) => releaseCard(album, undefined)), page.albums.length > shown ? 'ALBUMS' : undefined),
+                          carousel('Singles & EPs', page.singles.slice(0, shown).map((single) => releaseCard(single, singleLabel(single))), page.singles.length > shown ? 'SINGLES' : undefined),
+                          carousel('Fans might also like', [], undefined),
+                        ],
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        });
+      }
       const album = albums.find((candidate) => candidate.browseId === body.browseId);
       if (!album) return json(404, { error: { code: 404, message: 'not found' } });
       const first = album.firstPage ?? album.tracks.length;

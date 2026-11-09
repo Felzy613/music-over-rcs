@@ -254,7 +254,8 @@ describe('albums on YouTube Music', () => {
     test('several albums fit: "💿 Title — Artist · year" one message each, numbered; a 👍 on one opens it; "all" does not send every album', async () => {
       const { say, tap } = setup();
       const replies = await say('albums michoel schnitzler');
-      assert.deepEqual(lines(replies), [`💿 Shabbuson Live — ${MICHOEL} · 2023`, `💿 Shabbuson — ${MICHOEL} · 2022`, "Text an album's number for its songs."]);
+      // The artist is found too (YouTube Music's artist search), so their name is not repeated on each album.
+      assert.deepEqual(lines(replies), ['💿 Shabbuson Live · 2023', '💿 Shabbuson · 2022', "Text an album's number for its songs."]);
       const postbacks = replies.flatMap((reply) => (reply.kind === 'text' && reply.postback?.startsWith('album:') ? [reply.postback] : []));
       assert.deepEqual(
         postbacks.map((postback) => splitPostback(postback).action),
@@ -332,8 +333,9 @@ describe('albums on YouTube Music', () => {
       const { say } = setup();
       const replies = await say('search michoel schnitzler');
       const shown = replies.flatMap((reply) => (reply.kind === 'text' && reply.text ? [reply.text] : []));
-      const firstSong = shown.findIndex((text) => !text.startsWith('💿'));
-      assert.deepEqual(shown.slice(0, firstSong), [`💿 Shabbuson Live — ${MICHOEL} · 2023`, `💿 Shabbuson — ${MICHOEL} · 2022`], 'albums first, newest first');
+      assert.equal(shown[0], `🎤 ${MICHOEL}`, 'the artist, found by YouTube Music’s artist search, leads');
+      const firstSong = shown.findIndex((text, i) => i > 0 && !text.startsWith('💿'));
+      assert.deepEqual(shown.slice(1, firstSong), ['💿 Shabbuson Live · 2023', '💿 Shabbuson · 2022'], 'then albums, newest first');
       assert.ok(shown.length - firstSong > 1, 'then songs');
       assert.ok(!shown.some((text) => text.includes('Guest')), 'nothing a woman is credited on');
     });

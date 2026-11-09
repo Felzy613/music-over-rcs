@@ -39,6 +39,11 @@ const VIDEO_ID = /^[\w-]{11}$/;
 const ALBUM_ID = /^MPREb_[\w-]{4,40}$/;
 /** An album page names its songs a page at a time; this is more than any album has. */
 const MAX_ALBUM_PAGES = 10;
+/** What the address of an artist looks like (their channel id, which Zemer's list is keyed by). */
+const ARTIST_ID = /^UC[\w-]{10,60}$/;
+/** How long an artist's page is kept, so "albums more" after the search doesn't ask for it all again. */
+const ARTIST_TTL_MS = 10 * 60_000;
+const ARTISTS_KEPT = 30;
 /**
  * The media server serves the first megabyte of any link, and for roughly one link in fifteen turns down everything that
  * reaches further (those links want a token this client can't make; measured October 2026). Zemer checks each link for
@@ -331,6 +336,8 @@ export interface YouTubeAlbumHit {
   artistIds: string[];
   year?: number;
   cover?: string;
+  /** A single (one song), as YouTube Music labels it; an album or an EP is not. */
+  single?: boolean;
 }
 
 export interface YouTubeAlbumTrack {
@@ -385,6 +392,7 @@ export function parseAlbumSearch(response: unknown): YouTubeAlbumHit[] {
       }
       const written = groups.map((group) => group.map((run) => run.text).join('').trim());
       // The first group says what kind of release it is ("Album", "EP", "Single"); the next is who made it.
+      const single = /^single$/i.test(written[0] ?? '');
       if (/^(?:album|ep|single)$/i.test(written[0] ?? '')) {
         groups.shift();
         written.shift();
@@ -395,10 +403,184 @@ export function parseAlbumSearch(response: unknown): YouTubeAlbumHit[] {
       const thumbnails = list(at(item, 'thumbnail', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails'));
       const cover = str(at(thumbnails[thumbnails.length - 1], 'url'));
       seen.add(browseId);
-      hits.push({ browseId, title, artist, artistIds, ...(year !== undefined ? { year } : {}), ...(cover ? { cover: largerCover(cover) } : {}) });
+      hits.push({ browseId, title, artist, artistIds, ...(year !== undefined ? { year } : {}), ...(cover ? { cover: largerCover(cover) } : {}), ...(single ? { single: true } : {}) });
     }
   }
   return hits;
+}
+
+/** An album, an EP or a single on an artist's page. */
+export interface YouTubeRelease {
+  /** The release's page ("MPREb_…"). */
+  browseId: string;
+  title: string;
+  year?: number;
+  cover?: string;
+  single: boolean;
+}
+
+/** A song in an artist's top songs, with how often it was played. */
+export interface YouTubeArtistSong {
+  videoId: string;
+  title: string;
+  /** The credit as YouTube Music writes it: "A, B & C". */
+  artist: string;
+  /** The channel ids of the credited artists that link to a page. */
+  artistIds: string[];
+  album?: { id: string; title: string };
+  plays?: number;
+  seconds?: number;
+  cover?: string;
+}
+
+/** Everything YouTube Music shows for one artist. */
+export interface YouTubeArtistPage {
+  /** Their channel id. */
+  id: string;
+  name: string;
+  /** Their most played songs, most played first. */
+  songs: YouTubeArtistSong[];
+  /** Albums and EPs, newest first. */
+  albums: YouTubeRelease[];
+  /** Singles, newest first. */
+  singles: YouTubeRelease[];
+}
+
+/** "1.1M plays", "24K plays", "930 plays": the number. */
+export function playsOf(text: string): number | undefined {
+  const found = /^([\d.,]+)\s*([KMB]?)\s+plays?$/i.exec(text.trim());
+  if (!found) return undefined;
+  const count = Number(found[1]!.replace(/,/g, ''));
+  if (!Number.isFinite(count)) return undefined;
+  return Math.round(count * ({ '': 1, K: 1e3, M: 1e6, B: 1e9 }[found[2]!.toUpperCase() as '' | 'K' | 'M' | 'B'] ?? 1));
+}
+
+/** A row of an artist's top songs: the title, who made it, how often it was played, the album, and its length at the end. */
+function parseArtistSong(row: unknown): YouTubeArtistSong | undefined {
+  const item = at(row, 'musicResponsiveListItemRenderer');
+  const videoId =
+    str(at(item, 'playlistItemData', 'videoId')) ??
+    str(at(item, 'overlay', 'musicItemThumbnailOverlayRenderer', 'content', 'musicPlayButtonRenderer', 'playNavigationEndpoint', 'watchEndpoint', 'videoId'));
+  if (!videoId || !VIDEO_ID.test(videoId)) return undefined;
+  const columns = list(at(item, 'flexColumns')).map((column) => runsOf(at(column, 'musicResponsiveListItemFlexColumnRenderer', 'text', 'runs')));
+  const title = (columns[0] ?? []).map((run) => run.text).join('').trim();
+  if (!title) return undefined;
+  const rest = columns.slice(1);
+  const albumRun = rest.flat().find((run) => run.id && ALBUM_ID.test(run.id));
+  const playsText = rest.map((column) => column.map((run) => run.text).join('').trim()).find((text) => playsOf(text) !== undefined);
+  // The credit is the column that names artists; an artist with no page of their own is in it by name only.
+  const credit = rest.find((column) => column.some((run) => run.id && !ALBUM_ID.test(run.id) && /^UC/.test(run.id)));
+  const artistIds = [...new Set((credit ?? []).flatMap((run) => (run.id && /^UC/.test(run.id) ? [run.id] : [])))];
+  const length = str(at(item, 'fixedColumns', 0, 'musicResponsiveListItemFixedColumnRenderer', 'text', 'runs', 0, 'text'));
+  const thumbnails = list(at(item, 'thumbnail', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails'));
+  const cover = str(at(thumbnails[thumbnails.length - 1], 'url'));
+  const plays = playsText ? playsOf(playsText) : undefined;
+  const duration = length ? seconds(length) : undefined;
+  return {
+    videoId,
+    title,
+    artist: (credit ?? []).map((run) => run.text).join('').trim(),
+    artistIds,
+    ...(albumRun ? { album: { id: albumRun.id!, title: albumRun.text.trim() } } : {}),
+    ...(plays !== undefined ? { plays } : {}),
+    ...(duration !== undefined ? { seconds: duration } : {}),
+    ...(cover ? { cover: largerCover(cover) } : {}),
+  };
+}
+
+/**
+ * The cards of an artist's albums or singles (a carousel on their page, or the grid behind its "see all"): a title, the
+ * release's page, and "Single • 2026", "EP • 2024", "Album • 2023", or just "2026" under it. Cards that aren't a release
+ * (a video, a playlist) are left out.
+ */
+export function parseReleaseCards(cards: unknown[], kindOfShelf: 'album' | 'single'): YouTubeRelease[] {
+  const seen = new Set<string>();
+  const releases: YouTubeRelease[] = [];
+  for (const card of cards) {
+    const item = at(card, 'musicTwoRowItemRenderer');
+    const browseId = str(at(item, 'navigationEndpoint', 'browseEndpoint', 'browseId'));
+    const title = runsOf(at(item, 'title', 'runs')).map((run) => run.text).join('').trim();
+    if (!browseId || !ALBUM_ID.test(browseId) || !title || seen.has(browseId)) continue;
+    const subtitle = runsOf(at(item, 'subtitle', 'runs')).map((run) => run.text.trim());
+    const kind = subtitle.find((text) => /^(?:album|ep|single)$/i.test(text))?.toLowerCase();
+    const year = yearOf(subtitle);
+    const thumbnails = list(at(item, 'thumbnailRenderer', 'musicThumbnailRenderer', 'thumbnail', 'thumbnails'));
+    const cover = safePicture(str(at(thumbnails[thumbnails.length - 1], 'url')));
+    seen.add(browseId);
+    // An EP on the singles shelf is still an EP: only what YouTube Music calls a single (or, with no word, the shelf) is one.
+    releases.push({ browseId, title, ...(year !== undefined ? { year } : {}), ...(cover ? { cover: largerCover(cover) } : {}), single: kind ? kind === 'single' : kindOfShelf === 'single' });
+  }
+  return releases;
+}
+
+/** Where a shelf's "see all" goes. */
+interface BrowseTarget {
+  browseId: string;
+  params?: string;
+}
+
+const browseTarget = (endpoint: unknown): BrowseTarget | undefined => {
+  const browseId = str(at(endpoint, 'browseEndpoint', 'browseId')) ?? str(at(endpoint, 'browseId'));
+  const params = str(at(endpoint, 'browseEndpoint', 'params')) ?? str(at(endpoint, 'params'));
+  return browseId ? { browseId, ...(params ? { params } : {}) } : undefined;
+};
+
+const sectionsOf = (response: unknown): unknown[] => list(at(response, 'contents', 'singleColumnBrowseResultsRenderer', 'tabs', 0, 'tabRenderer', 'content', 'sectionListRenderer', 'contents'));
+
+/**
+ * An artist's page: their name, the five top songs it shows, and the albums and singles it shows (ten of each at most:
+ * `moreAlbums`, `moreSingles` and `moreSongs` are where the whole lists are). Undefined when it has no name.
+ */
+export function parseArtistPage(
+  response: unknown,
+  id: string,
+): { page: YouTubeArtistPage; moreAlbums?: BrowseTarget; moreSingles?: BrowseTarget; moreSongs?: BrowseTarget } | undefined {
+  const header = at(response, 'header', 'musicImmersiveHeaderRenderer') ?? at(response, 'header', 'musicVisualHeaderRenderer');
+  const name = runsOf(at(header, 'title', 'runs')).map((run) => run.text).join('').trim();
+  if (!name) return undefined;
+  let songs: YouTubeArtistSong[] = [];
+  let albums: YouTubeRelease[] = [];
+  let singles: YouTubeRelease[] = [];
+  let moreAlbums: BrowseTarget | undefined;
+  let moreSingles: BrowseTarget | undefined;
+  let moreSongs: BrowseTarget | undefined;
+  for (const section of sectionsOf(response)) {
+    const shelf = at(section, 'musicShelfRenderer');
+    if (shelf && songs.length === 0) {
+      songs = list(at(shelf, 'contents')).flatMap((row) => parseArtistSong(row) ?? []);
+      moreSongs = browseTarget(at(shelf, 'bottomEndpoint'));
+      continue;
+    }
+    const carousel = at(section, 'musicCarouselShelfRenderer');
+    const heading = runsOf(at(carousel, 'header', 'musicCarouselShelfBasicHeaderRenderer', 'title', 'runs')).map((run) => run.text).join('').trim();
+    const more = browseTarget(at(carousel, 'header', 'musicCarouselShelfBasicHeaderRenderer', 'moreContentButton', 'buttonRenderer', 'navigationEndpoint'));
+    if (/^albums$/i.test(heading)) {
+      albums = parseReleaseCards(list(at(carousel, 'contents')), 'album');
+      moreAlbums = more;
+    } else if (/^singles/i.test(heading)) {
+      singles = parseReleaseCards(list(at(carousel, 'contents')), 'single');
+      moreSingles = more;
+    }
+  }
+  // A shelf called "Singles & EPs" holds both: the EPs belong with the albums.
+  const all = [...albums, ...singles];
+  return {
+    page: { id, name, songs, albums: all.filter((release) => !release.single), singles: all.filter((release) => release.single) },
+    ...(moreAlbums ? { moreAlbums } : {}),
+    ...(moreSingles ? { moreSingles } : {}),
+    ...(moreSongs ? { moreSongs } : {}),
+  };
+}
+
+/** The cards on a "see all" page (the grid of an artist's albums or singles). */
+export function parseDiscography(response: unknown, kindOfShelf: 'album' | 'single'): YouTubeRelease[] {
+  const cards = sectionsOf(response).flatMap((section) => list(at(section, 'gridRenderer', 'items')));
+  return parseReleaseCards(cards, kindOfShelf);
+}
+
+/** The songs on a "see all" page of top songs (a playlist of up to a hundred, most played first). */
+export function parseSongList(response: unknown): YouTubeArtistSong[] {
+  return sectionsOf(response).flatMap((section) => list(at(section, 'musicPlaylistShelfRenderer', 'contents') ?? at(section, 'musicShelfRenderer', 'contents')).flatMap((row) => parseArtistSong(row) ?? []));
 }
 
 /** One song row of an album page; undefined for a row that can't be played (greyed out, or not a song). */
@@ -467,6 +649,7 @@ export class YouTubeMusic {
   #visitor: string | undefined;
   #visitorFlight: Promise<string> | undefined;
   #streams = new Map<string, YouTubeStream>();
+  #artists = new Map<string, { at: number; page: YouTubeArtistPage | undefined }>();
   #flights = new Map<string, Promise<YouTubeStream>>();
 
   #turnedAwayFor: number;
@@ -590,6 +773,56 @@ export class YouTubeMusic {
       more = continuationOf(rows);
     }
     return album;
+  }
+
+  /**
+   * An artist's page with everything on it: their page shows ten albums, ten singles and five top songs, so the "see
+   * all" pages behind them are asked as well (all albums, all singles, the hundred most played songs) and the page's own
+   * are kept for any of those that can't be had. Kept ten minutes, since a menu's "albums more" asks again. Undefined
+   * when YouTube Music has no such artist.
+   */
+  async artist(channelId: string): Promise<YouTubeArtistPage | undefined> {
+    if (!ARTIST_ID.test(channelId)) return undefined;
+    const kept = this.#artists.get(channelId);
+    if (kept && this.#now() - kept.at < ARTIST_TTL_MS) return kept.page;
+    const first = parseArtistPage(await this.#logged(`opening artist ${channelId}`, () => this.#post('browse', WEB_REMIX, { browseId: channelId })), channelId);
+    let page = first?.page;
+    if (first && page) {
+      const [albums, singles, songs] = await Promise.all([
+        this.#seeAll(first.moreAlbums, (response) => parseDiscography(response, 'album'), `${page.name}'s albums`),
+        this.#seeAll(first.moreSingles, (response) => parseDiscography(response, 'single'), `${page.name}'s singles`),
+        this.#seeAll(first.moreSongs, parseSongList, `${page.name}'s songs`),
+      ]);
+      // Each "see all" page is a longer list of the same shelf; a shelf's cards are one kind or the other by their own label.
+      const releases = new Map<string, YouTubeRelease>();
+      for (const release of [...page.albums, ...page.singles, ...(albums ?? []), ...(singles ?? [])]) releases.set(release.browseId, release);
+      const each = [...releases.values()];
+      page = {
+        ...page,
+        albums: each.filter((release) => !release.single),
+        singles: each.filter((release) => release.single),
+        // The page's five are the first five of the hundred; most played first either way.
+        songs: songs && songs.length > page.songs.length ? songs : page.songs,
+      };
+    } else {
+      this.#log(`YouTube Music: artist ${channelId} came back without a name`);
+    }
+    this.#artists.delete(channelId);
+    this.#artists.set(channelId, { at: this.#now(), page });
+    while (this.#artists.size > ARTISTS_KEPT) this.#artists.delete(this.#artists.keys().next().value!);
+    return page;
+  }
+
+  /** A "see all" page, parsed; undefined (and logged) when it can't be had, so the page's own shelf stands in. */
+  async #seeAll<T>(target: BrowseTarget | undefined, parse: (response: unknown) => T[], what: string): Promise<T[] | undefined> {
+    if (!target) return undefined;
+    try {
+      return parse(await this.#post('browse', WEB_REMIX, { ...target }));
+    } catch (err) {
+      if (!(err instanceof YouTubeMusicError)) throw err;
+      this.#log(`YouTube Music: ${what} failed: ${err.message}`);
+      return undefined;
+    }
   }
 
   /** A link to download the song's audio from, as AAC (what Google Messages plays), asked for fresh if the last one is old. */
@@ -995,7 +1228,7 @@ export function createYouTubeAlbumSource(deps: YouTubeLookupDeps): AlbumSource {
       const hits = await deps.youTube.searchAlbums(wanted.join(' '));
       const allowed = hits.filter((hit) => deps.whitelist.allows(hit.browseId, hit.artistIds));
       note(`YouTube Music listed ${hits.length} album${hits.length === 1 ? '' : 's'}; ${allowed.length} by artists on Zemer's list, none female`);
-      return allowed.slice(0, limit).map((hit): Album => ({ id: hit.browseId, title: hit.title, artist: hit.artist, year: hit.year, cover: hit.cover }));
+      return allowed.slice(0, limit).map((hit): Album => ({ id: hit.browseId, title: hit.title, artist: hit.artist, year: hit.year, cover: hit.cover, ...(hit.single ? { single: true } : {}) }));
     },
     async open(id) {
       if (deps.youTube.turnsThisHostAway) throw new YouTubeMusicError(TURNED_AWAY);

@@ -94,7 +94,11 @@ export interface Findings {
   artists: ArtistRef[];
 }
 
-/** Everything by one artist: songs most played first, albums newest first, and how many singles there are. */
+/**
+ * Everything by one artist: songs most played first, albums newest first, and how many singles there are. A source that
+ * has no songs list for its singles (YouTube Music's own artist page) puts them among `albums`, marked `single`, so the
+ * newest releases of every kind are together; `singles` then counts those.
+ */
 export interface ArtistPage {
   artist: ArtistRef;
   songs: FoundSong[];
@@ -623,7 +627,7 @@ export function createBot(deps: BotDeps): Bot {
    * the first with something that fits answering. `only` one kind ("album …"), or Zemer alone ("zemer …"). Nothing is
    * picked for the owner: even one song the words name exactly is a menu of one.
    */
-  async function search(raw: string, options: { only?: Category; zemerOnly?: boolean } = {}): Promise<Reply[]> {
+  async function search(raw: string, options: { only?: Category; zemerOnly?: boolean; orElse?: () => Promise<Reply[]>; silent?: boolean } = {}): Promise<Reply[]> {
     const tokens = parseQuery(raw);
     if (tokens.every((token) => token.length < 2)) {
       if (options.zemerOnly) return [say('Text "zemer" and a song or an artist, like "zemer lipa vnusni".')];
@@ -659,11 +663,41 @@ export function createBot(deps: BotDeps): Bot {
     const asked = [zemer, options.zemerOnly || options.only === 'albums' ? undefined : deps.source?.name].filter((name): name is string => name !== undefined);
     // Nothing found because nobody could be asked is not the same as nothing found.
     if (asked.length > 0 && failures.length >= asked.length) return [say(couldNot(failures))];
+    // Another way to look when nothing fits (its answer, if it has one), and, if asked, no words of its own about finding nothing.
+    if (options.orElse) {
+      const other = await options.orElse();
+      if (other.length > 0) return other;
+    }
+    if (options.silent) return [];
     const hint = (options.zemerOnly || options.only === 'albums') && (deps.finder?.hint ?? deps.albums?.hint) ? ` (${deps.finder?.hint ?? deps.albums?.hint})` : '';
     const on = asked.length > 0 ? ` on ${asked.join(' or ')}` : '';
     if (options.only === 'albums') return [say(`No album for "${raw}"${on}${hint}. Try the artist and the album's name, or fewer words.`)];
     if (options.only === 'artists') return [say(`No artist for "${raw}"${on}. Try their full name, or fewer words.`)];
     return [say(`No match for "${raw}"${on}${hint}. Try the artist and title, or fewer words.`)];
+  }
+
+  /**
+   * "search …": the words after it. A kind word in front ("search album beri weber") says what kind of menu is wanted,
+   * as "album beri weber" does, and so does "album" or "artist" at the end ("search beri weber album"); when that finds
+   * nothing the words are looked up as they were typed, for a title that really has the word in it. "songs" at the end
+   * is part of the words first, since "night songs" is a song and an album; only when they find nothing is it taken to
+   * name the kind of menu.
+   */
+  function searchFor(rest: string): Promise<Reply[]> {
+    const typed = rest.trim();
+    const asWords = (text: string): boolean => tokenize(text).some((word) => word.length >= 2);
+    const lead = FIRST_WORD.exec(typed);
+    const leadKind = lead ? KIND_WORDS[lead[1]!.toLowerCase()] : undefined;
+    if (lead && leadKind && asWords(typed.slice(lead[0].length))) return search(typed.slice(lead[0].length).trim(), { only: leadKind, orElse: () => search(typed) });
+    const tail = /^(.*\S)[\s:,-]+(\p{L}+)\s*$/su.exec(typed);
+    const tailKind = tail ? KIND_WORDS[tail[2]!.toLowerCase()] : undefined;
+    if (tail && tailKind && asWords(tail[1]!)) {
+      const head = tail[1]!.trim();
+      // "album" and "artist" at the end are hardly ever part of a title; "songs" often is ("Night Songs").
+      if (tailKind !== 'songs') return search(head, { only: tailKind, orElse: () => search(typed) });
+      return search(typed, { orElse: () => search(head, { only: tailKind, silent: true }) });
+    }
+    return search(typed);
   }
 
   // --- views opened from a menu ---
@@ -681,8 +715,10 @@ export function createBot(deps: BotDeps): Bot {
     const { page: artistPage, contents } = found;
     const view = views.open({ kind: 'artist', artistId, name: artistPage.artist.name }, parent);
     makeCurrent(view);
-    const albums = contents.lists.albums.length;
-    const sizes = [albums > 0 && plural(albums, 'album'), artistPage.songs.length > 0 && plural(artistPage.songs.length, 'song')].filter(Boolean).join(' · ');
+    const listed = foldEditions(artistPage.albums);
+    const singles = listed.filter((album) => album.single).length;
+    const albums = listed.length - singles;
+    const sizes = [albums > 0 && plural(albums, 'album'), singles > 0 && plural(singles, 'single'), artistPage.songs.length > 0 && plural(artistPage.songs.length, 'song')].filter(Boolean).join(' · ');
     const header: Reply = { kind: 'text', text: `${artistLine(artistPage.artist.name)}${sizes ? ` · ${sizes}` : ''}`, postback: `view:${view.id}` };
     return page(view, contents, { albums: FIRST_PAGE, songs: FIRST_PAGE }, [header]);
   }
@@ -1140,7 +1176,7 @@ export function createBot(deps: BotDeps): Bot {
       const ruled = first ? artistListFor(first[1]!.toLowerCase(), rest) : undefined;
       if (ruled) return ruled;
     }
-    if (first && isSearch(first[1]!)) return search(rest);
+    if (first && isSearch(first[1]!)) return searchFor(rest);
     if (first && isZemerOnly(first[1]!)) return search(rest.replace(/^music\b[\s:,-]*/i, '').trim(), { zemerOnly: true });
     if (first && kind) return search(rest, { only: kind });
     if (ZIP_WORDS.has(phrase)) {
