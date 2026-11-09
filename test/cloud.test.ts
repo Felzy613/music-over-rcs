@@ -812,7 +812,7 @@ describe('one window to the bridge for each Matrix account', () => {
 });
 
 describe('finding the self-chat in the bridge database', () => {
-  const LOGIN = 'owner@gmail.com/1791693313956';
+  const LOGIN = 'owner@gmail.com/1700000000001';
 
   /** A bridge database with the tables (and columns) the finder reads, as mautrix-gmessages makes them. */
   function bridgeDb(dir: string, options: { sims?: Record<string, unknown>; logins?: Array<{ id: string; user: string; metadata: string }> } = {}): string {

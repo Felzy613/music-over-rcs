@@ -329,6 +329,6 @@ At least 3 samples per metric after each deploy, from normal use plus the owner'
 
 ## 8. Verification (per phase)
 - Every phase: `npm run typecheck`, `npm test` (no network; mocks extended, not real services).
-- Phase 0/1: `docker build` (runs the bridge patches' Go tests), local boot per `docs/cloud.md`. After R1: Render log searches above, plus `ADMIN_TOKEN=… npm run cloud:check -- --render https://music-over-rcs.onrender.com`.
+- Phase 0/1: `docker build` (runs the bridge patches' Go tests), local boot per `docs/cloud.md`. After R1: Render log searches above, plus `ADMIN_TOKEN=… npm run cloud:check -- --render https://<your-service>.onrender.com`.
 - Phase 2: `npm run simulate:web -- --open` for the three walkthroughs and back-navigation; the golden achas test; live `search achas` after R2.
 - Phase 3: an album timeline ≤ 40 s live; `/status` memory peak; Worker turned-away rate in `wrangler tail` or observability.

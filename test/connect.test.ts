@@ -169,10 +169,10 @@ describe('the Connect page’s routes', () => {
   test('chooses the chat the bot answers in, only an id that looks like one', async () => {
     for (const bad of ['', 'abc', '!nocolon', '!has space:server', '#alias:server', 42, undefined]) assert.equal((await post('connect/room', { room: bad })).status, 400, String(bad));
     assert.deepEqual(chosen, []);
-    const done = await post('connect/room', { room: '!UPSiTkMHvYLPqbpIWT:localhost' });
+    const done = await post('connect/room', { room: '!selfchat:localhost' });
     assert.equal(done.status, 200);
-    assert.deepEqual(chosen, ['!UPSiTkMHvYLPqbpIWT:localhost']);
-    assert.deepEqual(admin.audit.list().map((e) => [e.what, e.detail]), [['chose the chat the bot answers in', '!UPSiTkMHvYLPqbpIWT:localhost']]);
+    assert.deepEqual(chosen, ['!selfchat:localhost']);
+    assert.deepEqual(admin.audit.list().map((e) => [e.what, e.detail]), [['chose the chat the bot answers in', '!selfchat:localhost']]);
   });
 
   test('starts the OneDrive sign-in and hands back the code, or says it is not set up; leaves a test alert, or says it cannot', async () => {

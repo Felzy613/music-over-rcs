@@ -98,7 +98,7 @@ describe('the five-minute job', () => {
     }
     assert.equal(asked, 0);
     assert.equal(bucket.objects.size, 0);
-    assert.equal(renderConfigured({ STATE: bucket.binding, RENDER_URL: 'https://music-over-rcs.onrender.com' }), true);
+    assert.equal(renderConfigured({ STATE: bucket.binding, RENDER_URL: 'https://example-service.onrender.com' }), true);
   });
 
   test('mails the waiting alerts even before there is a host to watch', async () => {

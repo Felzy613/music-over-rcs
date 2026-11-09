@@ -17,7 +17,7 @@ npm run simulate:web -- --open    # real bot + real site in a browser chat; need
 npm run simulate:admin -- --open  # the management console on made-up data (mock servers from test/helpers); needs no accounts
 npm run matrix                    # run the bridge-route bot in the foreground (needs .env)
 npm run library -- <cmd>          # status | sync | scan | prefetch | digest [--days N] [--send]
-ADMIN_TOKEN=… npm run cloud:check -- --render https://music-over-rcs.onrender.com   # is the live host, bridge, bot and Worker healthy
+ADMIN_TOKEN=… npm run cloud:check -- --render https://<your-service>.onrender.com   # is the live host, bridge, bot and Worker healthy
 ```
 
 Run one test file, or one test by name (invoke `node` directly; `npm test` takes a fixed glob):
@@ -31,7 +31,7 @@ There is no linter or formatter configured.
 
 ## The running bot is on Render, not this folder
 
-The live bot runs from the Docker image Render builds from the `main` branch (service `music-over-rcs`, id `srv-db8nrt6i0phs738cf5lg`, Ohio, free plan; `docs/cloud.md` is the runbook). **Nothing here reaches it until you push and deploy**: push to `main`, then deploy by hand (Render dashboard → *Manual Deploy*, or the Render MCP's `trigger_deploy`); `autoDeploy` is off on purpose. A deploy restarts the bot (about a minute down; texts sent meanwhile are answered afterwards), and deploys queue behind each other, so do not stack them. Changing an environment variable in Render restarts it too, and `.env` here is only for local runs. The `PEOPLE` work is in the tree but has not been pushed or deployed. The live catalog is in the container, backed up to R2; `data/catalog.db` is only what a local `npm run …` uses. The Mac install (`deploy/mac`, launchd) is gone; do not bring it back next to the cloud host, because two bots in one chat both answer. **No more money** (the owner, 2026-10-20): everything stays on Render's free plan and the Cloudflare Workers plan already paid for; recommend only $0 changes (`docs/cloud.md`, "What it costs").
+The live bot runs from the Docker image Render builds from the `main` branch (service `music-over-rcs`, Ohio (its id and address are in Render's dashboard, not in this repository), free plan; `docs/cloud.md` is the runbook). **Nothing here reaches it until you push and deploy**: push to `main`, then deploy by hand (Render dashboard → *Manual Deploy*, or the Render MCP's `trigger_deploy`); `autoDeploy` is off on purpose. A deploy restarts the bot (about a minute down; texts sent meanwhile are answered afterwards), and deploys queue behind each other, so do not stack them. Changing an environment variable in Render restarts it too, and `.env` here is only for local runs. The `PEOPLE` work is in the tree but has not been pushed or deployed. The live catalog is in the container, backed up to R2; `data/catalog.db` is only what a local `npm run …` uses. The Mac install (`deploy/mac`, launchd) is gone; do not bring it back next to the cloud host, because two bots in one chat both answer. **No more money** (the owner, 2026-10-20): everything stays on Render's free plan and the Cloudflare Workers plan already paid for; recommend only $0 changes (`docs/cloud.md`, "What it costs").
 
 ## Architecture
 
