@@ -2,7 +2,7 @@
 
 Since 2026-10-16 the bot runs here, not on a Mac: the Matrix homeserver, the Google Messages bridge and the bot are one Docker container on Render's free plan, with a Cloudflare Worker and an R2 bucket beside it. A Mac that loses its internet no longer matters. It costs nothing beyond a Cloudflare Workers plan you may already have. This page is the runbook: how it fits together, what it costs, how it was set up (and how to set it up again), what to do day to day, and what has been proven.
 
-**Status:** live. Render service `music-over-rcs` (Ohio, free plan; deploy branch `main`, deployed by hand), Worker `mors-edge`, bucket `mors-state`. The image is Synapse 1.143.0, the Google Messages bridge built from upstream `186284e` plus this repository's two patches (`deploy/cloud/patches/`: streaming files, and upstream's fix for the DM dedup that held the bridge's database lock; the second is in the repository but not deployed yet, see **What has been proven**), Litestream 0.5.17, Node 24 and Python 3.12 (the `ARG`s at the top of the `Dockerfile` are the single place these are written down). Songs are saved to OneDrive (step 5 is done): the first save in the logs is 2026-10-18 03:45 UTC. Other people ([below](#other-people-people)) are deployed with nobody added and not proven live: you add them from the console's People tab, or with `PEOPLE` in Render. What is deployed is whatever commit of `main` was last deployed by hand: the service's Events page in Render, or `git log origin/main`, tells which, and a change is not live until it is.
+**Status:** live. Render service `music-over-rcs` (Ohio, free plan; deploy branch `main`, deployed by hand), Worker `mors-edge`, bucket `mors-state`. The image is Synapse 1.143.0, the Google Messages bridge built from upstream `186284e` plus this repository's two patches (`deploy/cloud/patches/`: streaming files, and upstream's fix for the DM dedup that held the bridge's database lock; the second is in the repository but not deployed yet, see **What has been proven**), Litestream 0.5.17, Node 24 and Python 3.12 (the `ARG`s at the top of the `Dockerfile` are the single place these are written down). Songs are saved to OneDrive (step 5 is done): the first save in the logs is 2026-10-18 03:45 UTC. Other people ([below](#other-people-people)) are deployed and have been tried live with one person (2026-11-09): you add them from the console's People tab, or with `PEOPLE` in Render. What is deployed is whatever commit of `main` was last deployed by hand: the service's Events page in Render, or `git log origin/main`, tells which, and a change is not live until it is.
 
 ## How it fits together
 
@@ -160,7 +160,7 @@ The Mac install this replaced (`deploy/mac`, `docs/setup-mac.md`, launchd jobs) 
 
 ## Other people (`PEOPLE`)
 
-**Status: deployed with nobody added (2026-11-08), and not proven live.** All of this was written from the code and from tests that run two people against two mock homeservers; none of it has run on Render with a second person, against the real bridge, or with a second Google account. [What is unproven](#what-is-unproven-about-other-people) is listed below, and the [live check](#the-live-check) is the order to find out in. With nobody added and `PEOPLE` empty, which is how the service is deployed, the bot is yours alone and behaves exactly as it did before this was written.
+**Status: deployed 2026-11-08; the first person was added from the console and linked on 2026-11-09, and works end to end.** It was written from the code and from tests that run two people against two mock homeservers, then tried live: [what that proved, and what is still unwatched](#what-has-been-proven-live-about-other-people-and-what-has-not), are listed below, and the [live check](#the-live-check) is the order it was done in. With nobody added and `PEOPLE` empty and nothing saved, the bot is yours alone and behaves exactly as it did before this was written.
 
 Someone else, with their own phone and Google account, can use the bot from their own "message yourself" chat on the same host. Each person has a Matrix account of their own, a Google Messages login of their own, their own chat and their own searches, menus, follows, daily message and alerts; nothing they text reaches your chat or the other way. They share the song catalog, the host's memory and traffic (files are sent one at a time host-wide, the chats taking turns), and **your artist rules**: Zemer's list (no women) and your allows and blocks apply to every Zemer and YouTube Music song they search for and are sent (songs that come only from music-table.com are not held to that list, for them as for you), and the commands that change them (`allow`, `block`, `pending`) do nothing for them. Their songs are never saved to your OneDrive. The console, `/status`, the Connect page and the settings stay yours; nobody else gets a credential to any of them.
 
@@ -195,7 +195,7 @@ Someone else, with their own phone and Google account, can use the bot from thei
 Do these in order, and stop at the first one that fails. Nothing here has been run.
 
 1. **Before touching production:** deploy this version with `PEOPLE` unset and run `ADMIN_TOKEN=… npm run cloud:check -- --render https://music-over-rcs.onrender.com`. Text `search`, 👍 a song and `new`, and confirm you are unchanged. Write down Render's outbound-per-hour and memory graphs for a quiet hour: that is the baseline for step 3.
-2. Add `alice` on the People tab and wait for the restart (the tab does it). `/status` shows alice under `people` waiting for a login, and nothing else of yours has changed. **Watch Render's Events for this restart**: it is the first time the host exits by itself on the console's request, and Render must start it again (if it does not within a few minutes, use Manual Deploy; see [What is unproven](#what-is-unproven-about-other-people)).
+2. Add `alice` on the People tab and wait for the restart (the tab does it). `/status` shows alice under `people` waiting for a login, and nothing else of yours has changed. **Watch Render's Events for this restart**: it is the first time the host exits by itself on the console's request, and Render must start it again (if it does not within a few minutes, use Manual Deploy; see [What is unproven](#what-has-been-proven-live-about-other-people-and-what-has-not)).
 3. **Pair her phone, on a call or in the room.** Watch `/status`: her bridge reaches `CONNECTED` and `simNumber` is `true`. Then leave it idle for a quiet night and compare Render's outbound per hour and memory with the baseline. **This is the go/no-go for traffic**: if idle outbound rises by an amount that would put the month near 5 GB, unlink her and use the fall-back below.
 4. She texts herself once. Her room is found without your help and the hello arrives; the gate reaches `onboarded`.
 5. She sends `search`, 👍 a song (audio with cover and tags), opens an album (numbered songs, then the 📦 zip), `new`, `follow <artist>`. Confirm nothing appears in your chat and nothing of hers in your OneDrive.
@@ -230,21 +230,31 @@ In this order: (1) on their Connect page use **Take them off this host**: **Ask 
 - **Songs that come only from music-table.com are not held to Zemer's artist list**, for anyone. A blocked artist's songs already stored in the shared catalog can still appear in a menu and are refused at the send.
 - **Decisions that are yours:** the monthly figure per person; that they get no OneDrive archive (the code gives them none); Synapse message retention for their room (none is set: messages stay until deleted); who re-links them after a Google unpair (you, by hand; there is no way for them to do it).
 
-### What is unproven about other people
+### What has been proven live about other people, and what has not
 
-Nothing below has been tried; each is a place the plan could still fail.
+**Proven on Render, 2026-11-08 and 2026-11-09 (the first person, "ari": a different Google account and a different phone):**
 
-- That the bridge, at `186284e`, accepts `login google` from a second Matrix user holding only `user` permission (that `user` has login, that there is no cap on logins, and that the bridge bot joins a direct chat from a new user, which the Connect tab's window needs).
-- That the bridge's status for her token returns only her logins and a usable state, so her health is her own.
-- The marginal outbound traffic, memory, CPU and database writes of a second connected login on the free plan.
-- Whether Google tolerates two web pairings made from one datacenter address (it unpaired yours twice).
-- Whether a second phone reports its SIM number to the bridge, and how soon after linking (the gate's window), and whether a number that is reported matches the number of the self-chat.
-- Whether Synapse on a tenth of a CPU copes with two 25 s long polls plus the Connect page's short polls.
-- That a second user's first join (the 429 wait, the invite) behaves like yours.
-- The rebuild of the `follows` table, on a real Litestream restore on Render (it is tested here on files made by the old code, four processes at once).
-- That Render starts the container again after the host exits with code 1 on the console's request. The same is assumed of `onLost` and of Render's own restarts, and the restarts Render has forced so far were all seen to come back, but no exit of the host's own process has been seen in Render's Events. The first Add is the test; the page tells you, after six minutes, to look at Render.
-- That `SIGUSR2` reaches the host in the container (it does on the stand-in: `test/cloud-entrypoint.test.ts` runs the real entry point on stand-in programs and a bucket in memory) and that R2 gives `config/people.json` back with a strong ETag as it does `lease.json`.
-- Who a message typed on her phone is sent as in her room. The bot does not depend on it (the loop guard is the message marks), but nobody has looked.
+- The console's Add person works: the name is saved to `config/people.json`, the host stops in order, exits with code 1, **Render starts the container again** (its Events showed "Instance … restarted" within two seconds), the start reads the saved list (`people added in the console: ari`), makes her Matrix account and the bridge's permission line, and the owner's bot comes back as before.
+- The bridge accepts `login google` from a second Matrix user at `user` level, and a second Google login connects beside the owner's (`login_id` of her own account, `user_mxid=@ari`); the owner's link stayed connected.
+- Her phone reported its SIM number and the bot found her own chat by itself; her hello, a search menu, a 👍 and the song reached Google (`at Google` about 9 s, `media to Google: 2.3 MB`), taking its turn at the delivery gate.
+- The `follows` rebuild and the other migrations ran on a real Litestream restore at the first deploy, and the start was normal.
+- Synapse's login allowance and the bridge window's chats were the two real problems, both found and fixed (below).
+
+**Found by trying it, and what to do about it:**
+
+- The pasted request must be copied in a **fresh private window signed in to ONLY her Google account**: the request carries whichever Google account the window holds first, and the emoji goes to the phone of that account. With the owner's account in the window it linked the owner's account (and the emoji went to the owner's phone) three times.
+- A new person's Connect page asked for the chat with the bridge's bot from several requests at once and each made a chat, so the bridge answered her commands in none of the chats the page used (it answers unprefixed commands in only the one it keeps for the account). Her window now makes one chat and sends everything with the bridge's `!gm` prefix.
+- Synapse allows a burst of 5 password sign-ins for the whole address, one more every 5 minutes; the bot's first tries, before her account existed, used it up and she stayed signed out for 7 minutes. `rc_login` is raised in `provision.ts`.
+- Your own link dropped once at 23:33 UTC on 2026-11-08 ("SESSION_COOKIE_INVALID", then the unlinked problem) while her page was being tried, and came back when you linked it again on the Connect tab. Whether linking her caused that is not known (the same error happened on 2026-11-04 with nobody added).
+
+**Still unwatched** (each is a place the plan could still fail):
+
+- The marginal outbound traffic, memory, CPU and database writes of a second connected login over a quiet night and a few days on the free plan: this is the go/no-go for keeping more than one person (watch Render's outbound graph, the `memory:` lines and the 4,000 MB alert).
+- Whether Google keeps tolerating two web pairings made from one datacenter address (it unpaired yours twice before anyone was added).
+- Whether Synapse on a tenth of a CPU keeps up with two 25 s long polls plus the Connect page's short polls over days.
+- A recurring Synapse warning has been seen since both chats ran: `Denying new event … state_key=@gmessages_N.2 … 403: You are not invited to this room`. Messages flow, so it looks harmless, but nobody has looked at why the bridge's ghost for the chat tries to join without an invite.
+- Who a message typed on her phone is sent as in her room. The bot does not depend on it (the loop guard is the message marks).
+- Removing someone (`logout` from their window, then Remove on the People tab) has not been done live.
 
 ## Day to day
 
