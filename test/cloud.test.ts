@@ -507,6 +507,98 @@ describe('pairing through the bridge bot', () => {
   });
 });
 
+// 2026-11-08, "ari": a new person has no chat with the bridge's bot until their Connect page is first opened. The page asked for it from several
+// requests at once (it reads the bridge's answers every few seconds while the first, slow one is still making the chat), each made a chat of its
+// own, and the bridge answered commands without its prefix in only one of them, which was not the one the window used.
+describe('a window to the bridge bot for a person who has no chat with it yet', () => {
+  const BOT = '@gmessagesbot:localhost';
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const fake = (existing: string[] = [], failFirstCreate = false) => {
+    const seen = { created: 0, sent: [] as Array<{ room: string; body: string }> };
+    const matrix = {
+      async listRooms() {
+        await wait(25);
+        return existing.map((id) => ({ id, name: '', members: 2, heroes: [BOT], invited: false }));
+      },
+      async createDirectRoom() {
+        seen.created++;
+        await wait(60);
+        if (failFirstCreate && seen.created === 1) throw new Error('the homeserver is busy');
+        return `!chat${seen.created}:localhost`;
+      },
+      async pollEvents() {
+        return [];
+      },
+      async sendText(room: string, body: string) {
+        seen.sent.push({ room, body });
+        return `$event${seen.sent.length}`;
+      },
+      async redact() {},
+    } as unknown as MatrixClient;
+    return { matrix, seen };
+  };
+  const windowFor = (matrix: MatrixClient, extra: { commandPrefix?: string; log?: (line: string) => void } = {}) => new Pairing({ matrix, botId: BOT, userId: '@ari:localhost', ...extra });
+
+  test('several requests at the same moment make one chat with the bot, and all use it', async () => {
+    const { matrix, seen } = fake();
+    const p = windowFor(matrix);
+    await Promise.all([p.log(), p.log(), p.send('login google'), p.log(), p.send('help')]);
+    assert.equal(seen.created, 1, 'one chat, not one for each request');
+    assert.deepEqual([...new Set(seen.sent.map((one) => one.room))], ['!chat1:localhost']);
+    await p.send('later');
+    assert.equal(seen.created, 1);
+  });
+
+  test('a first try that fails does not stick: the next one asks again', async () => {
+    const { matrix, seen } = fake([], true);
+    const p = windowFor(matrix);
+    await assert.rejects(() => p.send('login google'), /busy/);
+    await p.send('login google');
+    assert.equal(seen.created, 2);
+    assert.equal(seen.sent.length, 1);
+  });
+
+  test('with the bridge\'s prefix everything is sent as a command, a pasted request too, and a message that has it is not doubled', async () => {
+    const { matrix, seen } = fake();
+    const p = windowFor(matrix, { commandPrefix: '!gm' });
+    await p.send('login google');
+    await p.send("curl 'https://messages.google.com/web/config' \\\n  -H 'cookie: SID=abc'");
+    await p.send('!gm logout');
+    assert.deepEqual(
+      seen.sent.map((one) => one.body),
+      ['!gm login google', "!gm curl 'https://messages.google.com/web/config' -H 'cookie: SID=abc'", '!gm logout'],
+    );
+  });
+
+  test('without a prefix (the owner\'s window) messages go exactly as typed', async () => {
+    const { matrix, seen } = fake();
+    await windowFor(matrix).send('login google');
+    assert.deepEqual(seen.sent.map((one) => one.body), ['login google']);
+  });
+
+  test('when there are several chats with the bot already it uses the first and says so', async () => {
+    const { matrix, seen } = fake(['!a:localhost', '!b:localhost']);
+    const lines: string[] = [];
+    const p = windowFor(matrix, { commandPrefix: '!gm', log: (line) => lines.push(line) });
+    await p.send('login google');
+    assert.equal(seen.created, 0);
+    assert.equal(seen.sent[0]?.room, '!a:localhost');
+    assert.ok(lines.some((line) => /2 chats with the bridge's bot/.test(line)), lines.join(' | '));
+  });
+
+  test('it says what it did in the log, naming only short commands and never what was pasted', async () => {
+    const { matrix } = fake();
+    const lines: string[] = [];
+    const p = windowFor(matrix, { log: (line) => lines.push(line) });
+    await p.send('login google');
+    await p.send("curl 'https://messages.google.com/web/config' -H 'cookie: SID=SECRETVALUE'");
+    const said = lines.join('\n');
+    assert.match(said, /sent "login google" to the bridge's bot in !chat1:localhost/);
+    assert.match(said, /sent \d+ characters to the bridge's bot/);
+    assert.ok(!said.includes('SECRETVALUE') && !said.includes('cookie'), said);
+  });
+});
+
 describe('pasted requests are taken out of the chat even across a restart', () => {
   let mock: MockMatrix;
   before(async () => {
@@ -639,7 +731,8 @@ describe('pasted requests are taken out of the chat even across a restart', () =
     await p.send(COOKIES);
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.equal(tries, 1);
-    assert.deepEqual(lines, ['could not delete the pasted request from the chat: Service unavailable']);
+    // The window now also logs that it sent something (its size only); the failure is still said once.
+    assert.deepEqual(lines.filter((line) => /could not delete/.test(line)), ['could not delete the pasted request from the chat: Service unavailable']);
   });
 
   test('a state that cannot be written is said, and the paste is still deleted on time', async () => {

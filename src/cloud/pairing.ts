@@ -4,6 +4,8 @@ import { groupPastedLines } from '../matrix/paste.ts';
 import type { PairLine } from './web.ts';
 
 const KEEP_LINES = 100;
+/** The bridge bot's command prefix: its greeting says "Use `!gm help` for help", and provision.ts leaves the example config's `command_prefix` as it is. */
+export const BRIDGE_COMMAND_PREFIX = '!gm';
 /** A pasted request carries Google session cookies, so it is taken back out of the chat shortly after the bridge has read it. */
 const REDACT_AFTER_MS = 60_000;
 const LONG_PASTE = 300;
@@ -47,6 +49,8 @@ export class Pairing {
   #botId: string;
   #userId: string;
   #room: string | undefined;
+  #opening: Promise<string> | undefined;
+  #prefix: string | undefined;
   #lines: PairLine[] = [];
   #polling: Promise<void> = Promise.resolve();
   #redactAfterMs: number;
@@ -63,8 +67,15 @@ export class Pairing {
     state?: { getState(key: string): string | undefined; setState(key: string, value: string): void };
     /** How long to wait before trying a failed redaction again (default a minute). */
     retryAfterMs?: number;
+    /**
+     * The bridge's command prefix (`!gm`), put in front of everything this window sends, so the bot answers in whichever of its chats with this
+     * account the window uses. The owner's window has always used the one chat the bridge keeps for commands and needs none; a person's, made
+     * the first time the page is opened, does.
+     */
+    commandPrefix?: string;
     log?: (line: string) => void;
   }) {
+    this.#prefix = options.commandPrefix?.trim() || undefined;
     this.#matrix = options.matrix;
     this.#botId = options.botId;
     this.#userId = options.userId;
@@ -117,13 +128,30 @@ export class Pairing {
     }
   }
 
-  async #open(): Promise<string> {
-    if (this.#room) return this.#room;
+  /**
+   * The chat with the bridge's bot, found or made once. The page asks for it from several requests at the same moment the first time (it
+   * reads the bridge's answers every few seconds while the first, slow request is still making the chat), and each used to make a chat of
+   * its own: a new person (the owner's chat has existed since the start) ended with several, and the bridge treats only one of them as
+   * the place to give commands without its prefix, so the one this window used might answer nothing (2026-11-08, "ari").
+   */
+  #open(): Promise<string> {
+    if (this.#room) return Promise.resolve(this.#room);
+    this.#opening ??= this.#openOnce().catch((err: unknown) => {
+      this.#opening = undefined;
+      throw err;
+    });
+    return this.#opening;
+  }
+
+  async #openOnce(): Promise<string> {
     const rooms = await this.#matrix.listRooms();
-    this.#room = rooms.find((room) => !room.invited && room.members <= 2 && room.heroes.includes(this.#botId))?.id ?? (await this.#matrix.createDirectRoom(this.#botId));
+    const chats = rooms.filter((room) => !room.invited && room.members <= 2 && room.heroes.includes(this.#botId));
+    const room = chats[0]?.id ?? (await this.#matrix.createDirectRoom(this.#botId));
+    if (chats.length > 1) this.#log(`there are ${chats.length} chats with the bridge's bot; using ${room} (commands carry the bridge's prefix, so any of them answers)`);
     // Reading from here on: what was said before is not shown.
-    await this.#matrix.pollEvents(this.#room);
-    return this.#room;
+    await this.#matrix.pollEvents(room);
+    this.#room = room;
+    return room;
   }
 
   async send(text: string): Promise<void> {
@@ -132,7 +160,12 @@ export class Pairing {
       yield* text.split('\n');
     }
     for await (const message of groupPastedLines(lines())) {
-      const id = await this.#matrix.sendText(room, message.text);
+      // The bridge's bot answers a message in any chat with it when it starts with its prefix, and without one only in the chat it keeps for
+      // the account's commands: with the prefix this works whichever chat this window ended up using.
+      const body = this.#prefix && !message.text.startsWith(`${this.#prefix} `) ? `${this.#prefix} ${message.text}` : message.text;
+      const id = await this.#matrix.sendText(room, body);
+      // A short command is named (it is one of the bridge's words); anything longer might be what was pasted, so only its size is said.
+      this.#log(message.lines === 1 && message.text.length <= 24 ? `sent "${message.text}" to the bridge's bot in ${room}` : `sent ${message.text.length} characters to the bridge's bot in ${room}`);
       if (id && (message.lines > 1 || message.text.length > LONG_PASTE)) {
         const entry: PendingRedaction = { user: this.#userId, room, event: id, due: Date.now() + this.#redactAfterMs };
         if (this.#state) this.#keep([...this.#waiting(), entry]);
@@ -146,10 +179,14 @@ export class Pairing {
     const room = await this.#open();
     // One read at a time: each moves the position the next starts from.
     this.#polling = this.#polling.then(async () => {
+      let heard = 0;
       for (const event of await this.#matrix.pollEvents(room)) {
         if (event.sender === this.#userId) continue;
         this.#lines.push({ at: new Date().toISOString(), text: event.body });
+        heard++;
       }
+      // Only that it answered, never what it said.
+      if (heard > 0) this.#log(`the bridge's bot said ${heard} thing${heard === 1 ? '' : 's'} in ${room}`);
       this.#lines = this.#lines.slice(-KEEP_LINES);
     });
     await this.#polling;

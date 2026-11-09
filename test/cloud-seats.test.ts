@@ -523,11 +523,12 @@ describe('the seats of the people on the cloud host', () => {
       made.owner.open(ownerMock.token, OWNER_USER, ownerMock.url);
       made.get('alice')!.open(aliceMock.token, ALICE_USER, aliceMock.url);
       await made.get('alice')!.session!.pairing.send('login google');
-      assert.deepEqual(bodies(aliceMock), ['login google']);
+      // A person's commands carry the bridge's prefix (so any chat with the bot answers); the owner's go as typed.
+      assert.deepEqual(bodies(aliceMock), ['!gm login google']);
       assert.deepEqual(bodies(ownerMock), [], 'the owner’s account said nothing');
       await made.owner.session!.pairing.send('help');
       assert.deepEqual(bodies(ownerMock), ['help']);
-      assert.deepEqual(bodies(aliceMock), ['login google']);
+      assert.deepEqual(bodies(aliceMock), ['!gm login google']);
     });
 
     test('what the bridge says of a person’s login is asked with their own token and account', async () => {

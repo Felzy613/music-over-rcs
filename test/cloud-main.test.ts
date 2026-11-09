@@ -262,12 +262,14 @@ describe('the cloud host’s entry (src/cloud-main.ts)', () => {
       assert.equal((await (await fetch(`http://127.0.0.1:${/web door open on port (\d+)/.exec(output.out)?.[1]}/admin/api/connect?person=mallory`, { headers: { authorization: `Bearer ${ADMIN}` } })).status), 404);
 
       assert.equal((await post('/admin/api/connect/start', { person: 'alice' })).status, 200);
-      await until(() => bodies(aliceMock).includes('login google'), 'alice’s window to say it');
-      assert.deepEqual(bodies(ownerMock).filter((text) => text === 'login google'), [], 'the owner’s account said nothing');
+      // A person's window puts the bridge's prefix in front (her chat with the bot is made when the page is first opened: src/cloud/pairing.ts).
+      await until(() => bodies(aliceMock).includes('!gm login google'), 'alice’s window to say it');
+      assert.deepEqual(bodies(ownerMock).filter((text) => text.endsWith('login google')), [], 'the owner’s account said nothing');
       assert.equal((await post('/pair/send', { text: 'help', person: 'alice' })).status, 200);
       assert.equal((await post('/pair/send', { text: 'login google' })).status, 200);
       await until(() => bodies(ownerMock).includes('login google'), 'the owner’s window to say it');
-      assert.equal(bodies(aliceMock).filter((text) => text === 'login google').length, 1, 'and not alice’s');
+      assert.equal(bodies(aliceMock).filter((text) => text.endsWith('login google')).length, 1, 'and not alice’s');
+      assert.ok(!bodies(ownerMock).some((text) => text.startsWith('!gm')), 'the owner’s window sends no prefix: it never needed one');
       assert.equal((await post('/pair/send', { text: 'x', person: 'mallory' })).status, 400);
       assert.deepEqual((await json('/pair/log?person=alice')).lines.map((line: { text: string }) => line.text), []);
 

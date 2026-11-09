@@ -4,7 +4,7 @@ import { DIGEST_STAGGER_MINUTES } from '../library/jobs.ts';
 import { MatrixClient, MatrixError } from '../matrix/client.ts';
 import { OWNER, scoped, tagLine, type Person } from '../people.ts';
 import { Onboarding, loginKind, type OnboardingReport } from './onboarding.ts';
-import { Pairing, chatNumber, ownChatRooms, selfChatRooms, simNumbers } from './pairing.ts';
+import { BRIDGE_COMMAND_PREFIX, Pairing, chatNumber, ownChatRooms, selfChatRooms, simNumbers } from './pairing.ts';
 import { RoomWatch } from './room.ts';
 
 // One seat for each person who uses the bot, the owner first: everything the cloud host knows about that person's Matrix account, their
@@ -88,7 +88,10 @@ export class Seat {
   open(token: string, userId: string, homeserver: string): SeatSession {
     const matrix = new MatrixClient({ token, homeserver });
     const botId = `@gmessagesbot:${userId.slice(userId.indexOf(':') + 1)}`;
-    this.session = { token, userId, matrix, pairing: new Pairing({ matrix, botId, userId, state: this.#deps.state, log: this.log }) };
+    // A person's chat with the bridge's bot is made the first time their Connect page is opened, and the bridge answers commands without its
+    // prefix only in the chat it keeps for the account: theirs carry the prefix (the owner's has always been that chat).
+    const commandPrefix = this.person.owner ? undefined : BRIDGE_COMMAND_PREFIX;
+    this.session = { token, userId, matrix, pairing: new Pairing({ matrix, botId, userId, state: this.#deps.state, log: this.log, ...(commandPrefix ? { commandPrefix } : {}) }) };
     return this.session;
   }
 
